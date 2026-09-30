@@ -1,0 +1,46 @@
+# CodeQL static analysis for Go.
+#
+# krm-foyer parses untrusted input from a browser (paths, query strings, callback
+# parameters and cookies) and forwards requests to a Kubernetes API server with a user's
+# credential. That is where taint tracking earns its runtime.
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Re-runs the current queries against unchanged code, which is how a newly published
+    # query finds an old bug that no push would have re-examined.
+    - cron: "40 4 * * 2"
+
+permissions: read-all
+
+jobs:
+  analyze:
+    name: analyze (go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      security-events: write
+      packages: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          languages: go
+          build-mode: autobuild
+          # security-extended rather than the default suite: a false positive costs a few
+          # minutes, and a missed flaw in an authentication proxy costs a credential.
+          queries: security-extended
+      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          category: /language:go

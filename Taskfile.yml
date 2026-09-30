@@ -1,0 +1,95 @@
+version: "3"
+
+# Everything in this repository is driven by `task`. `task` lists what there is;
+# `task verify` is the whole gate, and CI runs the same tasks.
+
+vars:
+  IMAGE: '{{.IMAGE | default "ghcr.io/configbutler/krm-foyer"}}'
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+
+tasks:
+  default:
+    desc: "List the available tasks."
+    cmds:
+      - task --list
+    silent: true
+
+  verify:
+    desc: "The whole gate, in the order CI runs it. If this passes, CI passes."
+    cmds:
+      # Sequential on purpose: the first failure is the one you want to read.
+      - task: tidy-check
+      - task: lint
+      - task: test
+      - task: image-smoke
+
+  test:
+    desc: "Go tests with the race detector."
+    cmds:
+      # -race stays on: a proxy that fans streams out to many browsers is where a
+      # data race turns into one user seeing another's data.
+      - go test -race ./...
+
+  lint:
+    desc: "Vet and lint the Go code, the workflows and the Dockerfiles."
+    deps: [lint-go, lint-actions, lint-dockerfiles]
+
+  lint-go:
+    cmds:
+      - go vet ./...
+      - golangci-lint run ./...
+
+  lint-actions:
+    desc: "actionlint: expressions, needs/runs-on, and shellcheck on every run: block."
+    cmds:
+      - actionlint
+
+  lint-dockerfiles:
+    cmds:
+      - hadolint Dockerfile .devcontainer/Dockerfile
+
+  fmt:
+    desc: "Format the Go code."
+    cmds:
+      - golangci-lint fmt ./...
+
+  tidy-check:
+    desc: "Fail if go.mod or go.sum is not tidy."
+    cmds:
+      - go mod tidy -diff
+
+  build:
+    desc: "Build the binary into bin/."
+    cmds:
+      - CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version={{.VERSION}}" -o bin/krm-foyer ./cmd/krm-foyer
+
+  run:
+    desc: "Run krm-foyer locally on :8080."
+    cmds:
+      - go run ./cmd/krm-foyer -listen :8080
+
+  image:
+    desc: "Build the container image (IMAGE and VERSION can be overridden)."
+    cmds:
+      - docker build --build-arg VERSION={{.VERSION}} -t {{.IMAGE}}:{{.VERSION}} .
+
+  image-smoke:
+    desc: "Start the image and check that it answers /healthz and the start page."
+    deps: [image]
+    vars:
+      # Probing from a container on a private network, not through a published port:
+      # in the devcontainer Docker runs beside us (docker-outside-of-docker), so a
+      # port published on the host's 127.0.0.1 is not reachable from here.
+      CURL: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+    cmds:
+      - |
+        set -euo pipefail
+        net="krm-foyer-smoke-$$"
+        docker network create "$net" >/dev/null
+        id="$(docker run -d --rm --network "$net" --name "$net" {{.IMAGE}}:{{.VERSION}})"
+        trap 'docker stop "$id" >/dev/null; docker network rm "$net" >/dev/null' EXIT
+        docker run --rm --network "$net" {{.CURL}} \
+          -fsS --retry 10 --retry-connrefused --retry-delay 1 "http://$net:8080/healthz"
+        docker run --rm --network "$net" {{.CURL}} -fsS "http://$net:8080/" | grep -q 'krm-foyer is running'
+        echo "image answers /healthz and serves the start page"

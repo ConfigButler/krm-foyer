@@ -1,0 +1,122 @@
+# The validation pipeline: everything needed to trust a commit, and nothing that publishes.
+#
+# It runs directly on pull requests, and release.yml calls it as a reusable workflow on every
+# push to main, so a release is only ever cut from a commit that passed this file. Checks are
+# `task` targets wherever that is practical, so a red job reproduces locally with the same
+# command. Permissions are read-only throughout, including on fork pull requests.
+name: ci
+
+on:
+  pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to validate; empty uses the event checkout
+        type: string
+        default: ""
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the previous run. A release run has no pull request
+# number, and github.run_id keeps its group unique so it can never be cancelled.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  hygiene:
+    name: workflows and Dockerfiles
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+
+      # Versions come from the devcontainer's ENV block, so CI and a developer's shell cannot
+      # lint with different rules and disagree about whether the tree is clean.
+      - name: install actionlint and hadolint (versions from .devcontainer/Dockerfile)
+        run: |
+          set -euo pipefail
+          actionlint_version="$(grep -oP 'ACTIONLINT_VERSION=\K[0-9.]+' .devcontainer/Dockerfile)"
+          hadolint_version="$(grep -oP 'HADOLINT_VERSION=\K[0-9.]+' .devcontainer/Dockerfile)"
+          echo "actionlint ${actionlint_version}, hadolint ${hadolint_version}"
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${actionlint_version}/actionlint_${actionlint_version}_linux_amd64.tar.gz" \
+            | tar -xzO actionlint > /tmp/actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+          sudo curl -fsSL -o /usr/local/bin/hadolint \
+            "https://github.com/hadolint/hadolint/releases/download/v${hadolint_version}/hadolint-Linux-x86_64"
+          sudo chmod +x /usr/local/bin/hadolint
+
+      # No path argument: actionlint discovers every workflow itself, so a new one is
+      # checked the day it lands.
+      - run: actionlint
+      - run: hadolint Dockerfile .devcontainer/Dockerfile
+
+  go:
+    name: go
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # Keyed on go.mod until the first dependency brings a go.sum.
+          cache-dependency-path: go.mod
+      - name: read the golangci-lint version from .devcontainer/Dockerfile
+        id: versions
+        run: echo "golangci-lint=$(grep -oP 'GOLANGCI_LINT_VERSION=\K\S+' .devcontainer/Dockerfile)" >> "$GITHUB_OUTPUT"
+      - name: go.mod and go.sum are tidy
+        run: go mod tidy -diff
+      - run: go vet ./...
+      # -race stays on: a proxy that fans streams out to many browsers is where a data race
+      # turns into one user seeing another's data.
+      - run: go test -race ./...
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ steps.versions.outputs.golangci-lint }}
+
+  image:
+    name: container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # The same task a developer runs: build the image, start it, and check that it answers.
+      # A Dockerfile that builds but produces a binary that cannot start fails here.
+      - run: task image-smoke
+
+  devcontainer:
+    name: devcontainer builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      # A devcontainer that no longer builds is found by the next contributor, on their
+      # first day. Build it here instead. Nothing is pushed.
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: .devcontainer/Dockerfile
+          target: dev
+          push: false
+          cache-from: type=gha,scope=devcontainer
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=devcontainer' || '' }}

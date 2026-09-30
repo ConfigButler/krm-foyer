@@ -1,0 +1,7 @@
+# The image build needs go.mod, go.sum, cmd/ and internal/. Everything else only
+# slows the build context down or busts the layer cache.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/

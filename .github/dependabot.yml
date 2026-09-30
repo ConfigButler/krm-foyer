@@ -1,0 +1,45 @@
+# Everything here is pinned: action SHAs, base image digests and the tool versions in
+# .devcontainer/Dockerfile's ENV block. Pinning without an update mechanism is just an old
+# dependency, so Dependabot keeps the pins moving. (The ENV-block tool versions are not
+# something Dependabot can see; bump those by hand.)
+#
+# Grouped, so a week of patch releases is one pull request. Major updates stay separate.
+# `chore(deps):` keeps routine bumps out of the changelog release-please writes.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      gomod:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  # The shipped image (/) and the devcontainer, so their FROM lines keep moving.
+  - package-ecosystem: docker
+    directories:
+      - /
+      - /.devcontainer
+    schedule:
+      interval: weekly
+    groups:
+      docker:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "chore(deps)"

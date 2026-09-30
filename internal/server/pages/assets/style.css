@@ -1,0 +1,58 @@
+:root {
+  color-scheme: light dark;
+  --fg: #1d2330;
+  --muted: #5b6475;
+  --bg: #fbfaf7;
+  --accent: #2f5fa7;
+  --code-bg: #eeece6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6e8ee;
+    --muted: #a0a8b8;
+    --bg: #15181f;
+    --accent: #8db4f0;
+    --code-bg: #232833;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.55 system-ui, sans-serif;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 3rem 1rem 1rem;
+}
+
+h1 {
+  margin-bottom: 0.25rem;
+}
+
+.lede {
+  margin-top: 0;
+  color: var(--muted);
+}
+
+a {
+  color: var(--accent);
+}
+
+code {
+  background: var(--code-bg);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+}
+
+footer {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 1rem;
+  color: var(--muted);
+  font-size: 0.875rem;
+}

@@ -1,0 +1,76 @@
+{
+  "name": "krm-foyer DevContainer",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "..",
+    "target": "dev"
+  },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2.5.9": {
+      "userUid": "automatic",
+      "userGid": "automatic",
+      "username": "vscode"
+    },
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1.10.0": {}
+  },
+  "runArgs": [
+    "--group-add=docker",
+    "--add-host=host.docker.internal:host-gateway"
+  ],
+  "forwardPorts": [8080],
+  "portsAttributes": {
+    "8080": {
+      "label": "krm-foyer",
+      "onAutoForward": "notify"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "go.useLanguageServer": true,
+        "go.gopath": "/go",
+        "go.lintTool": "golangci-lint",
+        "go.testExplorer.enable": true,
+        "gopls": {
+          "formatting.gofumpt": false
+        }
+      },
+      "extensions": [
+        "golang.go",
+        "task.vscode-task",
+        "redhat.vscode-yaml",
+        "ms-kubernetes-tools.vscode-kubernetes-tools",
+        "anthropic.claude-code",
+        "openai.chatgpt"
+      ]
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh '${containerWorkspaceFolder}'",
+  "postStartCommand": "bash .devcontainer/post-start.sh '${containerWorkspaceFolder}'",
+  "remoteUser": "vscode",
+  // Anything under /home/vscode that is NOT a named volume lives in the container's writable
+  // layer and is destroyed on rebuild, which editing this file triggers. Pin the things whose
+  // loss is confusing: the gh token, the kubeconfig, the Go caches and the agent logins.
+  //
+  // Claude keeps its credentials in ~/.claude.json, a file at the home root and not inside
+  // ~/.claude/, so post-create.sh symlinks it into persisted-home. Named volumes are created
+  // root-owned, which is why post-create.sh also chowns /home/vscode.
+  "mounts": [
+    "source=krm-foyer-gomodcache,target=/go/pkg/mod,type=volume",
+    "source=krm-foyer-gobuildcache,target=/home/vscode/.cache/go-build,type=volume",
+    "source=krm-foyer-dotkube,target=/home/vscode/.kube,type=volume",
+    "source=krm-foyer-ghconfig,target=/home/vscode/.config/gh,type=volume",
+    "source=krm-foyer-claudeconfig,target=/home/vscode/.claude,type=volume",
+    "source=krm-foyer-codexconfig,target=/home/vscode/.codex,type=volume",
+    "source=krm-foyer-persisted-home,target=/home/vscode/persisted-home,type=volume"
+  ],
+  "containerEnv": {
+    "HOST_PROJECT_PATH": "${localWorkspaceFolder}",
+    "PROJECT_PATH": "/workspaces/${localWorkspaceFolderBasename}",
+    "GIT_USER_NAME": "${localEnv:GIT_USER_NAME}",
+    "GIT_USER_EMAIL": "${localEnv:GIT_USER_EMAIL}"
+  }
+}

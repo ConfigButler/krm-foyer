@@ -1,0 +1,11 @@
+# Build output
+/bin/
+
+# Task's fingerprint cache
+.task/
+
+# Local-only environment overrides
+.env
+
+# Editor scratch
+*.local.*

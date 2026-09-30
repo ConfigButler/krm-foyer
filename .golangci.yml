@@ -1,0 +1,21 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - revive
+    - gosec
+    # An HTTP body left open leaks a connection per request; a proxy notices that first.
+    - bodyclose
+    # Requests built without a context cannot be cancelled when the browser goes away.
+    - noctx
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
