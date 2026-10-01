@@ -1,0 +1,51 @@
+# Runs a command inside the CI image: the `ci` stage of .devcontainer/Dockerfile, which the
+# ci-container job builds and hands over as an artifact. Every tool a check uses comes from
+# that image, at the versions in its ENV block, so a job here runs the same binaries as a
+# developer's devcontainer, and nothing is installed on the runner itself.
+#
+# The calling job checks out the repository first; it is mounted at the same path as in
+# the devcontainer.
+name: in-ci-container
+description: Load the CI image built by the ci-container job and run a command inside it
+
+inputs:
+  run:
+    description: Bash command to run in the repository root
+    required: true
+  docker:
+    description: >-
+      "true" to share the runner's Docker daemon, for tasks that build images or start
+      k3d. The container then reaches Docker networks the same way the devcontainer does.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: download the CI image
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: ci-image
+        path: ${{ runner.temp }}
+
+    - name: load the CI image
+      shell: bash
+      # Removed after loading: the tarball would otherwise hold a gigabyte of runner disk
+      # for the whole job.
+      run: docker load -i "$RUNNER_TEMP/ci-image.tar" && rm -f "$RUNNER_TEMP/ci-image.tar"
+
+    - name: run in the CI image
+      shell: bash
+      env:
+        RUN: ${{ inputs.run }}
+        SHARE_DOCKER: ${{ inputs.docker }}
+      run: |
+        set -euo pipefail
+        args=(--rm -v "$GITHUB_WORKSPACE:/workspaces/krm-foyer" -w /workspaces/krm-foyer -e RUN)
+        if [ "$SHARE_DOCKER" = "true" ]; then
+          args+=(-v /var/run/docker.sock:/var/run/docker.sock)
+        fi
+        # safe.directory: the checkout belongs to the runner's user, the container runs as
+        # root, and git refuses to read a repository owned by someone else. The Taskfile's
+        # version comes from `git describe`.
+        docker run "${args[@]}" krm-foyer-ci:local \
+          bash -lc 'git config --global --add safe.directory "$PWD" && eval "$RUN"'

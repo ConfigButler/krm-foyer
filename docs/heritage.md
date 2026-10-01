@@ -118,11 +118,13 @@ get past the boundary.
 - [x] `go test -race` on every change
 - [x] Image smoke test on a private Docker network
 - [x] Actions pinned by SHA and tool versions in the devcontainer's ENV block
+- [x] CI runs every check inside the devcontainer's `ci` stage, as gitops-reverser does,
+      so nothing is installed on the runner
 - [x] release-please with conventional commits, and build provenance for the image
 - [x] **e2e fixture on k3d**, as in gitops-reverser: pinned k3s, Dex as the issuer, the API
       server trusting it through an `AuthenticationConfiguration`, and an audit log as
       witness. A Ginkgo suite under `test/e2e/` drives it. See [testing](testing.md)
-- [ ] The e2e job green in CI (the job exists; it has not run on GitHub yet)
+- [x] The e2e job green in CI
 - [ ] krm-foyer deployed into the e2e fixture (image imported with `k3d image import`),
       with the pending `foyer` specs made real
 - [ ] **Browser e2e** with Playwright: log in, read, edit, get refused with 403, hit a 409,

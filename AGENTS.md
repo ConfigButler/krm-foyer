@@ -9,6 +9,9 @@
   account fallback) need tests that try to get past them, not only tests of the happy path.
 - Pin new GitHub Actions by full commit SHA with the version in a comment, and new base
   images by digest. Tool versions live in the ENV block of `.devcontainer/Dockerfile`.
+- CI runs every check inside the `ci` stage of `.devcontainer/Dockerfile`, through
+  `.github/actions/in-ci-container`. A tool a check needs goes into that stage, never into
+  a workflow step that installs it on the runner.
 - In the devcontainer, Docker runs beside the container (docker-outside-of-docker). A port
   published with `docker run -p` is on the host, not reachable at `localhost` from here;
   use a Docker network, as `task image-smoke` does.
