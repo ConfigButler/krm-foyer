@@ -36,9 +36,8 @@ var _ = Describe("krm-foyer", Label("foyer"), func() {
 	Context("does not invent authorization", func() {
 		PIt("returns the API server's own answer for allowed, forbidden, missing, conflicting and invalid requests")
 		PIt("follows a RoleBinding change on the next request, with no restart and no new login")
-		PIt("exposes nothing with an empty allowlist, even to a user RBAC allows everything")
-		PIt("only narrows RBAC: an allowlisted route still answers 403 to a user without a grant")
-		PIt("treats watch=true on a collection as watch, not list")
+		PIt("passes a watch through exactly as the API server answers it, for a user who may list but not watch")
+		PIt("rejects a non-canonical path instead of forwarding it")
 	})
 
 	Context("keeps the credential on the server", func() {

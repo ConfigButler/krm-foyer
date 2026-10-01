@@ -5,8 +5,8 @@
   them is a bug; fix the one that is wrong in the same change.
 - Commit messages are conventional commits, and the prefix is load-bearing: release-please
   cuts versions from it (`fix:` patch, `feat:` minor, `feat!:` breaking).
-- Security boundaries (tokens never reach the browser, default-deny allowlist, no service
-  account fallback) need tests that try to get past them, not only tests of the happy path.
+- Security boundaries (tokens never reach the browser, every access decision left to the
+  API server, no service account fallback) need tests that try to get past them, not only tests of the happy path.
 - Pin new GitHub Actions by full commit SHA with the version in a comment, and new base
   images by digest. Tool versions live in the ENV block of `.devcontainer/Dockerfile`.
 - CI runs every check inside the `ci` stage of `.devcontainer/Dockerfile` (see

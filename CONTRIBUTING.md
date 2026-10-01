@@ -17,7 +17,8 @@ task verify   # the whole gate, in CI's order; if this passes, CI passes
 
 - The service contract is [docs/design.md](docs/design.md). A change to a route's behavior
   changes that document in the same pull request.
-- Default deny. An empty configuration exposes no Kubernetes API and no stream scope.
+- Kubernetes decides access. krm-foyer adds no access rules of its own; see
+  [docs/application-scope.md](docs/application-scope.md) before proposing one.
 - The browser never receives a bearer token, and the service never falls back to its own
   service account for a user's request.
 - Preserve Kubernetes semantics: status codes, `Status` errors, patch types and

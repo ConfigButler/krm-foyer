@@ -8,19 +8,35 @@ records the result; this document records the reasons.
 
 ## Decision (2026-10-01): both TLS models
 
-krm-foyer supports two ways of being deployed, and treats them the same way for security:
+krm-foyer supports two ways of being deployed. They are **not** equally safe:
 
-| Model | How | When |
-| --- | --- | --- |
-| **krm-foyer terminates TLS** | Certificate and key are mounted files, for example from cert-manager. krm-foyer reloads them when they change, so rotation needs no restart | The default. Nothing between the browser and krm-foyer can read a session cookie, and HTTP/2 reaches the browser |
-| **Behind an ingress** | krm-foyer serves plain HTTP inside the cluster; the ingress or gateway terminates TLS | An organization that routes everything through one ingress, or a team that already manages certificates there |
+| Model | How | When | What it assumes |
+| --- | --- | --- | --- |
+| **krm-foyer terminates TLS** | Certificate and key are mounted files, for example from cert-manager. krm-foyer reloads them when they change, so rotation needs no restart | The default | Nothing beyond the usual: no hop carries a session cookie in plain text |
+| **Behind an ingress** | The ingress or gateway terminates the browser's TLS and forwards to krm-foyer | An organization that routes everything through one ingress, or a team that already manages certificates there | The ingress is trusted, and the hop behind it is protected (see below) |
 
-What keeps the two models equally safe is that **krm-foyer never works out its own
-public address from the request.** It is configured with its public URL. That URL is the
+Behind an ingress, every request on the hop to krm-foyer carries the session cookie, and
+the [session ID is a bearer credential](design.md#login-and-sessions). `Secure` only
+protects the browser's own connection; it says nothing about the hops after it. So that
+hop is one of two things:
+
+- **Re-encrypted and verified.** The ingress connects to krm-foyer over TLS and checks
+  its certificate against a CA it is configured with. This is the choice wherever the
+  cluster network is shared with workloads you do not fully trust.
+- **Plain HTTP on a network where only the ingress can reach krm-foyer.** A
+  NetworkPolicy admits the ingress's pods to krm-foyer's port and nothing else, and the
+  cluster network is not observable by other tenants. Anything that can read that hop
+  can take a session. Operators choosing this accept that assumption explicitly; the
+  chart's default is the policy, not an open port.
+
+What both models do share is that **krm-foyer never works out its own public address
+from the request.** It is configured with its public URL. That URL is the
 OIDC redirect URI, the origin that CSRF and same-origin checks compare against, and the
-base for return paths. `Host` and `X-Forwarded-*` headers do not change any of those.
-Forwarded client addresses are used only for logging and rate limiting, and only when
-they come from proxy addresses the operator configured.
+base for return paths. `Host` and `X-Forwarded-*` headers do not change any of those, so
+a spoofed header cannot poison a redirect or the CSRF origin. That protects against
+header tricks; it does nothing for a cookie read off an unencrypted hop. Forwarded client
+addresses are used only for logging and rate limiting, and only when they come from proxy
+addresses the operator configured.
 
 Session cookies are always `Secure`, in both models. Behind an ingress the browser still
 sees HTTPS, and browsers accept `Secure` cookies from `http://localhost`, so local
@@ -103,13 +119,13 @@ acceptable. The difference is which program does what:
 
 - **In forward-auth, the ingress forwards to the API server.** krm-foyer checks the path
   the ingress *reports*, and the API server receives the path the ingress *sends*. If the
-  two differ, a request gets past the allowlist, and nothing in krm-foyer can see that it
-  happened.
+  two differ, the request that runs is not the request krm-foyer checked, and nothing in
+  krm-foyer can see that it happened.
 - **In path routing, the ingress only picks a service.** krm-foyer checks the path it
   receives and sends that same path on. If the ingress parses a path differently,
   the request reaches the wrong service: a krm-foyer path lands at the frontend, or an
   application path lands at krm-foyer and gets a 404. That is a broken page, not access.
-  The ingress never talks to the API server, so nothing it does can skip the allowlist.
+  The ingress never talks to the API server, so nothing it does can skip a check.
 
 The rule is: **the code that checks a request is the code that forwards it.** Path routing
 keeps that rule and forward-auth breaks it, so the parser argument still applies. It
@@ -145,9 +161,10 @@ everything on it **one trust boundary**:
   Kubernetes access. Anything else belongs on its own host name: the session cookie is
   host-only, so it never reaches a subdomain.
 - **The session cookie reaches every service on the host.** The `__Host-` prefix requires
-  `Path=/`, so the browser sends the cookie with every request. It is an opaque ID and
-  useless without krm-foyer. But a service that logs `Cookie` headers logs session IDs, and
-  co-hosted services must not do that.
+  `Path=/`, so the browser sends the cookie with every request. The ID is opaque, but it
+  is a bearer credential: anyone who holds it can call krm-foyer as the user, from
+  anywhere, until the session ends. A co-hosted service that logs `Cookie` headers hands
+  sessions to whoever reads those logs. Co-hosted services must not log or keep it.
 - **The prefixes are fixed.** An application that already uses `/auth` has to move it.
   Make them configurable when an adopter needs it, not before.
 
@@ -213,7 +230,7 @@ protects the data is the API server checking the user's token on every `/k8s` an
 `/stream` request. A missing or misconfigured gate only shows a page to a signed-out
 browser, whose API calls then get 401. That is why the gate does not break
 the [one-parser rule](#why-routing-by-path-is-safe-when-forward-auth-is-not): it grants
-nothing, so there is no allowlist decision for two parsers to disagree on.
+nothing, so there is no decision for two parsers to disagree on.
 
 It does not remove all frontend code either. A session can end while a page is open: the
 idle timeout runs out, or a refresh fails. Then `/k8s` answers 401 and the application
@@ -233,7 +250,7 @@ different consequences, so this section takes them one at a time.
 ### A. The ingress asks krm-foyer, then sends `/k8s` traffic to the API server itself
 
 The ingress sends each request to an auth endpoint on krm-foyer. krm-foyer checks the
-session and the allowlist and answers 200 with the user's token in a response header.
+session and answers 200 with the user's token in a response header.
 The ingress then forwards the request to the API server with that token.
 
 **Do not build this.** It splits the boundary that krm-foyer exists to keep in one place:
@@ -241,8 +258,9 @@ The ingress then forwards the request to the API server with that token.
 - **The check and the request are parsed by two different programs.** krm-foyer checks
   the path the ingress *reports*; the API server receives the path the ingress
   *forwards*. Repeated slashes, `%2F` and `..` are handled differently by nginx, Traefik,
-  Envoy and Go. Any such difference is an allowlist bypass, and it sits in ingress
-  configuration that krm-foyer cannot test. [Access boundaries](design.md#access-boundaries)
+  Envoy and Go. Today that only undermines path hygiene; with an
+  [application scope](application-scope.md) it would be a bypass, and it would sit in
+  ingress configuration that krm-foyer cannot test. [Access](design.md#access)
   requires forwarding exactly the path that was checked, and that only works when one
   program does both.
 - **The token leaves krm-foyer.** It travels in a response header to the ingress, where
@@ -263,7 +281,7 @@ The ingress then forwards the request to the API server with that token.
 
 An auth proxy such as oauth2-proxy logs the user in, keeps the session and adds
 `Authorization: Bearer <id token>` to every request. krm-foyer has no login of its own.
-It applies the allowlist and proxies with the token it received.
+It proxies with the token it received.
 
 This one is a reasonable design. **It does not break the central claim.** The token is
 the user's own, the API server checks it, and nobody impersonates anyone. Organizations
@@ -285,14 +303,13 @@ with a standard SSO proxy will ask for it. The costs are real, though:
   right.
 - **Twice the authentication setups to test,** before there is a first adopter. Voter's
   adoption review pointed out that no second consuming application exists yet.
-- **It hollows the product out.** An auth proxy in front of a plain allowlisting proxy is
+- **It hollows the product out.** An auth proxy in front of a plain proxy is
   roughly what teams build today. Done properly, login is where most of krm-foyer's value
   is.
 
 So: **not now, but keep it possible.** The code takes the user's credential from exactly
 one place, the session, through one small interface. A later "external login" mode would
-add a second source behind that interface, without touching the proxy, the allowlist or
-streams.
+add a second source behind that interface, without touching the proxy or streams.
 
 Revisit this when an adopter already has an auth proxy they cannot give up. That mode
 would be:
@@ -324,8 +341,8 @@ question.
 
 ## Is this too opinionated?
 
-The other direction is the risk. krm-foyer's opinion is that **login, the allowlist and
-the proxy are one unit of trust**: the code that checks a request is the code that sends
+The other direction is the risk. krm-foyer's opinion is that **login and the proxy are
+one unit of trust**: the code that checks a request is the code that sends
 it, with a credential it has kept itself. That is what keeps the service small enough to
 test completely, and it is what the e2e suite can prove. Supporting every combination of ingress and
 auth proxy would make krm-foyer less opinionated, much larger, and impossible to test

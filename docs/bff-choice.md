@@ -25,7 +25,7 @@ and an anonymous quiz result screen have different contracts even if they share 
 
 | Option | Contract and ownership | Best reason to choose it | Main cost |
 | --- | --- | --- | --- |
-| Universal BFF | krm-foyer owns login and allowlisted native API/stream transport; Kubernetes extensions enforce domain invariants | Several applications need the same resource access and users can safely exercise the exposed Kubernetes permissions | Frontends absorb Kubernetes semantics; admission/controllers may become the domain backend |
+| Universal BFF | krm-foyer owns login and native API/stream transport; Kubernetes extensions enforce domain invariants | Several applications need the same resource access and users can safely exercise all their Kubernetes permissions from the browser | Frontends absorb Kubernetes semantics; admission/controllers may become the domain backend |
 | Domain-specific BFF | Application handlers express actions, validate inputs and return suitable views; responses can still be Kubernetes-shaped | Workflows, privacy and error handling differ materially from native CRUD | Per-application handlers and integration tests; shared infrastructure can be duplicated |
 | Hybrid | Generic access for approved resources; domain endpoints for commands and restricted views | Resource editing and business workflows coexist | Two access paths need an explicit policy boundary, identity contract and operational ownership |
 
@@ -73,7 +73,7 @@ provides a place for domain expertise; it does not supply that expertise automat
 | Implement admission, canonical keys, arbitration and retry-safe reconciliation | Domain operator developers |
 | Install policies/controllers, maintain availability, audit grants and manage upgrades | Platform team, with domain-team support |
 | Explain pending, rejected, failed and completed outcomes | Frontend team using the domain contract |
-| Login and allowlisted native API/stream transport | krm-foyer maintainers |
+| Login and native API/stream transport | krm-foyer maintainers |
 
 The domain operator implements the guarantees assigned to it. They must be
 implemented by the right mechanism, not handed to an asynchronous reconciliation loop
@@ -88,7 +88,7 @@ Kubernetes-shaped objects. Count all maintained components when evaluating savin
 including session storage, deployment, policies, controllers and tests.
 
 Include the cost of [session storage](design.md#login-and-sessions) and complete the
-[exposure review](design.md#access-boundaries) before enabling routes. Those service
+[grant review](design.md#access) before deploying. Those service
 requirements apply regardless of which domain model is chosen.
 
 ## The constraints that decide most cases
@@ -135,7 +135,7 @@ These are starting recommendations under the stated assumptions, not built-in fe
 | Customer reporting with private records and flexible queries | Domain query API, possibly beside generic resource access | A small, predefined aggregate resource could serve the required views safely |
 | Payments involving external providers | Domain service or operator with provider-supported idempotency | KRM can expose durable intent/status, but cannot itself guarantee a single external charge |
 
-The [workspace walkthrough](design.md#example-requesting-a-workspace) follows a suitable
+The [workspace walkthrough](vision.md#what-it-takes-from-the-domain) follows a suitable
 KRM case end to end. The quiz below examines a harder case: identity-bound uniqueness and
 private results. Its mechanisms also apply to applications, registrations and reservations.
 
@@ -304,7 +304,7 @@ guarantees lack an implementation and owner, even if its transport is simpler.
 | Decision | What to record | Evidence |
 | --- | --- | --- |
 | Domain contract | Existing resource API, deliberately designed KRM domain, domain HTTP API or a combination | Resource/command definitions, lifecycle and compatibility policy |
-| Access scope | Exact raw API, stream and domain routes | Effective grants, exposure policy and bypass tests |
+| Access scope | Exact raw API, stream and domain routes | Effective grants for the application's users, and bypass tests |
 | Uniqueness | Stored-object, accepted-outcome or external-effect guarantee; identity scope and retention | Concurrent requests, forged identities, deletion/recreation and crash-recovery tests |
 | Read privacy | Who can read raw records, status and aggregates | Read grants, disclosure tests and migration dependencies |
 | Processing | Admission rules, controller decisions, retry behavior and partial-success handling | Failure tests and user-visible outcomes |
