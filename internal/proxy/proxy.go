@@ -24,7 +24,9 @@ import (
 // other source, no default and no service account.
 type Credentials interface {
 	// Token returns the user's bearer token, ErrNoCredential when the request has no
-	// signed-in user, or another error when that cannot be established.
+	// signed-in user, an *Interruption when the session refuses the request (a
+	// mutation without CSRF proof, say), or another error when none of that can be
+	// established.
 	Token(r *http.Request) (string, error)
 }
 
@@ -135,6 +137,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token, err := p.credentials.Token(r)
+	var sessionRefused *Interruption
 	switch {
 	case errors.Is(err, ErrNoCredential) || err == nil && token == "":
 		// An empty token would make the request anonymous. Never send one.
@@ -142,6 +145,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Status: http.StatusUnauthorized, Reason: "Unauthorized",
 			Message: "not signed in",
 		})
+		return
+	case errors.As(err, &sessionRefused):
+		p.interrupt(w, r, sessionRefused)
 		return
 	case err != nil:
 		p.logger.Error("credential lookup failed", "err", err)

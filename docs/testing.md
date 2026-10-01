@@ -76,7 +76,17 @@ bugs are here, where they are cheap to find:
   single content type that a browser cannot read as anything but an allowed one. The
   property is written independently of the check, so it can catch the check's own
   blind spots, such as a repeated `Content-Type` field.
-- **Sessions**: rotation at login, idle and absolute expiry, CSRF, and logout.
+- **Sessions** ([internal/session](../internal/session)): rotation at login (a planted
+  ID is never adopted), idle, absolute and token expiry, logout winning over a request
+  that is recording activity, and a store failure never read as "no session". Expiry
+  runs against a store that never expires anything as well, so the session code decides
+  on its own. Every way of presenting other than exactly one well-formed cookie is no
+  session.
+- **CSRF and same origin** are fuzzed with the rule stated from outside: a request is let
+  through exactly when it is a `GET` or `HEAD`, or carries one proof field equal to the
+  session's token and one `Origin` equal to the configured origin (or, with no `Origin`,
+  one `Sec-Fetch-Site: same-origin`). Repeated fields, which `Header.Get` would read only
+  the first of, are part of the input.
 
 ### e2e tests
 

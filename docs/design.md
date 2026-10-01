@@ -173,7 +173,7 @@ answer, it says so in a form the requester can read:
 | Session store unavailable | 503 | `Status` | A page saying so, with no retry loop |
 | Non-canonical path | 400 | `Status` naming the [path rule](#access) | A page saying so |
 | Path under `/k8s` that is not an [API route](#api-contract) | 404 | `Status`, reason `NotFound` | A page saying so |
-| Missing CSRF proof or cross-origin request | 403 | `Status` with a reason that is not RBAC's | A page saying so |
+| Missing CSRF proof or cross-origin request | 403 | `Status` with reason `CSRFProofRequired` or `CrossOriginRequest`, never RBAC's `Forbidden` | A page saying so |
 | Unsupported protocol or subresource | 501 | `Status` naming what is unsupported | A page saying so |
 | A [bound](#access) reached | 429, or 502 when a response exceeds its size bound | `Status` naming the bound, with `Retry-After` where waiting helps | A page saying so |
 | API server unreachable | 502 | `Status` | A page saying so |
@@ -279,6 +279,28 @@ service that sees the `Cookie` header, or an unencrypted proxy hop. So krm-foyer
 like a token: it never logs it or puts it in a URL or error page, and the session store
 keys sessions by a hash of the ID, so reading the store does not yield usable IDs.
 
+### Sessions
+
+- **The cookie** is `__Host-krm-foyer-session`: `Secure`, `HttpOnly`, `Path=/`, no
+  `Domain` (the `__Host-` prefix makes browsers insist on all three, so no other host can
+  set it) and `SameSite=Lax`. Lax rather than Strict, because the browser arrives back from
+  the issuer by a cross-site navigation, and a link to a `/k8s` URL should open signed in;
+  every request that changes state needs CSRF proof regardless.
+- **The ID** is 32 random bytes in unpadded base64url, with exactly one spelling. The
+  store keys a session by the SHA-256 of those bytes. A request with more than one
+  session cookie has no session: choosing between them would be a guess.
+- **Login rotates the ID.** A new ID is issued at every login, and any session named by a
+  cookie the browser already held is ended, so an ID planted before login never becomes
+  a signed-in session.
+- **A session ends** at the first of: its idle timeout since the last request that used
+  it, its absolute timeout since login, and the expiry of its ID token. There is no
+  refresh yet, so the token's expiry is a hard end; the cookie's `Max-Age` is the time to
+  the earlier of the last two. An expired session is deleted when it is next presented,
+  whatever the store's own expiry does. A refused request does not count as use.
+- **The store is in memory**, so this release runs one replica, and a restart signs
+  everyone out. Shared storage, and refresh with it, are the next step on the
+  [roadmap](roadmap.md#order-of-work).
+
 An encrypted HttpOnly cookie can also keep tokens unreadable by JavaScript; the reason
 for choosing opaque sessions is revocation and lifecycle control. Clearing a browser cookie
 alone does not invalidate a copied stateless session. The BFF pattern is described in [OAuth 2.0 for Browser-Based Applications](https://www.rfc-editor.org/rfc/rfc10017.html).
@@ -297,7 +319,20 @@ or an explicitly designed preservation flow. A 403 represents permission denial,
 loop. Bound refresh attempts and report persistent issuer/cluster configuration errors.
 
 Require CSRF proof and same-origin checks for mutations, logout and, once supported,
-every request through a proxy subresource. Strip browser-supplied
+every request through a proxy subresource. A mutation is any method but `GET` and `HEAD`.
+It needs both:
+
+- **CSRF proof:** exactly one `X-CSRF-Token` header field, equal to the session's CSRF
+  token, which `/auth/session` returns to pages on the origin. A page on another site
+  cannot read it.
+- **The same origin:** exactly one `Origin` field, equal to the configured public origin;
+  or, with no `Origin` at all, exactly one `Sec-Fetch-Site: same-origin`. When `Origin`
+  is present it decides. Page scripts can set neither header.
+
+A repeated field is a refusal, never a choice between its values. Either refusal is a
+403 [interruption](#interruptions) whose reason (`CSRFProofRequired` or
+`CrossOriginRequest`) is not RBAC's `Forbidden`, and the request never reaches the API
+server. Strip browser-supplied
 Authorization, impersonation and untrusted forwarding headers; never forward the session
 cookie to Kubernetes. Pin upstream destinations, verify TLS, bound request/stream resources
 and avoid credential/body logging. HttpOnly does not prevent malicious same-origin JavaScript

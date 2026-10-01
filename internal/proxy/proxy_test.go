@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -275,6 +276,8 @@ func testSendsOnlyTheUsersToken(t *testing.T, http2 bool) {
 
 // Without a usable credential the request never reaches the API server: no
 // anonymous request, and no other identity in its place.
+var csrfRefusal = &Interruption{Status: http.StatusForbidden, Reason: "CSRFProofRequired", Message: "no CSRF proof"}
+
 func TestNoCredentialNeverReachesTheAPIServer(t *testing.T) {
 	for name, tc := range map[string]struct {
 		creds Credentials
@@ -286,6 +289,12 @@ func TestNoCredentialNeverReachesTheAPIServer(t *testing.T) {
 		"store unavailable":    {credentials{err: errors.New("redis: connection refused")}, http.StatusServiceUnavailable},
 		"token and an error":   {credentials{token: userToken, err: errors.New("redis: timeout")}, http.StatusServiceUnavailable},
 		"token and no session": {credentials{token: userToken, err: ErrNoCredential}, http.StatusUnauthorized},
+		// The session refuses the request itself, for example a mutation without CSRF
+		// proof. That answer is given as it is, even alongside a token.
+		"refused by the session":  {credentials{err: csrfRefusal}, http.StatusForbidden},
+		"wrapped session refusal": {credentials{err: fmt.Errorf("checking the request: %w", csrfRefusal)}, http.StatusForbidden},
+		"token and a refusal":     {credentials{token: userToken, err: csrfRefusal}, http.StatusForbidden},
+		"refusal and no session":  {credentials{err: errors.Join(ErrNoCredential, csrfRefusal)}, http.StatusUnauthorized},
 	} {
 		t.Run(name, func(t *testing.T) {
 			api := newAPIServer(t, nil)
