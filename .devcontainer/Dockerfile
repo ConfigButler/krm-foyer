@@ -7,7 +7,7 @@
 #
 # Stage 1 (ci): everything `task verify` needs. CI runs every check inside this stage
 #                (see .github/workflows/ci.yml), so it is the one place tools come from.
-# Stage 2 (dev): editor tooling, Node (for agent CLIs and future browser tests)
+# Stage 2 (dev): editor tooling, Node (for agent CLIs)
 #                and the non-root `vscode` user.
 
 # Base pinned by digest: the same image krm-stream and the Dockerfile at the repo root build on.
@@ -96,8 +96,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # NODE_MAJOR -> the current Node LTS line. Not needed to build krm-foyer (the service has
-#   no JavaScript build, see docs/frontend.md); it is here for the Codex CLI and, later,
-#   the browser tests of examples/.
+#   no JavaScript build, see docs/frontend.md); it is here for the Codex CLI. The browser
+#   tests run Chromium in a container, driven from Go, so they need no Node either.
 ENV DLV_VERSION=v1.27.2 \
     GOPLS_VERSION=v0.23.0 \
     GOIMPORTS_VERSION=v0.50.0 \

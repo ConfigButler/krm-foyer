@@ -45,7 +45,7 @@ again after the whole suite. It looks for every token the suite obtained, exactl
 anything shaped like a JWT. The second covers the tokens krm-foyer holds and never showed
 the suite: the ID tokens it got by redeeming codes, and its own service-account token.
 krm-foyer holds no refresh token yet, since it asks for no `offline_access`. When refresh
-arrives (roadmap step 2b), its session store moves out of process, and the scan also reads
+arrives (roadmap step 5), its session store moves out of process, and the scan also reads
 it as admin for the opaque refresh tokens no pattern can find.
 
 A session ID has exactly one place it belongs: the `Set-Cookie` header that issues it,
@@ -59,9 +59,9 @@ response, in any other response, or in a log line still fails the run.
 | --- | --- | --- |
 | Unit | `task test` (`go test -race ./...`) | Path checking, header handling, upstream response rules, session and cookie rules, page rendering. Fast and exhaustive |
 | e2e | `task test-e2e` | A real API server trusting a real Dex, and krm-foyer deployed in the cluster in front of it. The fixture's own specs validate the fixture; the `foyer` specs prove the claims above |
-| Browser | Not yet | Playwright, once the example frontend exists. Only for what a Go HTTP client cannot show |
+| Browser | `task test-e2e` (label `browser`) | The [hello example](../examples/hello) in Chromium, through the front door: Dex's own login form, a 409, a 403, logout, and no credential within the page's reach. Only for what a Go HTTP client cannot show |
 
-Both layers run in `task verify` and in CI.
+All three run in `task verify` and in CI.
 
 ### Unit tests
 
@@ -142,15 +142,26 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   impersonation spec first passed for the wrong reason (alice could not impersonate
   anyone, so a forwarded header was refused anyway); it now grants alice the right to
   impersonate bob, so a forwarded header would turn its 403 into a 200.
+- **The hello example** (label `browser`) is the claim that krm-foyer is usable, not
+  only correct. Chromium ([chromedp/headless-shell](https://hub.docker.com/r/chromedp/headless-shell),
+  pinned by digest, driven from Go with chromedp) runs in the front door's network
+  namespace, so `*.localhost` means to it what it means on a person's machine. It trusts
+  exactly the front door's and Dex's certificates, by their public keys. Its specs were
+  each seen to fail against a broken build: the browser not trusting Dex, the example
+  re-reading and saving again on a 409, and the helper leaving out the CSRF header.
 
 ## The e2e fixture
 
 ```mermaid
 flowchart LR
-    T[Test runner] -->|password grant| D[Dex<br/>dex.krm-foyer.test:5556]
+    T[Test runner] -->|password grant| D[Dex<br/>dex.localhost:5556]
     T -->|bearer token, directly| K[k3s API server]
     T -->|walks Dex's login form| D
-    T -->|session cookie, NodePort| F[krm-foyer pod<br/>foyer.krm-foyer.test]
+    T -->|session cookie, NodePort| F[krm-foyer pod<br/>foyer.localhost:8443]
+    B[Chromium, or a browser<br/>on this machine] -->|127.0.0.1:8443, :5556| FD[Front door<br/>nginx]
+    FD -->|/auth/, /k8s, /_foyer/| F
+    FD -->|TLS passthrough| D
+    T -->|DevTools| B
     F -->|user's token| K
     F -->|discovery and code exchange| D
     K -->|discovery and keys| D
@@ -171,11 +182,22 @@ the script fails if anything in the fixture is published on another interface.
 [deploy-foyer.sh](../test/e2e/cluster/deploy-foyer.sh) deploys krm-foyer from
 [foyer.yaml](../test/e2e/cluster/foyer.yaml). The image `task image` built is imported
 with `k3d image import` under a tag derived from its ID, so the Deployment rolls exactly
-when the binary changes. krm-foyer serves TLS for `foyer.krm-foyer.test` with a
+when the binary changes. krm-foyer serves TLS for `foyer.localhost` with a
 certificate from the fixture CA, trusts Dex through the same CA, and reaches the API
 server at `kubernetes.default.svc`. The suite reaches it through a NodePort on the node's
 address on the Docker network. Its service account is cluster-admin and its token is
 mounted, as bait; the suite checks both before it starts.
+
+[front-door.sh](../test/e2e/cluster/front-door.sh) applies the hello example's
+[resources](../examples/hello/manifests.yaml) and starts the front door: nginx on the
+fixture's network that serves `examples/hello/web` at `/`, sends `/auth/`, `/k8s`,
+`/stream` and `/_foyer/` to krm-foyer, and passes Dex's port through
+([config](../test/e2e/cluster/front-door-nginx.conf)). It publishes 8443 and 5556 on
+loopback, which is where browsers resolve `foyer.localhost` and `dex.localhost`, so the
+public URL `https://foyer.localhost:8443` and the issuer work from a browser on this
+machine with no hosts-file entry. Inside the fixture, aliases send the same names to Dex
+and the node. The `foyer` specs reach krm-foyer through the NodePort, not the front door:
+they test krm-foyer, not nginx.
 
 The test issuer is nginx serving a discovery document and a JWKS. The suite holds its
 signing key (`.e2e/issuer-signing.key`), so it can mint tokens with claims Dex never
@@ -188,7 +210,8 @@ accepts, and `other-app`, whose tokens it must reject.
 
 ```bash
 task e2e-up     # start or reuse the fixture (about 25 seconds the first time)
-task e2e-deploy # build the image and deploy krm-foyer into the fixture
+task e2e-deploy # build the image, deploy krm-foyer, and start the front door
+task demo       # e2e-up and e2e-deploy, then how to sign in from your browser
 task test-e2e   # run the suite; brings the fixture up and deploys krm-foyer first
 task e2e-down   # remove the cluster, Dex, the network and the certificates
 ```
