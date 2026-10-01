@@ -2,18 +2,12 @@
 package server
 
 import (
-	"embed"
-	"html/template"
-	"io/fs"
 	"net/http"
 	"path"
 	"strings"
+
+	"github.com/ConfigButler/krm-foyer/internal/pages"
 )
-
-//go:embed pages
-var pages embed.FS
-
-var templates = template.Must(template.ParseFS(pages, "pages/*.html"))
 
 // Config is what the routes need to know about this deployment.
 type Config struct {
@@ -21,28 +15,41 @@ type Config struct {
 	Version string
 	// Kubernetes serves /k8s: the API proxy. Nil leaves /k8s unrouted.
 	Kubernetes http.Handler
+	// Auth serves /auth/: login, logout and the session. Nil leaves it unrouted.
+	Auth http.Handler
+	// Ready reports whether krm-foyer can serve logins yet. Nil means always.
+	Ready func() bool
 }
 
 // New returns the handler for every route krm-foyer serves.
 func New(cfg Config) http.Handler {
-	assets, err := fs.Sub(pages, "pages/assets")
-	if err != nil {
-		panic(err) // the embed pattern above guarantees the directory exists
-	}
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", plain("ok"))
-	// Ready and healthy are the same thing until there is an OIDC issuer and a
-	// cluster to depend on; then readiness checks those and liveness does not.
-	mux.HandleFunc("GET /readyz", plain("ok"))
+	// Liveness never depends on the issuer; readiness does, so a pod that cannot
+	// reach it yet gets no traffic, and is not restarted for it either.
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if cfg.Ready != nil && !cfg.Ready() {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("waiting for the OIDC issuer\n"))
+			return
+		}
+		plain("ok")(w, r)
+	})
+	if cfg.Auth != nil {
+		mux.Handle("/auth/", cfg.Auth)
+	}
 	// /_foyer/ is the one path prefix krm-foyer reserves for its own files, so it
 	// never collides with an application served on the same origin.
-	mux.Handle("GET /_foyer/", http.StripPrefix("/_foyer/", noListing(http.FileServerFS(assets))))
+	mux.Handle("GET /_foyer/", http.StripPrefix("/_foyer/", noListing(http.FileServerFS(pages.Assets()))))
 	// {$} matches "/" only, and nothing else falls through to an application: krm-foyer
 	// owns its prefixes and the ingress routes the rest elsewhere. Behind an ingress this
 	// page is only seen when krm-foyer is reached directly; see docs/ingress.md.
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
-		render(w, "start.html", cfg)
+		pages.Render(w, http.StatusOK, "start.html", struct {
+			Version string
+			Login   bool
+		}{cfg.Version, cfg.Auth != nil})
 	})
 	site := securityHeaders(mux)
 	if cfg.Kubernetes == nil {
@@ -93,21 +100,13 @@ func plain(body string) http.HandlerFunc {
 	}
 }
 
-func render(w http.ResponseWriter, name string, data any) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	if err := templates.ExecuteTemplate(w, name, data); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-	}
-}
-
 // securityHeaders applies to every response. krm-foyer's own pages load nothing
 // but same-origin stylesheets, so the policy can be this strict; application
 // pages will need their own policy once static hosting exists.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", pages.CSP)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		next.ServeHTTP(w, r)

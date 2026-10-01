@@ -45,8 +45,8 @@ type statusDetails struct {
 	Causes []Cause `json:"causes,omitempty"`
 }
 
-// write answers with the interruption as a Kubernetes Status.
-func (i *Interruption) write(w http.ResponseWriter) {
+// Write answers with the interruption as a Kubernetes Status.
+func (i *Interruption) Write(w http.ResponseWriter) {
 	s := status{
 		Kind: "Status", APIVersion: "v1", Status: "Failure",
 		Message: i.Message, Reason: i.Reason, Code: i.Status,

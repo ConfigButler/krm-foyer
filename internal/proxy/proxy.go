@@ -266,7 +266,7 @@ func (p *Proxy) interrupt(w http.ResponseWriter, r *http.Request, i *Interruptio
 	path, _, _ := strings.Cut(r.RequestURI, "?")
 	p.logger.Info("interruption", "status", i.Status, "reason", i.Reason, "message", i.Message,
 		"method", r.Method, "path", path)
-	i.write(w)
+	i.Write(w)
 }
 
 // headWriter lets through only the response head that checkResponse approved.

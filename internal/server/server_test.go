@@ -92,3 +92,53 @@ func TestKubernetesRoutesReachTheProxy(t *testing.T) {
 		}
 	}
 }
+
+// Liveness never waits for the issuer; readiness does.
+func TestReadiness(t *testing.T) {
+	ready := false
+	h := New(Config{Version: "test", Ready: func() bool { return ready }})
+	for _, tc := range []struct {
+		ready bool
+		path  string
+		code  int
+	}{
+		{false, "/healthz", http.StatusOK},
+		{false, "/readyz", http.StatusServiceUnavailable},
+		{true, "/readyz", http.StatusOK},
+	} {
+		ready = tc.ready
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, tc.path, nil))
+		if rec.Code != tc.code {
+			t.Errorf("ready=%v GET %s = %d, want %d", tc.ready, tc.path, rec.Code, tc.code)
+		}
+	}
+}
+
+// /auth/ belongs to the login handler, every method and path under it; without
+// one it does not exist.
+func TestAuthRoutes(t *testing.T) {
+	var reached []string
+	h := New(Config{Version: "test", Auth: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		reached = append(reached, r.Method+" "+r.URL.Path)
+	})})
+	for _, target := range []string{"/auth/login", "/auth/callback?code=x", "/auth/session"} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil))
+	}
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/auth/logout", nil))
+	if got := strings.Join(reached, ", "); got != "GET /auth/login, GET /auth/callback, GET /auth/session, POST /auth/logout" {
+		t.Errorf("reached %s", got)
+	}
+	if rec := get(t, "/auth/login"); rec.Code != http.StatusNotFound {
+		t.Errorf("without login, /auth/login = %d", rec.Code)
+	}
+	// The start page says whether sign-in is on, and nothing about how.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+	if !strings.Contains(rec.Body.String(), `href="/auth/login"`) {
+		t.Error("the start page does not offer sign-in")
+	}
+	if strings.Contains(get(t, "/").Body.String(), `href="/auth/login"`) {
+		t.Error("the start page offers sign-in without login configured")
+	}
+}
