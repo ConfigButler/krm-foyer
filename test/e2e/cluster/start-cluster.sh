@@ -17,6 +17,7 @@ set -euo pipefail
 CLUSTER_NAME="${CLUSTER_NAME:-krm-foyer-e2e}"
 NETWORK="${NETWORK:-krm-foyer-e2e}"
 SUBNET="${SUBNET:-172.29.250.0/24}"
+GATEWAY="${GATEWAY:-172.29.250.1}"
 DEX_IP="${DEX_IP:-172.29.250.10}"
 DEX_HOST="dex.krm-foyer.test"
 VOLUME="${CLUSTER_NAME}-config"
@@ -55,7 +56,9 @@ awk -v ca="$E2E_DIR/ca.crt" '
 
 echo "== network $NETWORK ($SUBNET)"
 docker network inspect "$NETWORK" >/dev/null 2>&1 \
-  || docker network create --subnet "$SUBNET" "$NETWORK" >/dev/null
+  || docker network create --subnet "$SUBNET" --gateway "$GATEWAY" "$NETWORK" >/dev/null
+# k3d reads the network's gateway to find the host. Newer Docker engines (as on GitHub's
+# runners) only report a gateway that was set explicitly, hence --gateway above.
 
 echo "== dex at https://$DEX_HOST:5556 ($DEX_IP)"
 # Dex keeps its signing keys in memory, so a restarted Dex signs with new keys, and a
