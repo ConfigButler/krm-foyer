@@ -31,6 +31,7 @@ browser is on a krm-foyer URL and no application page exists yet:
 | `/auth/callback` | A redirect to the stored return path on success. On failure, an error page with a stable reason and a "try again" link | An application cannot render this: its code is not loaded yet. |
 | `/auth/logged-out` | Plain confirmation with a "sign in again" link | Where logout lands when the application does not supply its own destination. |
 | `/auth/whoami` | The current session in human-readable form: subject, groups and expiry, never tokens | The first thing to check when Kubernetes answers 403. `/auth/session` stays the JSON form for code. |
+| `/k8s/...`, `/stream` when krm-foyer interrupts | For a browser navigation only: sign in, not exposed, redirect notice, held-back content, store unavailable. Same status code as the JSON form | The proxy is explorable in a tab. These say what krm-foyer decided, as opposed to what Kubernetes answered. See [interruptions](design.md#interruptions). |
 | `/healthz`, `/readyz` | Plain text | For probes, not people. |
 | `/_foyer/...` | The pages' stylesheet and images | The one prefix krm-foyer reserves for its own files, so it never collides with an application on the same origin. |
 
@@ -48,7 +49,8 @@ Rules for these pages:
 
 ## What deliberately does not ship
 
-- **A resource browser or dashboard.** It would compete with the applications krm-foyer
+- **A resource browser or dashboard.** Raw API answers are viewable in a tab, as JSON;
+  there is no UI on top of them. A dashboard would compete with the applications krm-foyer
   exists to serve, and name.md picked "foyer" partly so the name would not suggest one.
   Showing arbitrary resources is also exactly the generic exposure the allowlist is there
   to prevent.

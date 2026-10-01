@@ -89,6 +89,11 @@ Security items need tests that try to get past the boundary.
 - [ ] Upstream responses: redirects are not followed or passed on, `Set-Cookie` and CORS
       headers are dropped, and every response is `Cache-Control: no-store`. See
       [upstream responses](design.md#upstream-responses)
+- [ ] [Interruptions](design.md#interruptions) as pages for browser navigations and as
+      `Status` for code, with the same status code; tests that a `fetch` cannot get the
+      page form and that no Kubernetes answer is replaced
+- [ ] A redirect notice that shows the full target and continues only on a click, and a
+      held-back page shown as escaped text
 - [ ] A test proves that no request falls back to the service account
 - [ ] A test proves that no response, on any route, contains a token krm-foyer holds,
       including tokens obtained by refresh

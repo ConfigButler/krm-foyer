@@ -32,6 +32,19 @@ configuration and frontend work, not another backend handler. The benefit is reu
 applications. A separate service also costs deployment, session storage and support; for
 a single application it does not guarantee less code in total.
 
+## Explorable in a browser
+
+Most traffic will come from a library or a few lines of JavaScript, but krm-foyer should
+also make sense to a person with nothing but a browser tab. Open a `/k8s/...` URL and you
+see what Kubernetes answered for you. Where krm-foyer itself steps in, because you are not
+signed in, the route is not exposed, or the upstream answered with a redirect or a page
+it will not render, it tells you, in a page instead of a bare error code. For a redirect,
+you see where it leads and choose whether to go.
+
+Not at any price: code always gets the same JSON and status code, krm-foyer never
+replaces an answer from Kubernetes, and no page lets anyone run upstream content as the
+signed-in user. The [design](design.md#interruptions) has the rules.
+
 ## What it takes from the domain
 
 krm-foyer carries requests; it does not make a domain safe to expose. That work belongs to

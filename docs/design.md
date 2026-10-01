@@ -111,8 +111,8 @@ since those return whatever their backend sends:
 
 - **Content types are allowlisted.** JSON, YAML, Kubernetes protobuf and the watch
   stream types pass; `text/plain` passes for logs. Anything else, `text/html` above all,
-  is refused with 502 unless the route opts in. A pod log or a proxied service must not
-  be able to serve a page that runs as the user on the shared origin.
+  is held back unless the route opts in. A pod log or a proxied service must not be able
+  to serve a page that runs as the user on the shared origin.
 - **Every proxied response carries** `X-Content-Type-Options: nosniff`,
   `Content-Security-Policy: default-src 'none'; sandbox` and `Cache-Control: no-store`,
   replacing anything upstream sent. A shared cache in front of the origin must never
@@ -122,9 +122,46 @@ since those return whatever their backend sends:
   `Retry-After` and the API priority-and-fairness headers). Everything else is dropped,
   including `Set-Cookie`, which would reach every service on the origin, and
   `Access-Control-*`: krm-foyer is same-origin only and never grants CORS.
-- **Redirects are not followed and not passed on.** An upstream 3xx becomes 502, and
-  the refusal is logged. A `Location` from an aggregated API could send the browser
-  anywhere.
+- **Redirects are not followed and not passed on automatically.** A `Location` from an
+  aggregated API could send the browser anywhere, so the user decides.
+
+A held-back response is answered as an [interruption](#interruptions): code gets a
+`Status` with status 502 and the reason, and a person browsing gets a page that
+explains it. For a redirect, both carry the target; for HTML, the page shows its source
+as escaped text. Every interruption is logged.
+
+### Interruptions
+
+krm-foyer is meant to be explorable in a browser, not only through a library. Opening
+`/k8s/api/v1/namespaces/team-a/configmaps` in a tab shows the API server's JSON, exactly
+as code would receive it. Wherever krm-foyer itself stands between the user and that
+answer, it says so in a form the requester can read:
+
+| Interruption | Status | For code | For a person browsing |
+| --- | --- | --- | --- |
+| No session | 401 | `Status`, reason `Unauthorized` | A page with a **Sign in** link that returns to this URL |
+| Not on the allowlist | 403 | `Status` saying the route is not exposed | A page saying krm-foyer does not expose this route, as opposed to Kubernetes refusing it, with a link to `/auth/whoami` |
+| Upstream redirect | 502 | `Status` with the target in `details` | A notice naming the full target, with a link the user can follow |
+| Upstream content held back | 502 | `Status` with the content type | A page showing the response as escaped text, truncated at a bound |
+| Session store unavailable | 503 | `Status` | A page saying so, with no retry loop |
+
+Rules:
+
+- **The status code is the same in both forms.** Only the body differs. A client that
+  checks the code sees one behavior.
+- **A page is chosen only for a browser navigation:** a `GET` with `Sec-Fetch-Dest:
+  document`. Browsers set that header, page scripts cannot, and non-browser clients do
+  not send it, so `fetch`, the helper and `kubectl`-style clients always get JSON.
+- **Answers from Kubernetes are never replaced.** A 403 from RBAC, a 404 or a 409 is the
+  API server's answer and reaches the tab as its JSON. Interruptions are only what
+  krm-foyer itself decided.
+- **Permission is a link, never an action.** Following a redirect is a navigation the
+  user starts; nothing is re-sent, and no request with a body is ever continued. An
+  upstream HTML page is never rendered on the origin, with or without consent: consent
+  to run unknown script as yourself is not consent anyone can meaningfully give.
+- **The pages follow the [page rules](frontend.md#what-ships-in-the-binary):** no script,
+  a strict Content-Security-Policy, `no-store`, and nothing about configuration beyond
+  what the requester is allowed to see.
 
 ## Access boundaries
 
@@ -186,7 +223,8 @@ requests when session validity cannot be established. The configured issuer must
 credential accepted by the cluster; an arbitrary OIDC login or access token is insufficient.
 
 Unauthenticated API requests return a documented 401 login-required response, not an HTML
-redirect. An optional framework-independent helper handles login navigation and return paths.
+redirect; a person browsing gets the same 401 with a sign-in link (see
+[interruptions](#interruptions)). An optional framework-independent helper handles login navigation and return paths.
 Expose authentication-required state before navigation so an editor can offer draft copy-out
 or an explicitly designed preservation flow. A 403 represents permission denial, not a login
 loop. Bound refresh attempts and report persistent issuer/cluster configuration errors.
@@ -250,7 +288,8 @@ of partial success.
 | Credential custody | No token krm-foyer holds, including refreshed ones, and no session ID in any response, log line or error page the suite collects |
 | Exposure | Empty policy denies access; paths, selectors, watch queries, pagination, alternate versions and subresources cannot bypass restrictions |
 | Proxy semantics | Kubernetes errors and patch types preserved; conflicting writes and ambiguous create outcomes handled without automatic replay |
-| Upstream responses | An upstream that sends HTML, `Set-Cookie`, CORS headers, cache headers or a redirect has none of them reach the browser |
+| Upstream responses | An upstream that sends HTML, `Set-Cookie`, CORS headers, cache headers or a redirect has none of them reach the browser unasked |
+| Interruptions | Each interruption gives the same status to code and to a navigation; scripts cannot obtain the page form; no Kubernetes answer is ever replaced |
 | Streams | Cancellation, recovery, expiry, subscriber isolation and measured load under declared capacity targets |
 | Editing | Conditional saves and guarded reconciliation preserve newer state and drafts |
 | Example domain | Pending, accepted, rejected and failed processing demonstrated; protected status and restart/duplicate tests prove its declared guarantees |

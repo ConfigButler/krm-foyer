@@ -34,8 +34,10 @@ we treat the following as security bugs:
   state, nonce or PKCE validation.
 - **Forwarding what must be stripped.** A browser-supplied `Authorization`, impersonation or
   forwarding header, or the session cookie, reaching the API server. In the other
-  direction: an upstream `Set-Cookie`, CORS header, redirect or HTML page reaching the
-  browser.
+  direction: an upstream `Set-Cookie` or CORS header reaching the browser, a redirect
+  followed without the user's click, or upstream HTML rendered on the origin.
+- **A page where code expects JSON.** An interruption page that a script can obtain, or
+  one that replaces an answer from Kubernetes.
 - **A session outliving its revocation** beyond the bounds in the
   [design](docs/design.md#session-lifecycle).
 
