@@ -168,8 +168,8 @@ answer, it says so in a form the requester can read:
 | Interruption | Status | For code | For a person browsing |
 | --- | --- | --- | --- |
 | No session | 401 | `Status`, reason `Unauthorized` | A page with a **Sign in** link that returns to this URL |
-| Upstream redirect | 502 | `Status` with the target in `details` | A notice naming the full target, with a link the user can follow |
-| Upstream content held back | 502 | `Status` with the content type | A page showing the response as escaped text, truncated at a bound |
+| Upstream redirect | 502 | `Status` with the target in `details` | A notice naming the full target, with a link the user can follow when it is an absolute `http` or `https` URL; any other target is shown as text only |
+| Upstream content held back | 502 | `Status` with the content type | A page naming the content type. Later: the response as escaped text, truncated at a bound |
 | Session store unavailable | 503 | `Status` | A page saying so, with no retry loop |
 | Non-canonical path | 400 | `Status` naming the [path rule](#access) | A page saying so |
 | Path under `/k8s` that is not an [API route](#api-contract) | 404 | `Status`, reason `NotFound` | A page saying so |
@@ -185,9 +185,11 @@ Rules:
 
 - **The status code is the same in both forms.** Only the body differs. A client that
   checks the code sees one behavior.
-- **A page is chosen only for a browser navigation:** a `GET` with `Sec-Fetch-Dest:
-  document`. Browsers set that header, page scripts cannot, and non-browser clients do
-  not send it, so `fetch`, the helper and `kubectl`-style clients always get JSON.
+- **A page is chosen only for a browser navigation:** a `GET` with exactly one
+  `Sec-Fetch-Dest: document` field. Browsers set that header, page scripts cannot, and
+  non-browser clients do not send it, so `fetch`, the helper and `kubectl`-style clients
+  always get JSON. An iframe (`Sec-Fetch-Dest: iframe`), any other method, a repeated
+  field or `Accept: text/html` alone gets JSON too.
 - **Answers from Kubernetes are never replaced.** A 403 from RBAC, a 404 or a 409 is the
   API server's answer and reaches the tab as its JSON. Interruptions are only what
   krm-foyer itself decided. For a 403, [`/_foyer/access`](#what-may-i-do) is where a

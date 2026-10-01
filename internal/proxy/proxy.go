@@ -182,7 +182,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Watches and logs stream: write every chunk as it arrives.
 		FlushInterval:  -1,
 		ModifyResponse: checkResponse,
-		ErrorHandler:   p.upstreamError,
+		// ReverseProxy hands its error handler the outgoing request, whose headers
+		// are the allowlisted ones. How to answer depends on the browser's request.
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) { p.upstreamError(w, r, err) },
 	}
 	rp.ServeHTTP(&headWriter{ResponseWriter: w}, r)
 }
@@ -266,7 +268,19 @@ func (p *Proxy) interrupt(w http.ResponseWriter, r *http.Request, i *Interruptio
 	path, _, _ := strings.Cut(r.RequestURI, "?")
 	p.logger.Info("interruption", "status", i.Status, "reason", i.Reason, "message", i.Message,
 		"method", r.Method, "path", path)
+	if isNavigation(r) {
+		i.page(w, r)
+		return
+	}
 	i.Write(w)
+}
+
+// isNavigation reports whether a person opened r's URL in a tab: a GET with exactly
+// one Sec-Fetch-Dest saying document. Browsers set it and page scripts cannot, and
+// clients that are not browsers do not send it, so code always gets the Status.
+func isNavigation(r *http.Request) bool {
+	dest := r.Header.Values("Sec-Fetch-Dest")
+	return r.Method == http.MethodGet && len(dest) == 1 && dest[0] == "document"
 }
 
 // headWriter lets through only the response head that checkResponse approved.

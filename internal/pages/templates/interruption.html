@@ -1,0 +1,17 @@
+{{template "top" .Title}}
+    <h1>{{.Title}}</h1>
+    <p class="lede">{{.Message}}</p>
+    {{- if .SignIn}}
+    <p><a href="{{.SignIn}}">Sign in</a> to open this page with your own Kubernetes access.</p>
+    {{- end}}
+    {{- if .Target}}
+    <p>The API server answered with a redirect to:</p>
+    <p><code>{{.Target}}</code></p>
+    {{- if .TargetLink}}
+    <p>krm-foyer does not follow redirects for you. <a href="{{.TargetLink}}">Go there</a> if you trust it;
+      nothing is sent along.</p>
+    {{- end}}
+    {{- end}}
+    <p>This answer comes from krm-foyer, not from Kubernetes: <code>{{.Status}} {{.Reason}}</code>.
+      Code asking for the same URL gets it as a Kubernetes <code>Status</code> object.</p>
+{{template "bottom"}}

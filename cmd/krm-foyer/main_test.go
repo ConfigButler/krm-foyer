@@ -155,3 +155,40 @@ func TestHandlerWithLoginNeedsASession(t *testing.T) {
 		t.Errorf("/auth/login = %d before the issuer was discovered", w.Code)
 	}
 }
+
+// The 401 page's sign-in link is one login accepts: the proxy writes it, login
+// checks it, and the two must agree on what a return path is.
+func TestSignInLinkIsAcceptedByLogin(t *testing.T) {
+	cfg, err := parseConfig(loginArgs, files(map[string]string{"/secret": "s"}), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _, err := handler(cfg, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{
+		"/k8s/api/v1/namespaces",
+		"/k8s/apis/apps/v1/namespaces/team-a/deployments?labelSelector=app%3Dweb&limit=10",
+		"/k8s/api/v1/namespaces/team-a/pods/web-0/log?container=app&follow=true",
+	} {
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
+		r.Header.Set("Sec-Fetch-Dest", "document")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		body := w.Body.String()
+		i := strings.Index(body, `href="/auth/login?`)
+		if w.Code != http.StatusUnauthorized || i < 0 {
+			t.Fatalf("%s: %d without a sign-in link:\n%s", target, w.Code, body)
+		}
+		link := body[i+len(`href="`):]
+		link = strings.ReplaceAll(link[:strings.IndexByte(link, '"')], "&amp;", "&")
+
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, link, nil))
+		// Not yet discovered, so 503; a return path login refused would be 400.
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "issuer-unavailable") {
+			t.Errorf("%s: login answered %d to its sign-in link %s", target, w.Code, link)
+		}
+	}
+}
