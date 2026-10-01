@@ -5,6 +5,10 @@ in the Go binary. It does not ship a single-page application, a resource browser
 Node build. Getting started is covered by the start page and by examples that live next
 to the service, not inside it.
 
+Amended (2026-10-01): krm-foyer does not host the application's own files either. The
+ingress routes `/` to the application and krm-foyer's prefixes to krm-foyer; see
+[sharing one domain](ingress.md#decision-2026-10-01-sharing-one-domain-with-other-services).
+
 ## The problem
 
 krm-foyer is a backend. Its [API contract](design.md#api-contract) answers JSON to
@@ -22,7 +26,7 @@ browser is on a krm-foyer URL and no application page exists yet:
 
 | Path | Page | Why it is ours |
 | --- | --- | --- |
-| `/` | Start page, **only when no application frontend is configured** | Confirms the deployment works and shows what to configure next. It links to the docs and to the session page. Once an application is mounted, `/` belongs to that application. |
+| `/` | Start page, for requests that reach krm-foyer itself: a port-forward, or before routing is set up | Confirms the deployment works and shows what to route next. It links to the docs and to the session page. Behind an ingress, `/` belongs to the application and this page is never seen. |
 | `/auth/login?return_to=/path` | No page: a redirect to the OIDC provider | The return path is validated as a local path before it is stored in the login transaction. |
 | `/auth/callback` | A redirect to the stored return path on success. On failure, an error page with a stable reason and a "try again" link | An application cannot render this: its code is not loaded yet. |
 | `/auth/logged-out` | Plain confirmation with a "sign in again" link | Where logout lands when the application does not supply its own destination. |
@@ -57,16 +61,19 @@ Rules for these pages:
 The pages above make a deployment verifiable. What makes it easy to *build on* is
 separate:
 
-1. **Serving the application's static files.** Same-origin hosting is part of the service
-   contract, with an optional single-page-app fallback to `index.html`. This is
-   configuration, not frontend code.
-2. **A tiny browser helper**, served by krm-foyer as a plain ES module. It covers three
-   calls: `session()`, `login(returnTo)` and `logout()`, including the CSRF header. Every
+1. **Routing recipes, not hosting.** A Gateway API `HTTPRoute`, an nginx server block and
+   a Vite dev-server proxy that put the application and krm-foyer on one origin. These are
+   documentation and examples, not code in krm-foyer.
+2. **A tiny browser helper**, served by krm-foyer as a plain ES module. It covers four
+   calls: `session()`, `login(returnTo)`, `logout()` and `requireSession()`, including the
+   CSRF header. `requireSession()` sends a signed-out page to login, for deployments whose
+   ingress cannot run the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages). Every
    application needs these, and they are easy to get subtly wrong. There is no npm
    package until someone needs one outside a krm-foyer origin.
 3. **`examples/hello/`**: one HTML file and one script. It signs in, lists one allowlisted
    resource through `/k8s` and follows it live through `/stream` with krm-stream's ESM
-   bundle, with no bundler. It is the copy-and-edit starting point, and the browser test
+   bundle, with no bundler, served by the same nginx container the e2e fixture puts in
+   front of krm-foyer. It is the copy-and-edit starting point, and the browser test
    that proves the helper works end to end.
 
 Build them in that order. The start page and the auth pages come first, because the

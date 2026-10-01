@@ -35,7 +35,9 @@
         "go.lintTool": "golangci-lint",
         "go.testExplorer.enable": true,
         "gopls": {
-          "formatting.gofumpt": false
+          "formatting.gofumpt": false,
+          // The e2e suite is behind a build tag; without it the editor sees no package.
+          "buildFlags": ["-tags=e2e"]
         }
       },
       "extensions": [

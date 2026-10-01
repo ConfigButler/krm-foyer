@@ -1,0 +1,19 @@
+# The audit log is the suite's independent witness: it records which user the API server
+# believed made each request, and whether anyone impersonated them. Cluster components and
+# the suite's own admin credential are left out so the file stays small enough to scan
+# after every spec. Service accounts outside kube-system are logged on purpose: a request
+# krm-foyer made with its own service account must show up here.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages: [RequestReceived]
+rules:
+  - level: None
+    userGroups: ["system:nodes", "system:masters", "system:serviceaccounts:kube-system"]
+  - level: None
+    users:
+      - system:apiserver
+      - system:kube-controller-manager
+      - system:kube-scheduler
+      - system:kube-proxy
+      - system:k3s-controller
+  - level: Metadata

@@ -89,9 +89,31 @@ flowchart LR
     O[Domain operator] <-->|Process resources and publish status| K
 ```
 
-Deploy on the same origin as the frontend, serving its static files or routed alongside
-them. The initial design uses one configured cluster per deployment and a configurable
+Deploy on the same origin as the frontend. An ingress or gateway routes krm-foyer's
+prefixes (`/auth/`, `/k8s/`, `/stream`, `/_foyer/`) to it and everything else to the
+frontend and any domain backend; krm-foyer does not host application files or forward
+traffic outside its prefixes. Every service on that origin is inside the user's trust
+boundary, since it can act as the signed-in user; see
+[sharing one domain](ingress.md#decision-2026-10-01-sharing-one-domain-with-other-services). The initial design uses one configured cluster per deployment and a configurable
 OIDC provider. No particular identity provider or frontend framework is required.
+
+krm-foyer terminates TLS itself from a mounted certificate, reloaded when it changes, or
+serves plain HTTP behind an ingress that terminates TLS. Both models are supported. Its
+public URL is configuration: the OIDC redirect URI, same-origin and CSRF checks and return
+paths use it, never `Host` or `X-Forwarded-*`. An ingress in front must be transparent: no
+buffering of streams, and no authentication or header rewriting of its own on krm-foyer's
+routes. An ingress's external-authentication feature (`auth_request`, ForwardAuth) is used only as a
+login gate for the application's pages, through `/auth/check`. It never decides on `/k8s` or
+`/stream` traffic. The [ingress decision](ingress.md) explains why, and what would make
+more worth revisiting.
+
+krm-foyer has two halves. The **login half** (`/auth/...`) obtains the user's OIDC token
+and keeps it in the server-side session. The **API half** (`/k8s`, `/stream`) takes the
+user's token from one credential interface, applies the allowlist and sends the request
+with that token, and the API server validates it. The API half's contract is the user's own
+token, checked by Kubernetes. Login is a convenience behind that interface: it could
+later accept tokens obtained elsewhere, or move into a separate program, without changing
+the API half.
 
 | Component or team | Responsibility |
 | --- | --- |
@@ -114,6 +136,7 @@ Use the existing krm-stream implementation for streaming and reconciliation.
 | `/auth/callback` | Validate the callback and establish a session |
 | `/auth/session` | Return minimal identity/session state and CSRF information, never bearer tokens |
 | `/auth/logout` | CSRF-protected POST that destroys the server session |
+| `/auth/check` | 204 or 401 (or 302 to login on request) for an ingress gating the application's pages; never a token or identity. See the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages) |
 | `/k8s/api/...` | Proxy core Kubernetes APIs after stripping `/k8s` |
 | `/k8s/apis/...` | Proxy grouped APIs, including CRDs and aggregated APIs |
 | `/k8s/api`, `/k8s/apis`, `/k8s/version`, `/k8s/openapi/...` | Proxy explicitly permitted discovery/schema endpoints |
@@ -143,8 +166,9 @@ cannot supply an arbitrary upstream URL.
 An operator-configured allowlist is mandatory from the first release. Empty configuration
 exposes no Kubernetes APIs or stream scopes. Explicitly configure groups, versions,
 resources, namespaces, verbs, subresources and permitted non-resource URLs. Distinguish
-get/list/watch and collection deletion, normalize paths before checks, and reject unknown
-or ambiguous scopes. Discovery does not grant access.
+get/list/watch and collection deletion. Reject non-canonical paths (encoded slashes, dot
+segments, repeated slashes) instead of normalizing them, forward exactly the path that was
+checked, and reject unknown or ambiguous scopes. Discovery does not grant access.
 
 Query parameters are part of policy evaluation. Recognize `watch=true` on a collection
 path as watch access, not an ordinary list. Explicitly configure allowed label/field
@@ -252,7 +276,8 @@ The [naming assessment](name.md) records why the service is called krm-foyer, an
 [frontend decision](frontend.md) records which pages the service itself serves.
 
 The service is a design proposal. This repository holds a server skeleton with health
-endpoints and a start page; none of the routes above are implemented yet. The next decision is whether to fund an independent
+endpoints and a start page, and an [e2e fixture](testing.md) whose API server trusts a real
+Dex issuer; none of the routes above are implemented yet. The next decision is whether to fund an independent
 prototype and assign its maintainers. Product and platform leads should agree on one
 example domain, supported protocols, session-store ownership and measurable load targets.
 

@@ -16,20 +16,40 @@ for applications whose domain is modelled that way.
 > endpoints and a start page. Login, the API proxy and streams are specified in
 > [docs/design.md](docs/design.md) but not implemented yet.
 
+## Principles
+
+- **The issuer decides who you are; Kubernetes decides what you may do.** Every request
+  reaches the API server with the user's own OIDC token, and RBAC and admission answer it.
+  No impersonation, and no fallback to krm-foyer's service account.
+- **Tokens stay on the server.** The browser holds only an opaque session ID in a Secure,
+  HttpOnly cookie. Frontend code never sees a token.
+- **One domain is one trust boundary.** The application, krm-foyer and any domain backend
+  share an origin, routed by path. Everything on that domain can act as the signed-in
+  user, so host only what you would trust with that access.
+  [More](docs/ingress.md#what-a-shared-origin-costs)
+- **Default deny, and krm-foyer only narrows.** With an empty allowlist, nothing is
+  exposed. The allowlist can only take away what RBAC grants, never add to it.
+- **Kubernetes semantics, exactly.** Status codes, errors, patch types and conflicts pass
+  through unchanged, and nothing is retried on the user's behalf.
+  [Why](docs/heritage.md#what-broke-on-stage)
+
 ## Documentation
 
 | Document | What it answers |
 | --- | --- |
 | [docs/design.md](docs/design.md) | The service contract: routes, access boundaries, sessions, streams and release criteria |
 | [docs/bff-choice.md](docs/bff-choice.md) | Whether your application should use a universal BFF like this one, a domain backend, or both |
+| [docs/ingress.md](docs/ingress.md) | Terminating TLS itself or behind an ingress, sharing one domain with other services, and the login gate for an ingress (`auth_request`, ForwardAuth) |
 | [docs/frontend.md](docs/frontend.md) | Which pages krm-foyer serves itself, and why it ships no single-page application |
 | [docs/name.md](docs/name.md) | Why it is called krm-foyer |
+| [docs/testing.md](docs/testing.md) | How the tests prove krm-foyer does not invent authentication or authorization, and how to run the e2e fixture |
+| [docs/heritage.md](docs/heritage.md) | Where it comes from, why it exists, and the checklist of what we want it to have |
 
 ## Run it
 
 ```bash
 task run          # http://localhost:8080
-task verify       # everything CI checks
+task verify       # everything CI checks, including e2e against k3d and Dex
 ```
 
 Or as a container:

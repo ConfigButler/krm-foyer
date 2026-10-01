@@ -1,10 +1,17 @@
 # The validation pipeline: everything needed to trust a commit, and nothing that publishes.
 #
 # It runs directly on pull requests, and release.yml calls it as a reusable workflow on every
-# push to main, so a release is only ever cut from a commit that passed this file. Checks are
-# `task` targets wherever that is practical, so a red job reproduces locally with the same
-# command. Permissions are read-only throughout, including on fork pull requests.
-name: ci
+# push to main, so a release is only ever cut from a commit that passed this file. Permissions
+# are read-only throughout, including on fork pull requests.
+#
+# Every check runs inside the CI image: the `ci` stage of .devcontainer/Dockerfile, the same
+# image the devcontainer is built on. The first job builds it and hands it to the others as
+# an artifact; each job then loads it and runs one `task` target inside it, as a step of its
+# own so the job's log shows it at the top level. So nothing is installed on the runner, every tool comes from one Dockerfile at the versions in its ENV
+# block, and a red job reproduces locally with the same command. This is how gitops-reverser
+# runs its CI too. Unlike there, the image is never pushed: the release does not reuse it, so
+# an artifact on every run is enough, and CI never needs a token that can write packages.
+name: CI
 
 on:
   pull_request:
@@ -19,6 +26,13 @@ on:
 permissions:
   contents: read
 
+env:
+  CI_IMAGE: krm-foyer-ci:local
+  # The same path as in the devcontainer. Each run step marks it a git safe.directory: the
+  # checkout belongs to the runner's user, the container runs as root, and git refuses to
+  # read a repository owned by someone else (the Taskfile takes its version from git).
+  CI_WORKDIR: /workspaces/krm-foyer
+
 # A new push to a pull request cancels the previous run. A release run has no pull request
 # number, and github.run_id keeps its group unique so it can never be cancelled.
 concurrency:
@@ -26,82 +40,160 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  hygiene:
-    name: workflows and Dockerfiles
+  ci-container:
+    name: CI base container
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
-
-      # Versions come from the devcontainer's ENV block, so CI and a developer's shell cannot
-      # lint with different rules and disagree about whether the tree is clean.
-      - name: install actionlint and hadolint (versions from .devcontainer/Dockerfile)
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: build the ci stage of .devcontainer/Dockerfile
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: .devcontainer/Dockerfile
+          target: ci
+          load: true
+          push: false
+          tags: ${{ env.CI_IMAGE }}
+          cache-from: type=gha,scope=ci-container
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=ci-container' || '' }}
+      # A tool that fails to install should fail here, by name, not as a confusing error
+      # halfway through some later job.
+      - name: every tool the checks use is in the image
         run: |
-          set -euo pipefail
-          actionlint_version="$(grep -oP 'ACTIONLINT_VERSION=\K[0-9.]+' .devcontainer/Dockerfile)"
-          hadolint_version="$(grep -oP 'HADOLINT_VERSION=\K[0-9.]+' .devcontainer/Dockerfile)"
-          echo "actionlint ${actionlint_version}, hadolint ${hadolint_version}"
-          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${actionlint_version}/actionlint_${actionlint_version}_linux_amd64.tar.gz" \
-            | tar -xzO actionlint > /tmp/actionlint
-          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
-          sudo curl -fsSL -o /usr/local/bin/hadolint \
-            "https://github.com/hadolint/hadolint/releases/download/v${hadolint_version}/hadolint-Linux-x86_64"
-          sudo chmod +x /usr/local/bin/hadolint
+          docker run --rm "$CI_IMAGE" bash -lc '
+            set -e
+            go version
+            task --version
+            golangci-lint version
+            actionlint --version
+            hadolint --version
+            kubectl version --client
+            k3d version
+            docker --version
+            openssl version
+          '
+      - name: save the image
+        run: docker save "$CI_IMAGE" -o "$RUNNER_TEMP/ci-image.tar"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-image
+          path: ${{ runner.temp }}/ci-image.tar
+          if-no-files-found: error
+          retention-days: 1
 
-      # No path argument: actionlint discovers every workflow itself, so a new one is
-      # checked the day it lands.
-      - run: actionlint
-      - run: hadolint Dockerfile .devcontainer/Dockerfile
-
-  go:
-    name: go
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: ci-container
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Download CI image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          go-version-file: go.mod
-          # Keyed on go.mod until the first dependency brings a go.sum.
-          cache-dependency-path: go.mod
-      - name: read the golangci-lint version from .devcontainer/Dockerfile
-        id: versions
-        run: echo "golangci-lint=$(grep -oP 'GOLANGCI_LINT_VERSION=\K\S+' .devcontainer/Dockerfile)" >> "$GITHUB_OUTPUT"
-      - name: go.mod and go.sum are tidy
-        run: go mod tidy -diff
-      - run: go vet ./...
-      # -race stays on: a proxy that fans streams out to many browsers is where a data race
-      # turns into one user seeing another's data.
-      - run: go test -race ./...
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+          name: ci-image
+          path: ${{ runner.temp }}
+      # Removed after loading: the tarball would otherwise hold a gigabyte of runner disk
+      # for the whole job.
+      - name: Load CI image
+        run: docker load -i "$RUNNER_TEMP/ci-image.tar" && rm -f "$RUNNER_TEMP/ci-image.tar"
+      # go mod tidy, go vet, golangci-lint, actionlint and hadolint.
+      - name: task tidy-check lint
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:$CI_WORKDIR" -w "$CI_WORKDIR" \
+            "$CI_IMAGE" bash -lc 'git config --global --add safe.directory "$PWD" && task tidy-check lint'
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: ci-container
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          version: ${{ steps.versions.outputs.golangci-lint }}
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - name: Download CI image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-image
+          path: ${{ runner.temp }}
+      # Removed after loading: the tarball would otherwise hold a gigabyte of runner disk
+      # for the whole job.
+      - name: Load CI image
+        run: docker load -i "$RUNNER_TEMP/ci-image.tar" && rm -f "$RUNNER_TEMP/ci-image.tar"
+      - name: task test
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:$CI_WORKDIR" -w "$CI_WORKDIR" \
+            "$CI_IMAGE" bash -lc 'git config --global --add safe.directory "$PWD" && task test'
 
   image:
-    name: container image
+    name: Container image
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: ci-container
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
-      - uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
+      - name: Download CI image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          version: 3.x
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      # The same task a developer runs: build the image, start it, and check that it answers.
-      # A Dockerfile that builds but produces a binary that cannot start fails here.
-      - run: task image-smoke
+          name: ci-image
+          path: ${{ runner.temp }}
+      # Removed after loading: the tarball would otherwise hold a gigabyte of runner disk
+      # for the whole job.
+      - name: Load CI image
+        run: docker load -i "$RUNNER_TEMP/ci-image.tar" && rm -f "$RUNNER_TEMP/ci-image.tar"
+      # Build the image, start it, and check that it answers. A Dockerfile that builds but
+      # produces a binary that cannot start fails here. Shares the runner's Docker daemon.
+      - name: task image-smoke
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:$CI_WORKDIR" -w "$CI_WORKDIR" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            "$CI_IMAGE" bash -lc 'git config --global --add safe.directory "$PWD" && task image-smoke'
+
+  e2e:
+    name: E2E (k3d + Dex)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: ci-container
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - name: Download CI image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-image
+          path: ${{ runner.temp }}
+      # Removed after loading: the tarball would otherwise hold a gigabyte of runner disk
+      # for the whole job.
+      - name: Load CI image
+        run: docker load -i "$RUNNER_TEMP/ci-image.tar" && rm -f "$RUNNER_TEMP/ci-image.tar"
+      # Shares the runner's Docker daemon; the container joins the fixture's network exactly
+      # as the devcontainer does. -v lists every spec, including the pending ones.
+      - name: task test-e2e -- -v -ginkgo.v
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:$CI_WORKDIR" -w "$CI_WORKDIR" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            "$CI_IMAGE" bash -lc 'git config --global --add safe.directory "$PWD" && task test-e2e -- -v -ginkgo.v'
+      - name: API server log on failure
+        if: failure()
+        run: docker logs k3d-krm-foyer-e2e-server-0 2>&1 | tail -200
 
   devcontainer:
-    name: devcontainer builds
+    name: Validate Dev Container
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -118,5 +210,8 @@ jobs:
           file: .devcontainer/Dockerfile
           target: dev
           push: false
-          cache-from: type=gha,scope=devcontainer
+          # dev builds on the ci stage, so the CI image's layers are reused here.
+          cache-from: |
+            type=gha,scope=ci-container
+            type=gha,scope=devcontainer
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=devcontainer' || '' }}

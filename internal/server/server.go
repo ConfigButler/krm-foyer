@@ -35,8 +35,9 @@ func New(cfg Config) http.Handler {
 	// /_foyer/ is the one path prefix krm-foyer reserves for its own files, so it
 	// never collides with an application served on the same origin.
 	mux.Handle("GET /_foyer/", http.StripPrefix("/_foyer/", noListing(http.FileServerFS(assets))))
-	// {$} matches "/" only. Once application hosting exists, the start page is
-	// served only when no application is configured; see docs/frontend.md.
+	// {$} matches "/" only, and nothing else falls through to an application: krm-foyer
+	// owns its prefixes and the ingress routes the rest elsewhere. Behind an ingress this
+	// page is only seen when krm-foyer is reached directly; see docs/ingress.md.
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
 		render(w, "start.html", cfg)
 	})

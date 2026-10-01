@@ -5,7 +5,8 @@
 # Go and lint the same way. What it needs beyond Go: Task, the linters CI runs, and
 # k3d + kubectl for proving the proxy against a real API server rather than a fake.
 #
-# Stage 1 (ci): everything `task verify` needs.
+# Stage 1 (ci): everything `task verify` needs. CI runs every check inside this stage
+#                (see .github/workflows/ci.yml), so it is the one place tools come from.
 # Stage 2 (dev): editor tooling, Node (for agent CLIs and future browser tests)
 #                and the non-root `vscode` user.
 
@@ -34,8 +35,8 @@ RUN apt-get update \
     && apt-get -y install --no-install-recommends gh docker-ce-cli docker-buildx-plugin \
     && apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
 
-# Tool versions, in one place. CI reads GOLANGCI_LINT_VERSION, ACTIONLINT_VERSION and
-# HADOLINT_VERSION from this block, so a bump here is a bump everywhere.
+# Tool versions, in one place. CI runs inside this stage, so a bump here is a bump
+# everywhere.
 # GOLANGCI_LINT_VERSION -> https://github.com/golangci/golangci-lint/releases
 # TASK_VERSION          -> https://github.com/go-task/task/releases
 # KUBECTL_VERSION / K3D_VERSION -> kept in step with krm-stream, so a local cluster
