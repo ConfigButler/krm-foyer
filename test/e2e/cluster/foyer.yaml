@@ -35,7 +35,7 @@ metadata:
   name: krm-foyer
   namespace: krm-foyer
 spec:
-  # Sessions live in memory until shared storage exists (roadmap step 2b).
+  # Sessions live in memory until shared storage exists (roadmap step 5).
   replicas: 1
   strategy:
     type: Recreate
@@ -66,8 +66,8 @@ spec:
             - -listen=:8443
             - -tls-cert-file=/etc/krm-foyer/tls/tls.crt
             - -tls-key-file=/etc/krm-foyer/tls/tls.key
-            - -public-url=https://foyer.krm-foyer.test
-            - -oidc-issuer=https://dex.krm-foyer.test:5556
+            - -public-url=https://foyer.localhost:8443
+            - -oidc-issuer=https://dex.localhost:5556
             - -oidc-client-id=krm-foyer
             - -oidc-client-secret-file=/etc/krm-foyer/oidc/client-secret
             - -oidc-ca-file=/etc/krm-foyer/issuer-ca/ca.crt

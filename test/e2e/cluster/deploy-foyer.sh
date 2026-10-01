@@ -11,7 +11,10 @@ set -euo pipefail
 
 : "${IMAGE:?set IMAGE to the krm-foyer image to deploy}"
 CLUSTER_NAME="${CLUSTER_NAME:-krm-foyer-e2e}"
-FOYER_HOST="foyer.krm-foyer.test"
+FOYER_HOST="foyer.localhost"
+# Browsers reach krm-foyer through the front door on this port (front-door.sh), so it is
+# part of the public URL; the suite goes to the NodePort directly, under the same name.
+FOYER_URL="https://$FOYER_HOST:8443"
 NODE_PORT=30443
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -33,7 +36,8 @@ echo "== certificate for $FOYER_HOST"
 mkdir -p "$E2E_DIR/foyer"
 if [ ! -f "$E2E_DIR/foyer/tls.crt" ] \
   || ! openssl x509 -checkend 86400 -noout -in "$E2E_DIR/foyer/tls.crt" >/dev/null 2>&1 \
-  || ! openssl verify -CAfile "$E2E_DIR/ca.crt" "$E2E_DIR/foyer/tls.crt" >/dev/null 2>&1; then
+  || ! openssl verify -CAfile "$E2E_DIR/ca.crt" "$E2E_DIR/foyer/tls.crt" >/dev/null 2>&1 \
+  || ! openssl x509 -noout -checkhost "$FOYER_HOST" -in "$E2E_DIR/foyer/tls.crt" | grep -q 'does match'; then
   openssl req -newkey rsa:2048 -nodes -subj "/CN=$FOYER_HOST" \
     -keyout "$E2E_DIR/foyer/tls.key" -out "$E2E_DIR/foyer/tls.csr" 2>/dev/null
   openssl x509 -req -in "$E2E_DIR/foyer/tls.csr" -CA "$E2E_DIR/ca.crt" -CAkey "$E2E_DIR/ca.key" \
@@ -64,9 +68,9 @@ fi
 server_ip="${API_SERVER#https://}"
 server_ip="${server_ip%:*}"
 cat > "$E2E_DIR/foyer-env" <<EOF
-FOYER_URL=https://$FOYER_HOST
+FOYER_URL=$FOYER_URL
 FOYER_ADDR=$server_ip:$NODE_PORT
 FOYER_NAMESPACE=krm-foyer
 FOYER_SERVICE_ACCOUNT=system:serviceaccount:krm-foyer:krm-foyer
 EOF
-echo "krm-foyer ready at https://$FOYER_HOST ($server_ip:$NODE_PORT)"
+echo "krm-foyer ready at $FOYER_URL ($server_ip:$NODE_PORT)"

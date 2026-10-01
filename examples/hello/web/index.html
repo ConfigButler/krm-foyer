@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hello, krm-foyer</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Notes</h1>
+    <p class="who" id="signed-in-as" hidden>
+      Signed in as <strong id="who"></strong>
+      <button type="button" id="logout">Sign out</button>
+    </p>
+  </header>
+
+  <main>
+    <p id="status" role="status" data-outcome=""></p>
+
+    <section id="signed-out" hidden>
+      <p>
+        These notes are Kubernetes resources. Your browser reads and changes them through
+        krm-foyer, as you, and Kubernetes decides what you may do.
+      </p>
+      <button type="button" id="sign-in">Sign in</button>
+    </section>
+
+    <section id="signed-in" hidden>
+      <p class="toolbar">
+        Namespace <code id="namespace"></code>
+        <button type="button" id="reload">Reload</button>
+      </p>
+      <ul id="notes"></ul>
+
+      <form id="new-note">
+        <h2>New note</h2>
+        <label>Name <input id="new-name" required pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" placeholder="shopping"></label>
+        <label>Text <textarea id="new-text" required maxlength="280" rows="2"></textarea></label>
+        <button type="submit" id="create">Create</button>
+      </form>
+    </section>
+  </main>
+
+  <footer>
+    <a href="/auth/session">/auth/session</a> ·
+    <a id="raw" href="#">this list as Kubernetes answers it</a>
+  </footer>
+</body>
+</html>

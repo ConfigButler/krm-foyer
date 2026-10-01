@@ -1,0 +1,16 @@
+# Two notes to start with. Created only when missing, so a rerun keeps your edits.
+apiVersion: hello.krm-foyer.example/v1
+kind: Note
+metadata:
+  name: welcome
+  namespace: hello
+spec:
+  text: This note is a Kubernetes resource. Edit it, and Kubernetes decides whether you may.
+---
+apiVersion: hello.krm-foyer.example/v1
+kind: Note
+metadata:
+  name: try-a-conflict
+  namespace: hello
+spec:
+  text: Open this page in two tabs, save here in one, then save in the other.

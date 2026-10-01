@@ -195,6 +195,9 @@ jobs:
       - name: krm-foyer log on failure
         if: failure()
         run: docker exec k3d-krm-foyer-e2e-server-0 kubectl -n krm-foyer logs deployment/krm-foyer --tail=200 || true
+      - name: Front door log on failure
+        if: failure()
+        run: docker logs krm-foyer-e2e-front-door 2>&1 | tail -100 || true
 
   devcontainer:
     name: Validate Dev Container

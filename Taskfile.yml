@@ -53,10 +53,27 @@ tasks:
       - test/e2e/cluster/start-cluster.sh
 
   e2e-deploy:
-    desc: "Build the image and deploy krm-foyer into the e2e fixture, as cluster-admin bait."
+    desc: "Build the image, deploy krm-foyer into the e2e fixture (as cluster-admin bait), and put the hello example in front of it."
     deps: [image]
     cmds:
       - IMAGE={{.IMAGE}}:{{.VERSION}} test/e2e/cluster/deploy-foyer.sh
+      - test/e2e/cluster/front-door.sh
+
+  demo:
+    desc: "Start the hello example in a disposable cluster, for a browser on this machine. task e2e-down removes it."
+    cmds:
+      - task: e2e-up
+      - task: e2e-deploy
+      - |
+        cat <<'EOF'
+
+        Open https://foyer.localhost:8443 and sign in at Dex with password "password" as
+          alice@example.com, who may edit the notes, or
+          bob@example.com, who may only read them.
+
+        The certificates come from the fixture's own CA. Import .e2e/ca.crt into your
+        browser, or accept the warning for foyer.localhost and then for dex.localhost.
+        EOF
 
   e2e-down:
     desc: "Delete the e2e fixture and its generated certificates."

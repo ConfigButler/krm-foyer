@@ -50,6 +50,9 @@ type fixture struct {
 	// foyerURL is krm-foyer's public URL, deployed by deploy-foyer.sh, and
 	// foyerAccount the service account it runs as: cluster-admin, as bait.
 	foyerURL, foyerNamespace, foyerAccount string
+	// frontDoor is the container a browser on this machine reaches krm-foyer and the
+	// hello example through (front-door.sh), at frontDoorIP on the fixture's network.
+	frontDoor, frontDoorIP string
 
 	// seen is every response krm-foyer sent the suite, and tokens every token the
 	// suite obtained, for the token scan.
@@ -78,6 +81,7 @@ const (
 	alice        = "alice@example.com"
 	bob          = "bob@example.com"
 	aliceK8sName = "oidc:alice@example.com"
+	bobK8sName   = "oidc:bob@example.com"
 )
 
 func loadFixture() *fixture {
@@ -86,8 +90,10 @@ func loadFixture() *fixture {
 		dir = filepath.Join("..", "..", ".e2e")
 	}
 	env := readEnv(filepath.Join(dir, "env"), "no e2e fixture found; run `task e2e-up` (or `task test-e2e`)")
-	for k, v := range readEnv(filepath.Join(dir, "foyer-env"), "krm-foyer is not deployed; run `task e2e-deploy` (or `task test-e2e`)") {
-		env[k] = v
+	for _, file := range []string{"foyer-env", "front-door-env"} {
+		for k, v := range readEnv(filepath.Join(dir, file), "krm-foyer is not deployed; run `task e2e-deploy` (or `task test-e2e`)") {
+			env[k] = v
+		}
 	}
 
 	roots := x509.NewCertPool()
@@ -115,8 +121,8 @@ func loadFixture() *fixture {
 	// The names the suite reaches without DNS: Dex at its own address, krm-foyer through
 	// its NodePort on the node.
 	addrs := map[string]string{
-		issuer.Host:                         net.JoinHostPort(env["DEX_IP"], issuer.Port()),
-		net.JoinHostPort(foyer.Host, "443"): env["FOYER_ADDR"],
+		issuer.Host: net.JoinHostPort(env["DEX_IP"], issuer.Port()),
+		foyer.Host:  env["FOYER_ADDR"],
 	}
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	transport := &http.Transport{
@@ -139,6 +145,8 @@ func loadFixture() *fixture {
 		foyerURL:        env["FOYER_URL"],
 		foyerNamespace:  env["FOYER_NAMESPACE"],
 		foyerAccount:    env["FOYER_SERVICE_ACCOUNT"],
+		frontDoorIP:     env["FRONT_DOOR_IP"],
+		frontDoor:       env["FRONT_DOOR_CONTAINER"],
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   30 * time.Second,

@@ -1,6 +1,6 @@
 # Dex for the e2e fixture: the identity provider the API server trusts.
 # Every static user's password is "password".
-issuer: https://dex.krm-foyer.test:5556
+issuer: https://dex.localhost:5556
 storage:
   type: memory
 web:
@@ -29,7 +29,7 @@ staticClients:
     name: krm-foyer
     secret: krm-foyer-e2e-secret
     redirectURIs:
-      - https://foyer.krm-foyer.test/auth/callback
+      - https://foyer.localhost:8443/auth/callback
   # A client the cluster does not accept tokens for. Its tokens are real Dex tokens
   # with the wrong audience.
   - id: other-app
