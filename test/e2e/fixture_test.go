@@ -51,9 +51,22 @@ type fixture struct {
 	// foyerAccount the service account it runs as: cluster-admin, as bait.
 	foyerURL, foyerNamespace, foyerAccount string
 
-	// seen is every response krm-foyer sent the suite, for the token scan.
+	// seen is every response krm-foyer sent the suite, and tokens every token the
+	// suite obtained, for the token scan.
 	seenMu sync.Mutex
 	seen   []seenResponse
+	tokens []string
+}
+
+// remember records a token for the token scan.
+func (f *fixture) remember(tokens ...string) {
+	f.seenMu.Lock()
+	defer f.seenMu.Unlock()
+	for _, t := range tokens {
+		if t != "" {
+			f.tokens = append(f.tokens, t)
+		}
+	}
 }
 
 const (
@@ -166,10 +179,13 @@ func (f *fixture) login(ctx context.Context, user, clientID, secret string) stri
 	body, _ := io.ReadAll(resp.Body)
 	Expect(resp.StatusCode).To(Equal(http.StatusOK), "Dex token endpoint: %s", body)
 	var tok struct {
-		IDToken string `json:"id_token"`
+		IDToken      string `json:"id_token"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
 	}
 	Expect(json.Unmarshal(body, &tok)).To(Succeed())
 	Expect(tok.IDToken).NotTo(BeEmpty())
+	f.remember(tok.IDToken, tok.AccessToken, tok.RefreshToken)
 	return tok.IDToken
 }
 
@@ -191,7 +207,9 @@ func (f *fixture) mint(claims map[string]any) string {
 	digest := sha256.Sum256([]byte(signed))
 	sig, err := rsa.SignPKCS1v15(rand.Reader, f.signingKey, crypto.SHA256, digest[:])
 	Expect(err).NotTo(HaveOccurred())
-	return signed + "." + base64.RawURLEncoding.EncodeToString(sig)
+	token := signed + "." + base64.RawURLEncoding.EncodeToString(sig)
+	f.remember(token)
+	return token
 }
 
 func b64JSON(v any) string {
@@ -239,6 +257,11 @@ func (a answer) status() (s struct {
 // direct asks the API server itself, with a bearer token, exactly as kubectl would.
 // This is the reference answer for any request krm-foyer proxies.
 func (f *fixture) direct(ctx context.Context, token, method, path string, body []byte) answer {
+	return f.directWith(ctx, token, method, path, body, nil)
+}
+
+// directWith is direct with extra request headers, such as a patch's Content-Type.
+func (f *fixture) directWith(ctx context.Context, token, method, path string, body []byte, header http.Header) answer {
 	var r io.Reader
 	if body != nil {
 		r = bytes.NewReader(body)
@@ -253,6 +276,9 @@ func (f *fixture) direct(ctx context.Context, token, method, path string, body [
 	}
 	marker := "krm-foyer-e2e/" + randomID()
 	req.Header.Set("User-Agent", marker)
+	for k, v := range header {
+		req.Header[k] = v
+	}
 	resp, err := f.client.Do(req)
 	Expect(err).NotTo(HaveOccurred())
 	defer func() { _ = resp.Body.Close() }()

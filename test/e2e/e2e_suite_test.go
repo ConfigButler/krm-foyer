@@ -63,6 +63,16 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 	}).WithContext(ctx).WithTimeout(60 * time.Second).WithPolling(time.Second).Should(Equal(http.StatusOK))
 }, NodeTimeout(3*time.Minute))
 
+// The token scan, once more after every spec: no response krm-foyer sent the suite,
+// and nothing it logged, holds a credential. See credentialLeaks.
+var _ = AfterSuite(func() {
+	if fx == nil || fx.foyerURL == "" {
+		return
+	}
+	leaks, _ := fx.credentialLeaks()
+	Expect(leaks).To(BeEmpty())
+})
+
 // eventually polls for things the API server records asynchronously, like audit events.
 func eventually(ctx context.Context, f any) AsyncAssertion {
 	return Eventually(f).WithContext(ctx).WithTimeout(20 * time.Second).WithPolling(500 * time.Millisecond)
