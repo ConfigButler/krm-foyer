@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -214,6 +215,47 @@ func (a *Auth) fail(w http.ResponseWriter, e loginError, retry, issuerError stri
 	}{e.reason, e.message, issuerError, "/auth/login?" + url.Values{"return_to": {retry}}.Encode()})
 }
 
+// tokenErrors are the error codes RFC 6749 defines for a token response. Only these
+// are logged; anything else the issuer says is not.
+var tokenErrors = []string{
+	"invalid_request", "invalid_client", "invalid_grant", "unauthorized_client",
+	"unsupported_grant_type", "invalid_scope",
+}
+
+// exchangeFailure describes a failed token exchange in fields that are safe to log.
+// The error itself is never logged: oauth2 puts the token endpoint's answer in it
+// (error_description, error_uri, or the whole body when there is no error code), and
+// an issuer may echo the request it refused, which held the client secret, the code
+// and the PKCE verifier.
+func exchangeFailure(err error) []any {
+	var refused *oauth2.RetrieveError
+	var netErr net.Error
+	switch {
+	case errors.As(err, &refused):
+		code := refused.ErrorCode
+		switch {
+		case code == "":
+			code = "none"
+		case !slices.Contains(tokenErrors, code):
+			code = "unknown"
+		}
+		status := 0
+		if refused.Response != nil {
+			status = refused.Response.StatusCode
+		}
+		return []any{"issuer_status", status, "issuer_error", code}
+	case errors.Is(err, context.Canceled):
+		return []any{"cause", "canceled"}
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return []any{"cause", "timeout"}
+	case errors.As(err, new(*url.Error)):
+		return []any{"cause", "unreachable"}
+	default:
+		// A 2xx answer krm-foyer could not read as a token response.
+		return []any{"cause", "invalid-response"}
+	}
+}
+
 // single returns the one value of key in q, or false if there is not exactly one.
 func single(q url.Values, key string) (string, bool) {
 	v := q[key]
@@ -293,7 +335,7 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), oauth2.HTTPClient, a.client)
 	token, err := iss.oauth.Exchange(ctx, code, oauth2.VerifierOption(t.verifier))
 	if err != nil {
-		a.logger.Warn("token exchange failed", "err", err)
+		a.logger.Warn("token exchange failed", exchangeFailure(err)...)
 		a.fail(w, errExchange, t.returnTo, "")
 		return
 	}

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -39,12 +40,18 @@ type fakeIssuer struct {
 	idTokens []string
 	// verifiers is every PKCE verifier received.
 	verifiers []string
+	// issuedCodes and accessTokens are every code and access token issued.
+	issuedCodes, accessTokens []string
 
 	// Knobs for misbehaving.
 	tamper      func(claims map[string]any)
 	signWith    *rsa.PrivateKey
 	omitIDToken bool
 	refuseCodes bool
+	// echo, if set, answers every token request from krm-foyer's client with an
+	// error that repeats the request: client secret, code and PKCE verifier. An
+	// issuer may echo what it was sent, and an error is where it would.
+	echo func(w http.ResponseWriter, request string)
 	// failDiscovery answers this many discovery requests with 503.
 	failDiscovery int
 }
@@ -125,6 +132,7 @@ func (f *fakeIssuer) authorize(location, user string) string {
 	code := random()
 	f.mu.Lock()
 	f.codes[code] = grant{challenge: q.Get("code_challenge"), nonce: q.Get("nonce"), redirectURI: q.Get("redirect_uri"), email: user}
+	f.issuedCodes = append(f.issuedCodes, code)
 	f.mu.Unlock()
 	return q.Get("redirect_uri") + "?" + url.Values{"code": {code}, "state": {q.Get("state")}}.Encode()
 }
@@ -144,6 +152,10 @@ func (f *fakeIssuer) token(w http.ResponseWriter, r *http.Request) {
 	delete(f.codes, code) // single use, as RFC 6749 requires
 	f.verifiers = append(f.verifiers, verifier)
 	f.mu.Unlock()
+	if f.echo != nil {
+		f.echo(w, fmt.Sprintf("client %s:%s code %s code_verifier %s", id, secret, code, verifier))
+		return
+	}
 	sum := sha256.Sum256([]byte(verifier))
 	if !found || f.refuseCodes || r.PostFormValue("grant_type") != "authorization_code" ||
 		r.PostFormValue("redirect_uri") != g.redirectURI ||
@@ -166,11 +178,13 @@ func (f *fakeIssuer) token(w http.ResponseWriter, r *http.Request) {
 		key = f.signWith
 	}
 	idToken := signJWT(f.t, key, claims)
+	accessToken := "access-" + random()
 	f.mu.Lock()
 	f.exchanges++
 	f.idTokens = append(f.idTokens, idToken)
+	f.accessTokens = append(f.accessTokens, accessToken)
 	f.mu.Unlock()
-	body := map[string]any{"access_token": "access-" + random(), "token_type": "Bearer", "expires_in": 3600}
+	body := map[string]any{"access_token": accessToken, "token_type": "Bearer", "expires_in": 3600}
 	if !f.omitIDToken {
 		body["id_token"] = idToken
 	}

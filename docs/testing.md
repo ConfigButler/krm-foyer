@@ -95,9 +95,12 @@ bugs are here, where they are cheap to find:
   misbehave: a token for another audience or issuer, expired, signed by a stranger, with
   another nonce or none. A browser with a cookie jar walks each flow, including login
   CSRF (the attacker's callback in the victim's browser), replayed and malformed
-  callbacks and an expired login. Every response that browser received is then scanned
-  for ID tokens, the client secret and PKCE verifiers, and for session IDs outside the
-  `Set-Cookie` that issues them. Dex is the e2e suite's issuer, for what a real login
+  callbacks and an expired login. Every response that browser received, and every line
+  krm-foyer logged, is then scanned for ID and access tokens, the client secret,
+  authorization codes and PKCE verifiers, and for session IDs outside the `Set-Cookie`
+  that issues them. The fake issuer can also refuse a token request by echoing it, in
+  each place an OAuth error has room for text, so the scan proves those refusals are
+  logged by status and error code only. Dex is the e2e suite's issuer, for what a real login
   does; the fake issuer is for refusals Dex never causes.
 - **Return paths** are fuzzed against a model of how a browser resolves a `Location`
   (the WHATWG URL standard's leniencies: backslashes, stripped tabs, any number of
