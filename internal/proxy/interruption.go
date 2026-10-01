@@ -3,7 +3,10 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
+
+	"github.com/ConfigButler/krm-foyer/internal/pages"
 )
 
 // An Interruption is an answer krm-foyer gives instead of the API server's. Every
@@ -64,4 +67,45 @@ func (i *Interruption) Write(w http.ResponseWriter) {
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(i.Status)
 	_, _ = w.Write(body)
+}
+
+// titles name each kind of interruption for a person.
+var titles = map[string]string{
+	"Unauthorized":       "Sign in to continue",
+	"ServiceUnavailable": "Your session could not be checked",
+	"BadRequest":         "Not a canonical path",
+	"NotFound":           "Not a Kubernetes API route",
+	"NotImplemented":     "Not supported by krm-foyer",
+	"BadGateway":         "Held back by krm-foyer",
+	"CSRFProofRequired":  "Refused by krm-foyer",
+	"CrossOriginRequest": "Refused by krm-foyer",
+}
+
+// page answers with the interruption as a page, for a person browsing. The status
+// code is the one code gets.
+func (i *Interruption) page(w http.ResponseWriter, r *http.Request) {
+	data := struct {
+		Status                     int
+		Title, Message, Reason     string
+		SignIn, Target, TargetLink string
+	}{Status: i.Status, Title: titles[i.Reason], Message: i.Message, Reason: i.Reason}
+	if data.Title == "" {
+		data.Title = "Interrupted by krm-foyer"
+	}
+	if i.Status == http.StatusUnauthorized {
+		// RequestURI passed the path check, so it is a path on this origin. Login
+		// checks it again before using it.
+		data.SignIn = "/auth/login?" + url.Values{"return_to": {r.RequestURI}}.Encode()
+	}
+	for _, c := range i.Causes {
+		if c.Reason == "Redirect" {
+			data.Target = c.Message
+			// A link only to an absolute web URL; anything else stays text. The person
+			// follows it, if they want to; nothing is re-sent.
+			if u, err := url.Parse(c.Message); err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != "" && u.Opaque == "" {
+				data.TargetLink = c.Message
+			}
+		}
+	}
+	pages.Render(w, i.Status, "interruption.html", data)
 }

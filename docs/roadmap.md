@@ -121,11 +121,11 @@ Security items need tests that try to get past the boundary.
       headers are dropped, and every response is `Cache-Control: no-store`. See
       [upstream responses](design.md#upstream-responses)
 - [x] [Interruptions](design.md#interruptions) as `Status` for code
-- [ ] Interruptions as pages for browser navigations, with the same status code; tests
+- [x] Interruptions as pages for browser navigations, with the same status code; tests
       that a `fetch` cannot get the page form and that no Kubernetes answer is replaced
-      (step 2)
-- [ ] A redirect notice that shows the full target and continues only on a click, and a
-      held-back page shown as escaped text
+- [x] A redirect notice that shows the full target and continues only on a click, linking
+      only to absolute web URLs
+- [ ] A held-back page that shows the response as escaped text, truncated at a bound
 - [ ] A test proves that no request falls back to the service account
 - [ ] A test proves that no response, on any route, contains a token krm-foyer holds,
       including tokens obtained by refresh

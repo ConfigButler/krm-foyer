@@ -76,6 +76,11 @@ bugs are here, where they are cheap to find:
   single content type that a browser cannot read as anything but an allowed one. The
   property is written independently of the check, so it can catch the check's own
   blind spots, such as a repeated `Content-Type` field.
+- **Interruption pages**: every row of the interruptions table is triggered twice, as
+  code and as a browser navigation, and must give the same status both times. A
+  `fetch`, an iframe, another method, a capitalized or repeated `Sec-Fetch-Dest` and
+  `Accept: text/html` alone all get JSON, and the API server's own 401, 403, 404, 409,
+  422, 429, 500 and 503 reach a navigation unchanged.
 - **Sessions** ([internal/session](../internal/session)): rotation at login (a planted
   ID is never adopted), idle, absolute and token expiry, logout winning over a request
   that is recording activity, and a store failure never read as "no session". Expiry
