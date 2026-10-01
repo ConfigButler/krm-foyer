@@ -6,13 +6,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"encoding/pem"
 	"io"
 	"net"
 	"net/http"
@@ -35,6 +38,10 @@ type fixture struct {
 	apiServer       string
 	dexIssuer       string
 	serverContainer string
+	// testIssuer is trusted by the API server under the same rules as Dex, and the suite
+	// holds its signing key, so it can mint tokens with claims Dex never issues.
+	testIssuer string
+	signingKey *rsa.PrivateKey
 	// client trusts the cluster CA and the fixture CA, and reaches Dex by its issuer
 	// name without the test runner needing a DNS entry for it.
 	client *http.Client
@@ -71,9 +78,17 @@ func loadFixture() *fixture {
 	Expect(roots.AppendCertsFromPEM(fixtureCA)).To(BeTrue())
 	clusterCA := kubectlOut(dir, "config", "view", "--raw", "-o",
 		"jsonpath={.clusters[0].cluster.certificate-authority-data}")
-	pem, err := base64.StdEncoding.DecodeString(clusterCA)
+	clusterPEM, err := base64.StdEncoding.DecodeString(clusterCA)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(roots.AppendCertsFromPEM(pem)).To(BeTrue())
+	Expect(roots.AppendCertsFromPEM(clusterPEM)).To(BeTrue())
+
+	keyPEM, err := os.ReadFile(filepath.Join(dir, "issuer-signing.key"))
+	Expect(err).NotTo(HaveOccurred())
+	block, _ := pem.Decode(keyPEM)
+	Expect(block).NotTo(BeNil())
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(key).To(BeAssignableToTypeOf(&rsa.PrivateKey{}))
 
 	issuer, err := url.Parse(env["DEX_ISSUER"])
 	Expect(err).NotTo(HaveOccurred())
@@ -94,6 +109,8 @@ func loadFixture() *fixture {
 		apiServer:       env["API_SERVER"],
 		dexIssuer:       env["DEX_ISSUER"],
 		serverContainer: env["SERVER_CONTAINER"],
+		testIssuer:      env["TEST_ISSUER"],
+		signingKey:      key.(*rsa.PrivateKey),
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   30 * time.Second,
@@ -127,6 +144,49 @@ func (f *fixture) login(ctx context.Context, user, clientID, secret string) stri
 	Expect(json.Unmarshal(body, &tok)).To(Succeed())
 	Expect(tok.IDToken).NotTo(BeEmpty())
 	return tok.IDToken
+}
+
+// mint returns a token from the test issuer for the krm-foyer audience, valid for five
+// minutes, carrying claims on top of iss, aud, sub, iat and exp.
+func (f *fixture) mint(claims map[string]any) string {
+	now := time.Now()
+	payload := map[string]any{
+		"iss": f.testIssuer,
+		"aud": foyerClient,
+		"sub": "minted-" + randomID(),
+		"iat": now.Unix(),
+		"exp": now.Add(5 * time.Minute).Unix(),
+	}
+	for k, v := range claims {
+		payload[k] = v
+	}
+	signed := b64JSON(map[string]string{"alg": "RS256", "typ": "JWT", "kid": "e2e"}) + "." + b64JSON(payload)
+	digest := sha256.Sum256([]byte(signed))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, f.signingKey, crypto.SHA256, digest[:])
+	Expect(err).NotTo(HaveOccurred())
+	return signed + "." + base64.RawURLEncoding.EncodeToString(sig)
+}
+
+func b64JSON(v any) string {
+	b, err := json.Marshal(v)
+	Expect(err).NotTo(HaveOccurred())
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// selfSubjectReview asks the API server who it takes token for. The answer is 201 with
+// the username, or the refusal's status code with no username.
+func (f *fixture) selfSubjectReview(ctx context.Context, token string) (int, string) {
+	a := f.direct(ctx, token, http.MethodPost, "/apis/authentication.k8s.io/v1/selfsubjectreviews",
+		[]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`))
+	var review struct {
+		Status struct {
+			UserInfo struct {
+				Username string `json:"username"`
+			} `json:"userInfo"`
+		} `json:"status"`
+	}
+	_ = json.Unmarshal(a.Body, &review)
+	return a.Code, review.Status.UserInfo.Username
 }
 
 // answer is one HTTP response, reduced to what the suite compares.
@@ -255,16 +315,24 @@ func randomID() string {
 	return hex.EncodeToString(b)
 }
 
-// tamper flips one character in the JWT payload, leaving a well-formed token whose
-// signature no longer matches.
-func tamper(jwt string) string {
+// impersonateIn rewrites the email claim of a genuine token to someone else's, keeping
+// the original header and signature. The payload stays valid JSON, so a refusal can only
+// come from the signature check, not from a token the API server could not parse.
+func impersonateIn(jwt, email string) string {
 	parts := strings.Split(jwt, ".")
 	Expect(parts).To(HaveLen(3))
-	p := []byte(parts[1])
-	if p[5] == 'A' {
-		p[5] = 'B'
-	} else {
-		p[5] = 'A'
-	}
-	return fmt.Sprintf("%s.%s.%s", parts[0], p, parts[2])
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	Expect(err).NotTo(HaveOccurred())
+	var claims map[string]any
+	Expect(json.Unmarshal(raw, &claims)).To(Succeed())
+	Expect(claims).To(HaveKey("email"))
+	claims["email"] = email
+	parts[1] = b64JSON(claims)
+
+	// The altered payload must still decode to the intended claims.
+	raw, err = base64.RawURLEncoding.DecodeString(parts[1])
+	Expect(err).NotTo(HaveOccurred())
+	Expect(json.Unmarshal(raw, &claims)).To(Succeed())
+	Expect(claims).To(HaveKeyWithValue("email", email))
+	return strings.Join(parts, ".")
 }

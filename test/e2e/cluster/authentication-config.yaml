@@ -1,7 +1,8 @@
 # How the e2e API server decides who a bearer token belongs to. This is the only place
 # identity is established: krm-foyer forwards the user's token and never asserts a name.
 #
-# start-cluster.sh replaces CA_PEM with the fixture's CA before mounting this file.
+# start-cluster.sh replaces each CA_PEM line with the fixture's CA before mounting this
+# file.
 apiVersion: apiserver.config.k8s.io/v1
 kind: AuthenticationConfiguration
 jwt:
@@ -13,15 +14,33 @@ jwt:
       audiences: [krm-foyer]
       certificateAuthority: |
 CA_PEM
-    claimMappings:
+    claimMappings: &claimMappings
       username:
-        # Mapping from the email claim makes the API server also require
-        # email_verified to be true.
         claim: email
         prefix: "oidc:"
       groups:
         claim: groups
         prefix: "oidc:"
-    userValidationRules:
+    claimValidationRules: &claimValidationRules
+      # Mapping the username from email makes the API server check email_verified on
+      # its own, but that check is claims.?email_verified.orValue(true): a token without
+      # the claim passes. The name is only an identity if the issuer vouched for it, so
+      # require the boolean true. The suite mints tokens without it, with false and with
+      # the string "true", and expects 401 for each.
+      - expression: "has(claims.email_verified) && type(claims.email_verified) == bool && claims.email_verified"
+        message: "email_verified must be the boolean true"
+    userValidationRules: &userValidationRules
       - expression: "!user.username.startsWith('system:')"
         message: "username must not use the Kubernetes system: prefix"
+
+  # A test issuer whose signing key the suite holds (see issuer-nginx.conf). It shares
+  # Dex's rules through YAML aliases, so a test against it is a test of those rules, not
+  # of a copy.
+  - issuer:
+      url: https://issuer.krm-foyer.test:8443
+      audiences: [krm-foyer]
+      certificateAuthority: |
+CA_PEM
+    claimMappings: *claimMappings
+    claimValidationRules: *claimValidationRules
+    userValidationRules: *userValidationRules

@@ -76,13 +76,40 @@ var _ = Describe("The fixture's API server", Label("fixture"), func() {
 		Expect(a.Code).To(Equal(http.StatusUnauthorized))
 	})
 
-	It("rejects a token whose payload was altered", func(ctx SpecContext) {
-		token := tamper(fx.login(ctx, alice, foyerClient, foyerSecret))
+	It("rejects a genuine token whose claims were rewritten after signing", func(ctx SpecContext) {
+		token := fx.login(ctx, alice, foyerClient, foyerSecret)
+		code, _ := fx.selfSubjectReview(ctx, token)
+		Expect(code).To(Equal(http.StatusCreated), "the unaltered token must be accepted, or the refusal below proves nothing")
 
-		a := fx.direct(ctx, token, http.MethodGet, "/api/v1/namespaces", nil)
+		code, user := fx.selfSubjectReview(ctx, impersonateIn(token, bob))
 
-		Expect(a.Code).To(Equal(http.StatusUnauthorized))
+		Expect(code).To(Equal(http.StatusUnauthorized))
+		Expect(user).To(BeEmpty())
 	})
+
+	// Mapping the username from email is only safe if the issuer vouched for the address.
+	// Kubernetes' own check lets a token without email_verified through, so the fixture
+	// adds a rule; these tokens come from the test issuer, under the same rules as Dex.
+	It("accepts a minted token with email_verified true, so the refusals below are about the claim", func(ctx SpecContext) {
+		code, user := fx.selfSubjectReview(ctx, fx.mint(map[string]any{"email": "carol@example.com", "email_verified": true}))
+
+		Expect(code).To(Equal(http.StatusCreated))
+		Expect(user).To(Equal("oidc:carol@example.com"))
+	})
+
+	DescribeTable("refuses an email the issuer did not verify",
+		func(ctx SpecContext, claims map[string]any) {
+			claims["email"] = "carol@example.com"
+
+			code, user := fx.selfSubjectReview(ctx, fx.mint(claims))
+
+			Expect(code).To(Equal(http.StatusUnauthorized))
+			Expect(user).To(BeEmpty())
+		},
+		Entry("without email_verified", map[string]any{}),
+		Entry("with email_verified false", map[string]any{"email_verified": false}),
+		Entry(`with email_verified the string "true"`, map[string]any{"email_verified": "true"}),
+	)
 
 	It("records the requesting user, and no impersonation, in the audit log", func(ctx SpecContext) {
 		ns := fx.namespace()
