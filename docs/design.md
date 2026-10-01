@@ -126,7 +126,10 @@ subresources, which return whatever their backend sends:
 - **Content types are allowlisted.** JSON, YAML, Kubernetes protobuf and the watch
   stream types pass; `text/plain` passes for logs. Anything else, `text/html` above all,
   is held back, and so is a body with no content type. A pod log or a proxied service
-  must not be able to serve a page that runs as the user on the shared origin.
+  must not be able to serve a page that runs as the user on the shared origin. A
+  `Content-Type` sent as more than one header field, or containing a comma, is held back
+  too: a browser may pick a different value from the one checked. A `HEAD` response has
+  no body, so it needs no content type.
 - **Every proxied response carries** `X-Content-Type-Options: nosniff`,
   `Content-Security-Policy: default-src 'none'; sandbox` and `Cache-Control: no-store`,
   replacing anything upstream sent. A shared cache in front of the origin must never
@@ -144,7 +147,8 @@ subresources, which return whatever their backend sends:
   decodes it transparently (it does not when the request already names an encoding),
   and the browser receives the body uncompressed with no `Content-Encoding`. The bound
   on response bytes counts decoded bytes, so a small compressed body cannot expand past
-  it. A response that still carries a `Content-Encoding` is held back. Compressing
+  it. A response that still carries a `Content-Encoding` field, even an empty one, is
+  held back. Compressing
   towards the browser is a later performance choice, not part of the boundary.
 - **Redirects are not followed and not passed on automatically.** A `Location` from an
   aggregated API could send the browser anywhere, so the user decides.

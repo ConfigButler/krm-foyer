@@ -70,7 +70,12 @@ bugs are here, where they are cheap to find:
 - **The proxy** runs against an `httptest` server standing in for the API server,
   which records what reached it. That shows what e2e cannot see directly: the browser's
   `Authorization`, `Impersonate-*` and cookie headers never arrive, and the user's token
-  always does.
+  always does. Each test that matters runs over HTTP/1.1 and HTTP/2 to the API server.
+- **The upstream response check** is fuzzed from the browser's side: whatever the
+  upstream sends, an approved response has only allowlisted headers, no encoding, and a
+  single content type that a browser cannot read as anything but an allowed one. The
+  property is written independently of the check, so it can catch the check's own
+  blind spots, such as a repeated `Content-Type` field.
 - **Sessions**: rotation at login, idle and absolute expiry, CSRF, and logout.
 
 ### e2e tests

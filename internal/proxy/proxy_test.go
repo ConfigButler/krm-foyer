@@ -46,8 +46,14 @@ func (a *apiServer) received() []*http.Request {
 
 func newAPIServer(t *testing.T, handler http.HandlerFunc) *apiServer {
 	t.Helper()
+	return newAPIServerWith(t, false, handler)
+}
+
+// newAPIServerWith serves HTTP/2 as well when http2 is set, as real API servers do.
+func newAPIServerWith(t *testing.T, http2 bool, handler http.HandlerFunc) *apiServer {
+	t.Helper()
 	a := &apiServer{}
-	a.Server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	a.Server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		a.requests = append(a.requests, r.Clone(context.Background()))
 		a.mu.Unlock()
@@ -58,8 +64,22 @@ func newAPIServer(t *testing.T, handler http.HandlerFunc) *apiServer {
 		}
 		handler(w, r)
 	}))
+	a.EnableHTTP2 = http2
+	a.StartTLS()
 	t.Cleanup(a.Close)
 	return a
+}
+
+// protocols are the ways krm-foyer may reach the API server.
+var protocols = map[string]bool{"HTTP/1.1": false, "HTTP/2": true}
+
+func assertProtocol(t *testing.T, api *apiServer, http2 bool) {
+	t.Helper()
+	for _, r := range api.received() {
+		if (r.ProtoMajor == 2) != http2 {
+			t.Fatalf("the API server was reached over %s", r.Proto)
+		}
+	}
 }
 
 type foyer struct {
@@ -159,7 +179,13 @@ func readStatus(t *testing.T, resp answer) status {
 // The path and query reach the API server byte-for-byte as the browser sent them,
 // minus /k8s.
 func TestForwardsPathAndQueryUnchanged(t *testing.T) {
-	api := newAPIServer(t, nil)
+	for name, http2 := range protocols {
+		t.Run(name, func(t *testing.T) { testForwardsPathAndQueryUnchanged(t, http2) })
+	}
+}
+
+func testForwardsPathAndQueryUnchanged(t *testing.T, http2 bool) {
+	api := newAPIServerWith(t, http2, nil)
 	f := newFoyer(t, api, credentials{token: userToken})
 	targets := []string{
 		"/api/v1/namespaces/team-a/configmaps?labelSelector=app%3Dweb&limit=50",
@@ -174,6 +200,7 @@ func TestForwardsPathAndQueryUnchanged(t *testing.T) {
 			t.Fatalf("GET /k8s%s = %d", target, resp.StatusCode)
 		}
 	}
+	assertProtocol(t, api, http2)
 	got := api.received()
 	for i, target := range targets {
 		if got[i].RequestURI != target {
@@ -186,7 +213,13 @@ func TestForwardsPathAndQueryUnchanged(t *testing.T) {
 // for it: no Authorization of its own, no impersonation, no cookie, no forwarding
 // headers. The headers Kubernetes needs to answer pass.
 func TestSendsOnlyTheUsersToken(t *testing.T) {
-	api := newAPIServer(t, nil)
+	for name, http2 := range protocols {
+		t.Run(name, func(t *testing.T) { testSendsOnlyTheUsersToken(t, http2) })
+	}
+}
+
+func testSendsOnlyTheUsersToken(t *testing.T, http2 bool) {
+	api := newAPIServerWith(t, http2, nil)
 	f := newFoyer(t, api, credentials{token: userToken})
 	browser := http.Header{
 		"Authorization":         {"Bearer browser-supplied"},
@@ -215,6 +248,7 @@ func TestSendsOnlyTheUsersToken(t *testing.T) {
 		t.Fatalf("PATCH = %d", resp.StatusCode)
 	}
 
+	assertProtocol(t, api, http2)
 	got := api.received()[0].Header
 	if v := got.Values("Authorization"); len(v) != 1 || v[0] != "Bearer "+userToken {
 		t.Errorf("Authorization = %q, want only the user's token", v)
@@ -544,7 +578,6 @@ func TestMutationsAreNotReplayed(t *testing.T) {
 		}
 		_ = conn.Close()
 	})
-	api.EnableHTTP2 = false
 	f := newFoyer(t, api, credentials{token: userToken})
 	// A kept-alive connection first: the transport only retries on a reused one.
 	f.get(t, "/k8s/api/v1/namespaces/team-a/configmaps")
@@ -713,5 +746,114 @@ func TestTokenNeverLeaves(t *testing.T) {
 	}
 	if !strings.Contains(f.logs.String(), `"msg":"interruption"`) {
 		t.Error("interruptions are not logged")
+	}
+}
+
+// Content-Type sent as more than one header field is ambiguous: a browser takes
+// the last usable value, a check of the first would see another. Held back, in
+// either order and even when the values agree.
+func TestHoldsBackRepeatedContentType(t *testing.T) {
+	for name, http2 := range protocols {
+		t.Run(name, func(t *testing.T) { testHoldsBackRepeatedContentType(t, http2) })
+	}
+}
+
+func testHoldsBackRepeatedContentType(t *testing.T, http2 bool) {
+	const page = "<script>steal()</script>"
+	for _, values := range [][]string{
+		{"application/json", "text/html"},
+		{"text/html", "application/json"},
+		{"application/json", "application/json"},
+		{"application/json", ""},
+		{"", "text/html"},
+	} {
+		api := newAPIServerWith(t, http2, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header()["Content-Type"] = values
+			_, _ = io.WriteString(w, page)
+		})
+		f := newFoyer(t, api, credentials{token: userToken})
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			resp := f.request(t, method, "/k8s/apis/aggregated.example.com/v1/things", nil, nil)
+			if resp.StatusCode != http.StatusBadGateway {
+				t.Errorf("%s with Content-Type fields %q: status = %d, want 502", method, values, resp.StatusCode)
+			}
+			if strings.Contains(resp.Body, page) {
+				t.Errorf("%s with Content-Type fields %q: the body reached the browser", method, values)
+			}
+			if got := resp.Header.Values("Content-Type"); len(got) > 1 {
+				t.Errorf("%s with Content-Type fields %q: browser got %q", method, values, got)
+			}
+		}
+		assertProtocol(t, api, http2)
+	}
+}
+
+// A HEAD response has no body, whatever Content-Length says: that describes the
+// GET. A missing content type is fine there; a disallowed one is still held back,
+// so HEAD and GET agree on what is refused.
+func TestHeadResponses(t *testing.T) {
+	for _, tc := range []struct {
+		contentType []string
+		code        int
+	}{
+		{nil, http.StatusOK},
+		{[]string{"application/json"}, http.StatusOK},
+		{[]string{"text/html"}, http.StatusBadGateway},
+		{[]string{"application/json", "text/html"}, http.StatusBadGateway},
+	} {
+		api := newAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header()["Content-Type"] = tc.contentType
+			w.Header().Set("Content-Length", "12")
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			_, _ = io.WriteString(w, `{"kind":"x"}`)
+		})
+		f := newFoyer(t, api, credentials{token: userToken})
+		resp := f.request(t, http.MethodHead, "/k8s/api/v1/namespaces/team-a/configmaps/c", nil, nil)
+		if resp.StatusCode != tc.code {
+			t.Errorf("HEAD with Content-Type %q: status = %d, want %d", tc.contentType, resp.StatusCode, tc.code)
+		}
+		if tc.code == http.StatusOK && resp.Header.Get("Content-Length") != "12" {
+			t.Errorf("HEAD with Content-Type %q: Content-Length = %q, want the API server's 12",
+				tc.contentType, resp.Header.Get("Content-Length"))
+		}
+		assertSecurityHeaders(t, resp)
+		// The same answer without a content type has a body on GET, and is held back.
+		if tc.contentType == nil {
+			if get := f.get(t, "/k8s/api/v1/namespaces/team-a/configmaps/c"); get.StatusCode != http.StatusBadGateway {
+				t.Errorf("GET of a body with no content type: status = %d, want 502", get.StatusCode)
+			}
+		}
+	}
+}
+
+// An encoding hidden behind an empty first header field is still an encoding.
+func TestHoldsBackRepeatedContentEncoding(t *testing.T) {
+	api := newAPIServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header()["Content-Encoding"] = []string{"", "br"}
+		_, _ = io.WriteString(w, "not really brotli")
+	})
+	f := newFoyer(t, api, credentials{token: userToken})
+	resp := f.get(t, "/k8s/api/v1/configmaps")
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("Content-Encoding fields [\"\" br]: status = %d, want 502", resp.StatusCode)
+	}
+	readStatus(t, resp)
+}
+
+// An upgrade request is refused whatever its first Upgrade field says.
+func TestRefusesUpgradeInAnyField(t *testing.T) {
+	api := newAPIServer(t, nil)
+	f := newFoyer(t, api, credentials{token: userToken})
+	resp := f.request(t, http.MethodGet, "/k8s/api/v1/configmaps?watch=1", nil,
+		http.Header{"Connection": {"Upgrade"}, "Upgrade": {"", "websocket"}})
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("Upgrade fields [\"\" websocket]: status = %d, want 501", resp.StatusCode)
+	}
+	if n := len(api.received()); n != 0 {
+		t.Errorf("%d requests reached the API server", n)
 	}
 }

@@ -20,9 +20,14 @@ Each step makes pending specs real and ends with `task verify` green.
 2. **OIDC login and sessions, deployed into the e2e fixture.** krm-foyer runs in the
    cluster with a cluster-admin bait service account, and the suite logs in by walking
    Dex's login form with a cookie jar. The differential, audit, session, CSRF, logout and
-   token-scan specs go green together.
-3. **Streams**, once the first two hold.
-4. **An example domain** with pending, accepted, rejected and failed outcomes, and a
+   token-scan specs go green together. The [interruption](design.md#interruptions) pages
+   come with it: the 401 page's sign-in link needs login, and this is the first step at
+   which a person can browse `/k8s`.
+3. **Bounds**, before anyone runs krm-foyer for real: page size, response bytes (counted
+   decoded), request rate, watch duration and concurrent native watches, each with a test
+   that reaches it. Until this step is done, no release is fit for a cluster that matters.
+4. **Streams**, once the first three hold, with their own bound on concurrent streams.
+5. **An example domain** with pending, accepted, rejected and failed outcomes, and a
    second frontend on a different API group, with no application-specific code in
    krm-foyer. Then measure the operational cost against keeping auth and transport in
    each application.
@@ -57,7 +62,8 @@ Security items need tests that try to get past the boundary.
 - [ ] Browser e2e with Playwright: log in, read, edit, get refused with 403, hit a 409,
       log out
 - [ ] Coverage baseline that ratchets upward
-- [x] A fuzz test for path checking, with a short fuzz run in `task verify`
+- [x] Fuzz tests for path checking and the upstream response check, with a short fuzz
+      run of each in `task verify`
 - [ ] Helm chart with `values.schema.json`, `helm lint`, `helm template` tests, and e2e
       that installs through the chart
 - [ ] Signed multi-arch image (cosign keyless) with an SBOM
@@ -102,9 +108,10 @@ Security items need tests that try to get past the boundary.
 - [x] Upstream responses: redirects are not followed or passed on, `Set-Cookie` and CORS
       headers are dropped, and every response is `Cache-Control: no-store`. See
       [upstream responses](design.md#upstream-responses)
-- [ ] [Interruptions](design.md#interruptions) as pages for browser navigations and as
-      `Status` for code, with the same status code; tests that a `fetch` cannot get the
-      page form and that no Kubernetes answer is replaced
+- [x] [Interruptions](design.md#interruptions) as `Status` for code
+- [ ] Interruptions as pages for browser navigations, with the same status code; tests
+      that a `fetch` cannot get the page form and that no Kubernetes answer is replaced
+      (step 2)
 - [ ] A redirect notice that shows the full target and continues only on a click, and a
       held-back page shown as escaped text
 - [ ] A test proves that no request falls back to the service account
@@ -149,7 +156,7 @@ Security items need tests that try to get past the boundary.
 - [x] Native watches and logs stream without buffering, and cancellation reaches the
       upstream
 - [ ] Bounds on page size, response bytes, request rate, watch duration and concurrent
-      streams
+      streams (step 3)
 
 ### Streams
 

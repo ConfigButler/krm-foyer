@@ -125,7 +125,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.interrupt(w, r, refused)
 		return
 	}
-	if r.Method == http.MethodConnect || r.Header.Get("Upgrade") != "" {
+	// Any Upgrade field counts, even after an empty one: Get reads only the first.
+	if r.Method == http.MethodConnect || len(r.Header.Values("Upgrade")) > 0 {
 		p.interrupt(w, r, &Interruption{
 			Status: http.StatusNotImplemented, Reason: "NotImplemented",
 			Message: "upgrade protocols (exec, attach, port-forward, WebSocket) are not supported by krm-foyer",
@@ -193,12 +194,20 @@ func checkResponse(resp *http.Response) error {
 	// Go's transport removes Content-Encoding when it decoded the body itself, so
 	// one still here is an encoding the browser did not ask for and cannot be
 	// bounded by its decoded size.
-	if enc := resp.Header.Get("Content-Encoding"); enc != "" {
-		return heldBack("Content-Encoding", enc)
+	if enc := resp.Header.Values("Content-Encoding"); len(enc) > 0 {
+		return heldBack("Content-Encoding", strings.Join(enc, ", "))
+	}
+	// Repeated header fields are ambiguous: the browser takes the last usable value,
+	// and Get would check the first. Content-Type has exactly one meaning or none.
+	if cts := resp.Header.Values("Content-Type"); len(cts) > 1 {
+		return heldBack("Content-Type", strings.Join(cts, ", "))
 	}
 	if ct := resp.Header.Get("Content-Type"); ct != "" || !emptyBody(resp) {
+		// A browser splits a Content-Type on commas and uses the last type it can
+		// parse; Go's parser does not split. The API server never sends a comma, so
+		// refusing one keeps the two from ever having to agree.
 		media, _, err := mime.ParseMediaType(ct)
-		if err != nil || !contentTypes[media] {
+		if err != nil || !contentTypes[media] || strings.Contains(ct, ",") {
 			return heldBack("Content-Type", ct)
 		}
 	}
@@ -217,8 +226,11 @@ func checkResponse(resp *http.Response) error {
 	return nil
 }
 
+// emptyBody reports whether resp has no body for the browser to interpret. A HEAD
+// response never has one; its Content-Length describes the GET.
 func emptyBody(resp *http.Response) bool {
-	return resp.ContentLength == 0 || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified
+	return resp.Request != nil && resp.Request.Method == http.MethodHead ||
+		resp.ContentLength == 0 || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified
 }
 
 func heldBack(field, value string) *Interruption {
