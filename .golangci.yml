@@ -15,7 +15,25 @@ linters:
     # Requests built without a context cannot be cancelled when the browser goes away.
     - noctx
 
+  settings:
+    revive:
+      rules:
+        - name: dot-imports
+          arguments:
+            # Ginkgo and Gomega are written to be dot-imported; gitops-reverser does the same.
+            - allowed-packages: ["github.com/onsi/ginkgo/v2", "github.com/onsi/gomega"]
+  exclusions:
+    rules:
+      # The e2e suite drives kubectl and docker and holds the fixture's throwaway Dex
+      # client secrets; those are its job, not injection or leaked credentials.
+      - path: test/e2e/
+        linters: [gosec]
+
 formatters:
   enable:
     - gofmt
     - goimports
+
+run:
+  # The e2e suite is behind a build tag so `go test ./...` stays fast; lint it anyway.
+  build-tags: [e2e]

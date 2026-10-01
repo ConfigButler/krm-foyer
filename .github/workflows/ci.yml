@@ -68,8 +68,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          # Keyed on go.mod until the first dependency brings a go.sum.
-          cache-dependency-path: go.mod
+          cache-dependency-path: go.sum
       - name: read the golangci-lint version from .devcontainer/Dockerfile
         id: versions
         run: echo "golangci-lint=$(grep -oP 'GOLANGCI_LINT_VERSION=\K\S+' .devcontainer/Dockerfile)" >> "$GITHUB_OUTPUT"
@@ -99,6 +98,41 @@ jobs:
       # The same task a developer runs: build the image, start it, and check that it answers.
       # A Dockerfile that builds but produces a binary that cannot start fails here.
       - run: task image-smoke
+
+  e2e:
+    name: e2e (k3d + Dex)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: install k3d and kubectl (versions from .devcontainer/Dockerfile)
+        run: |
+          set -euo pipefail
+          k3d_version="$(grep -oP 'K3D_VERSION=\K\S+' .devcontainer/Dockerfile)"
+          kubectl_version="$(grep -oP 'KUBECTL_VERSION=\K\S+' .devcontainer/Dockerfile)"
+          echo "k3d ${k3d_version}, kubectl ${kubectl_version}"
+          sudo curl -fsSL -o /usr/local/bin/k3d \
+            "https://github.com/k3d-io/k3d/releases/download/${k3d_version}/k3d-linux-amd64"
+          sudo curl -fsSL -o /usr/local/bin/kubectl \
+            "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"
+          sudo chmod +x /usr/local/bin/k3d /usr/local/bin/kubectl
+      # The runner is the Docker host, so it reaches the fixture's network directly; no
+      # port is published. -v lists every spec, including the pending ones.
+      - run: task test-e2e -- -v -ginkgo.v
+      - name: API server log on failure
+        if: failure()
+        run: docker logs k3d-krm-foyer-e2e-server-0 2>&1 | tail -200
 
   devcontainer:
     name: devcontainer builds

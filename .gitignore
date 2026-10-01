@@ -9,3 +9,7 @@
 
 # Editor scratch
 *.local.*
+
+# e2e fixture: generated certificates, kubeconfig and addresses
+.e2e/
+external/*

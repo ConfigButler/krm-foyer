@@ -23,6 +23,7 @@ tasks:
       - task: lint
       - task: test
       - task: image-smoke
+      - task: test-e2e
 
   test:
     desc: "Go tests with the race detector."
@@ -30,6 +31,24 @@ tasks:
       # -race stays on: a proxy that fans streams out to many browsers is where a
       # data race turns into one user seeing another's data.
       - go test -race ./...
+
+  test-e2e:
+    desc: "End-to-end suite against a real API server and a real Dex. Brings the fixture up if needed."
+    deps: [e2e-up]
+    cmds:
+      # The suite is behind a build tag so `task test` stays fast. Pending specs are the
+      # krm-foyer claims not implemented yet; they are listed, not failed.
+      - go test -tags e2e -count=1 -timeout 15m ./test/e2e/ {{.CLI_ARGS}}
+
+  e2e-up:
+    desc: "Start (or reuse) the e2e fixture: k3d, Dex, and an API server that trusts it."
+    cmds:
+      - test/e2e/cluster/start-cluster.sh
+
+  e2e-down:
+    desc: "Delete the e2e fixture and its generated certificates."
+    cmds:
+      - test/e2e/cluster/stop-cluster.sh
 
   lint:
     desc: "Vet and lint the Go code, the workflows and the Dockerfiles."

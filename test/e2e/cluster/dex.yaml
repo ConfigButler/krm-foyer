@@ -1,0 +1,39 @@
+# Dex for the e2e fixture: the identity provider the API server trusts.
+# Every static user's password is "password".
+issuer: https://dex.krm-foyer.test:5556
+storage:
+  type: memory
+web:
+  https: 0.0.0.0:5556
+  tlsCert: /etc/krm-foyer-e2e/dex.crt
+  tlsKey: /etc/krm-foyer-e2e/dex.key
+oauth2:
+  skipApprovalScreen: true
+  # The password grant lets the suite obtain a user's token without a browser, so it
+  # can ask the API server directly what that user may do and compare the answer
+  # with what krm-foyer returns.
+  passwordConnector: local
+  grantTypes: [authorization_code, refresh_token, password]
+enablePasswordDB: true
+staticPasswords:
+  - email: alice@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: alice
+    userID: 0f8e5c1a-alice
+  - email: bob@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: bob
+    userID: 3a1d9b7e-bob
+staticClients:
+  - id: krm-foyer
+    name: krm-foyer
+    secret: krm-foyer-e2e-secret
+    redirectURIs:
+      - https://foyer.krm-foyer.test/auth/callback
+  # A client the cluster does not accept tokens for. Its tokens are real Dex tokens
+  # with the wrong audience.
+  - id: other-app
+    name: Some other application
+    secret: other-app-e2e-secret
+    redirectURIs:
+      - https://other.krm-foyer.test/callback
