@@ -267,18 +267,210 @@ var _ = Describe("krm-foyer", Label("foyer"), func() {
 	})
 
 	Context("does not invent authorization", func() {
-		PIt("returns the API server's own answer for allowed, forbidden, missing, conflicting and invalid requests")
-		PIt("follows a RoleBinding change on the next request, with no restart and no new login")
-		PIt("passes a watch through exactly as the API server answers it, for a user who may list but not watch")
-		PIt("rejects a non-canonical path instead of forwarding it")
-		PIt("refuses service, pod and node proxy subresources as unsupported, without reaching the backend")
+		It("returns the API server's own answer for allowed, forbidden, missing, conflicting and invalid requests", func(ctx SpecContext) {
+			ns := fx.namespace()
+			alice := signIn(ctx, alice)
+			fx.grant(ns, alice.k8sName, "configmaps", "get", "list", "create", "update", "patch")
+			cms := "/api/v1/namespaces/" + ns + "/configmaps"
+			fx.kubectl("-n", ns, "create", "configmap", "taken", "--from-literal=k=v")
+			eventually(ctx, func() int { return fx.direct(ctx, alice.token, http.MethodGet, cms, nil).Code }).
+				Should(Equal(http.StatusOK))
+			apply := http.Header{"Content-Type": {"application/apply-patch+yaml"}}
+			merge := http.Header{"Content-Type": {"application/merge-patch+json"}}
+
+			for _, tc := range []struct {
+				name, method, path string
+				body               []byte
+				header             http.Header
+				code               int
+			}{
+				{"allowed list", http.MethodGet, cms, nil, nil, http.StatusOK},
+				{"allowed get", http.MethodGet, cms + "/taken", nil, nil, http.StatusOK},
+				{"forbidden resource", http.MethodGet, "/api/v1/namespaces/" + ns + "/secrets", nil, nil, http.StatusForbidden},
+				{"forbidden cluster scope", http.MethodGet, "/api/v1/namespaces", nil, nil, http.StatusForbidden},
+				{"forbidden verb", http.MethodDelete, cms + "/taken", nil, nil, http.StatusForbidden},
+				{"missing", http.MethodGet, cms + "/nope", nil, nil, http.StatusNotFound},
+				{"missing, patched", http.MethodPatch, cms + "/nope", []byte(`{"data":{"a":"b"}}`), merge, http.StatusNotFound},
+				{"already exists", http.MethodPost, cms, configMap("taken"), nil, http.StatusConflict},
+				{"stale resourceVersion", http.MethodPut, cms + "/taken",
+					[]byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"taken","resourceVersion":"1"}}`), nil, http.StatusConflict},
+				{"invalid name", http.MethodPost, cms, configMap("Not_Valid"), nil, http.StatusUnprocessableEntity},
+				{"unsupported media type", http.MethodPost, cms, []byte("k=v"), http.Header{"Content-Type": {"text/plain"}}, http.StatusUnsupportedMediaType},
+				{"dry run", http.MethodPost, cms + "?dryRun=All", configMap("dry"), nil, http.StatusCreated},
+				{"server-side apply, dry run", http.MethodPatch, cms + "/applied?fieldManager=e2e&dryRun=All",
+					[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: applied\ndata:\n  k: v\n"), apply, http.StatusCreated},
+				// Authorization comes before routing: an unknown group is a 403 for alice.
+				{"not an API group", http.MethodGet, "/apis/nothing.example.com/v1/things", nil, nil, http.StatusForbidden},
+			} {
+				By(tc.name)
+				direct, _ := alice.compare(ctx, tc.method, tc.path, tc.body, tc.header)
+				Expect(direct.Code).To(Equal(tc.code), "%s: the fixture answered differently than this spec expects: %s", tc.name, direct.Body)
+			}
+
+			By("creating for real: both get 201, and the objects exist")
+			Expect(fx.directWith(ctx, alice.token, http.MethodPost, cms, configMap("direct"), nil).Code).To(Equal(http.StatusCreated))
+			Expect(alice.viaFoyer(ctx, http.MethodPost, cms, configMap("via-foyer"), nil).Code).To(Equal(http.StatusCreated))
+			Expect(fx.kubectl("-n", ns, "get", "configmaps", "-o", "name")).To(And(
+				ContainSubstring("configmap/direct"), ContainSubstring("configmap/via-foyer"), Not(ContainSubstring("configmap/dry"))))
+
+			By("asking Kubernetes who the user is: the same answer either way")
+			review := []byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`)
+			_, via := alice.compare(ctx, http.MethodPost, "/apis/authentication.k8s.io/v1/selfsubjectreviews", review, nil)
+			Expect(string(via.Body)).To(ContainSubstring(`"username":"` + aliceK8sName + `"`))
+		})
+
+		It("follows a RoleBinding change on the next request, with no restart and no new login", func(ctx SpecContext) {
+			ns := fx.namespace()
+			alice := signIn(ctx, alice)
+			path := "/api/v1/namespaces/" + ns + "/configmaps"
+			Expect(alice.viaFoyer(ctx, http.MethodGet, path, nil, nil).Code).To(Equal(http.StatusForbidden))
+
+			revoke := fx.grant(ns, alice.k8sName, "configmaps", "list")
+			eventually(ctx, func() int { return alice.viaFoyer(ctx, http.MethodGet, path, nil, nil).Code }).
+				Should(Equal(http.StatusOK))
+
+			revoke()
+			eventually(ctx, func() int { return alice.viaFoyer(ctx, http.MethodGet, path, nil, nil).Code }).
+				Should(Equal(http.StatusForbidden))
+		})
+
+		It("passes a watch through exactly as the API server answers it, for a user who may list but not watch", func(ctx SpecContext) {
+			ns := fx.namespace()
+			alice := signIn(ctx, alice)
+			fx.kubectl("-n", ns, "create", "configmap", "watched", "--from-literal=k=v")
+			fx.grant(ns, alice.k8sName, "configmaps", "list")
+			path := "/api/v1/namespaces/" + ns + "/configmaps"
+			eventually(ctx, func() int { return alice.viaFoyer(ctx, http.MethodGet, path, nil, nil).Code }).
+				Should(Equal(http.StatusOK))
+
+			By("refusing the watch with the API server's own 403")
+			direct, _ := alice.compare(ctx, http.MethodGet, path+"?watch=1", nil, nil)
+			Expect(direct.Code).To(Equal(http.StatusForbidden))
+
+			By("streaming it once watch is granted")
+			fx.grant(ns, alice.k8sName, "configmaps", "watch")
+			watch := path + "?watch=1&timeoutSeconds=2"
+			eventually(ctx, func() int { return fx.direct(ctx, alice.token, http.MethodGet, watch, nil).Code }).
+				Should(Equal(http.StatusOK))
+			direct, via := alice.compare(ctx, http.MethodGet, watch, nil, nil)
+			for _, a := range []answer{direct, via} {
+				Expect(string(a.Body)).To(And(ContainSubstring(`"type":"ADDED"`), ContainSubstring(`"name":"watched"`)))
+			}
+		})
+
+		It("rejects a non-canonical path instead of forwarding it", func(ctx SpecContext) {
+			alice := signIn(ctx, alice)
+			for _, path := range []string{
+				"/api/v1//namespaces",
+				"/api/v1/./namespaces",
+				"/api/v1/namespaces/default/../kube-system/secrets",
+				"/api/v1/namespaces/default%2Fsecrets",
+				"/api/v1/namespaces/",
+				"/api/v1/n%61mespaces",
+			} {
+				a := alice.viaFoyer(ctx, http.MethodGet, path, nil, nil)
+				Expect(a.Code).To(Equal(http.StatusBadRequest), "%s: %s", path, a.Body)
+				Expect(a.status().Kind).To(Equal("Status"), path)
+				assertNeverAudited(ctx, a.Marker)
+			}
+		})
+
+		It("refuses service, pod and node proxy subresources as unsupported, without reaching the backend", func(ctx SpecContext) {
+			alice := signIn(ctx, alice)
+			for _, path := range []string{
+				"/api/v1/namespaces/default/pods/web-0/proxy",
+				"/api/v1/namespaces/default/pods/web-0:8080/proxy/admin",
+				"/api/v1/namespaces/default/services/web:80/proxy",
+				"/api/v1/nodes/k3d-krm-foyer-e2e-server-0/proxy/metrics",
+				"/api/v1/namespaces/default/pods/web-0/exec?command=sh",
+				"/api/v1/namespaces/default/pods/web-0/attach",
+				"/api/v1/namespaces/default/pods/web-0/portforward",
+			} {
+				a := alice.viaFoyer(ctx, http.MethodGet, path, nil, nil)
+				Expect(a.Code).To(Equal(http.StatusNotImplemented), "%s: %s", path, a.Body)
+				Expect(a.status().Kind).To(Equal("Status"), path)
+				assertNeverAudited(ctx, a.Marker)
+			}
+		})
 	})
 
 	Context("keeps the credential on the server", func() {
-		PIt("never returns an ID, access or refresh token in any response the suite received")
-		PIt("destroys the session on logout, so a replayed cookie gets a 401")
+		It("never returns an ID, access or refresh token in any response the suite received", func(ctx SpecContext) {
+			By("making krm-foyer answer in every way it can: login, session, API, pages, refusals, logout")
+			alice := signIn(ctx, alice)
+			alice.b.get(ctx, "/auth/session")
+			alice.viaFoyer(ctx, http.MethodGet, "/api/v1/namespaces", nil, nil)
+			alice.viaFoyer(ctx, http.MethodPost, "/apis/authentication.k8s.io/v1/selfsubjectreviews",
+				[]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`), nil)
+			alice.viaFoyer(ctx, http.MethodGet, "/api/v1//namespaces", nil, http.Header{"Sec-Fetch-Dest": {"document"}})
+			alice.b.do(ctx, http.MethodPost, "/k8s/api/v1/namespaces", nil, nil)
+			fx.browser().do(ctx, http.MethodGet, "/k8s/api/v1/namespaces", nil, http.Header{"Sec-Fetch-Dest": {"document"}})
+			fx.browser().get(ctx, "/auth/login?return_to=//evil.example")
+			fx.browser().get(ctx, "/auth/callback?code=x&state=y")
+			alice.b.do(ctx, http.MethodPost, "/auth/logout", nil, alice.proof())
+			fx.browser().get(ctx, "/auth/logged-out")
+
+			By("scanning everything krm-foyer sent this suite so far, and everything it logged")
+			leaks, responses := fx.credentialLeaks()
+			Expect(responses).To(BeNumerically(">", 10), "the scan saw too little to mean anything")
+			Expect(leaks).To(BeEmpty())
+			// AfterSuite scans again, once every spec has run.
+		})
+
+		It("destroys the session on logout, so a replayed cookie gets a 401", func(ctx SpecContext) {
+			alice := signIn(ctx, alice)
+			copied := alice.b.cookie(sessionCookie)
+			Expect(alice.viaFoyer(ctx, http.MethodGet, "/version", nil, nil).Code).To(Equal(http.StatusOK))
+
+			out := alice.b.do(ctx, http.MethodPost, "/auth/logout", nil, alice.proof())
+			Expect(out.Code).To(Equal(http.StatusNoContent), "%s", out.Body)
+			Expect(alice.b.cookie(sessionCookie)).To(BeEmpty(), "the cookie was not cleared")
+
+			replay := fx.browser()
+			replay.setCookie(sessionCookie, copied)
+			a := replay.get(ctx, "/k8s/version")
+			Expect(a.Code).To(Equal(http.StatusUnauthorized))
+			assertNeverAudited(ctx, a.Marker)
+			Expect(replay.get(ctx, "/auth/session").Code).To(Equal(http.StatusUnauthorized))
+		})
+
 		PIt("ends the session when Dex refuses a refresh for a removed user, and records how long that took")
-		PIt("requires CSRF proof and a same-origin request for mutations and logout")
+
+		It("requires CSRF proof and a same-origin request for mutations and logout", func(ctx SpecContext) {
+			ns := fx.namespace()
+			alice := signIn(ctx, alice)
+			fx.grant(ns, alice.k8sName, "configmaps", "create", "delete")
+			cms := "/k8s/api/v1/namespaces/" + ns + "/configmaps"
+			other := signIn(ctx, alice.name)
+			for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+				for name, tc := range map[string]struct {
+					header http.Header
+					reason string
+				}{
+					"no proof":                {http.Header{"Origin": {fx.foyerURL}}, "CSRFProofRequired"},
+					"another session's proof": {http.Header{"Origin": {fx.foyerURL}, "X-Csrf-Token": {other.csrf}}, "CSRFProofRequired"},
+					"another origin":          {http.Header{"Origin": {"https://evil.example"}, "X-Csrf-Token": {alice.csrf}}, "CrossOriginRequest"},
+					"no origin":               {http.Header{"X-Csrf-Token": {alice.csrf}}, "CrossOriginRequest"},
+				} {
+					a := alice.b.do(ctx, method, cms+"/target", configMap("target"), tc.header)
+					Expect(a.Code).To(Equal(http.StatusForbidden), "%s %s: %s", method, name, a.Body)
+					Expect(a.status().Reason).To(Equal(tc.reason), "%s %s", method, name)
+					assertNeverAudited(ctx, a.Marker)
+				}
+			}
+
+			By("letting the same request through with both")
+			Expect(alice.b.do(ctx, http.MethodPost, cms, configMap("made"), alice.proof()).Code).To(Equal(http.StatusCreated))
+
+			By("refusing a logout from another origin or without proof, and keeping the session")
+			for _, header := range []http.Header{
+				{"Origin": {fx.foyerURL}},
+				{"Origin": {"https://evil.example"}, "X-Csrf-Token": {alice.csrf}},
+			} {
+				Expect(alice.b.do(ctx, http.MethodPost, "/auth/logout", nil, header).Code).To(Equal(http.StatusForbidden))
+				Expect(alice.b.session(ctx).Authenticated).To(BeTrue())
+			}
+		})
 	})
 
 	// docs/ingress.md: krm-foyer terminates TLS itself by default, or sits behind a

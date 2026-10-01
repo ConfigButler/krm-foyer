@@ -3,10 +3,13 @@
 What is left to build, and in what order. The [design](design.md) says what krm-foyer
 must do; this file tracks how far along that is.
 
-**The design's security model is mostly not implemented yet.** Server-held tokens,
-access decided by Kubernetes alone and no service-account fallback are requirements. Each becomes a property of
-krm-foyer when the test that tries to get past it exists and passes, and not before. The
-proxy's boundaries have unit tests; none is proved against a real cluster until step 2.
+**The core of the security model is proved against a real cluster; the rest is not
+built yet.** Server-held tokens, access decided by Kubernetes alone and no
+service-account fallback each have an e2e spec that tries to get past them, against a
+real API server and Dex, with krm-foyer's service account as cluster-admin bait. Each
+other requirement becomes a property of krm-foyer when its test exists and passes, and
+not before. Until the bounds in step 3 exist, no release is fit for a cluster that
+matters.
 
 ## Order of work
 
@@ -17,7 +20,7 @@ Each step makes pending specs real and ends with `task verify` green.
    be tested against an `httptest` API server before login exists. There is deliberately no test-only way to hand krm-foyer a token: a back door
    behind a build tag is still a back door. So the binary does not serve `/k8s` until
    step 2 gives the proxy a credential source.
-2. **OIDC login and sessions, deployed into the e2e fixture.** krm-foyer runs in the
+2. **OIDC login and sessions, deployed into the e2e fixture** (done). krm-foyer runs in the
    cluster with a cluster-admin bait service account, and the suite logs in by walking
    Dex's login form with a cookie jar. The differential, audit, session, CSRF, logout and
    token-scan specs go green together. The [interruption](design.md#interruptions) pages
@@ -71,8 +74,10 @@ Security items need tests that try to get past the boundary.
 - [x] PR title check for conventional commits (squash merges take the PR title)
 - [x] krm-foyer deployed into the e2e fixture (image imported with `k3d image import`),
       with its service account as cluster-admin bait
-- [ ] The remaining `foyer` specs made real: differential answers, CSRF, logout and the
-      token scan (step 2), streams and the ingress (later)
+- [x] The `foyer` specs for step 2 made real: login, identity, differential answers,
+      RBAC changes, watches, path and subresource refusals, CSRF, logout and the token
+      scan, each checked by deploying a krm-foyer broken on purpose
+- [ ] The remaining `foyer` specs: refusal of a refresh (step 2b), the ingress (later)
 - [ ] Browser e2e with Playwright: log in, read, edit, get refused with 403, hit a 409,
       log out
 - [ ] Coverage baseline that ratchets upward
@@ -114,8 +119,9 @@ Security items need tests that try to get past the boundary.
 
 ### Access
 
-- [ ] Every answer through krm-foyer equals the API server's answer for the same token
-      (the differential specs)
+- [x] Every answer through krm-foyer equals the API server's answer for the same token
+      (the differential specs: allowed, forbidden, missing, conflicting, stale, invalid,
+      unsupported media type, dry-run and Server-Side Apply)
 - [x] Non-canonical paths (`//`, `..`, encoded slashes) are rejected, not normalized, and
       the path forwarded is byte-for-byte the path received
 - [x] Browser-supplied `Authorization`, `Impersonate-*` and forwarding headers are
@@ -133,8 +139,9 @@ Security items need tests that try to get past the boundary.
 - [x] A test proves that no request falls back to the service account: with the bait in
       place, a request without a session gets 401 and never reaches the API server, and
       the audit log names the user for every request with one
-- [ ] A test proves that no response, on any route, contains a token krm-foyer holds,
-      including tokens obtained by refresh
+- [x] A test proves that no response, on any route, and no log line contains a token
+      krm-foyer holds, a session ID or a client secret
+- [ ] The same for tokens obtained by refresh, read from the session store (step 2b)
 - [x] Upstream bodies reach the browser decoded: the browser's `Accept-Encoding` is
       dropped, and a gzip answer from the API server arrives uncompressed without
       `Content-Encoding`
@@ -170,12 +177,12 @@ Security items need tests that try to get past the boundary.
 - [ ] The [session lifecycle](design.md#session-lifecycle) bounds, each with a test:
       logout seen by every replica at once, logout racing a refresh, the session store
       unavailable, and a stream open across logout and expiry
-- [ ] Session IDs never appear in krm-foyer's logs or error pages
+- [x] Session IDs never appear in krm-foyer's logs or error pages
 
 ### Proxy semantics
 
-- [ ] `Status` errors, content types, patch types, dry-run and Server-Side Apply pass
-      through unchanged
+- [x] `Status` errors, content types, patch types, dry-run and Server-Side Apply pass
+      through unchanged (the differential specs)
 - [ ] Mutations are never replayed, including after the session is refreshed
 - [x] Native watches and logs stream without buffering, and cancellation reaches the
       upstream

@@ -34,11 +34,14 @@ User-Agent, which finds its audit event.
 cluster-admin. This makes the most dangerous bug the loudest one: a fallback would turn
 a refusal into success.
 
-**Token scan.** After the run, no response the suite received from krm-foyer, and no line
-krm-foyer logged, may contain a token or a session ID. The tokens to look for are the
-ones the suite obtained itself plus the ones krm-foyer holds, read from its session store
-as admin. That second set includes tokens krm-foyer got by refreshing, which the suite
-never saw.
+**Token scan.** No response the suite received from krm-foyer, and no line krm-foyer
+logged, may contain a token, a client secret or a session ID. The scan runs as a spec and
+again after the whole suite. It looks for every token the suite obtained, exactly, and for
+anything shaped like a JWT. The second covers the tokens krm-foyer holds and never showed
+the suite: the ID tokens it got by redeeming codes, and its own service-account token.
+krm-foyer holds no refresh token yet, since it asks for no `offline_access`. When refresh
+arrives (roadmap step 2b), its session store moves out of process, and the scan also reads
+it as admin for the opaque refresh tokens no pattern can find.
 
 A session ID has exactly one place it belongs: the `Set-Cookie` header that issues it,
 on the login callback and wherever the ID is rotated. The scan allows the ID there, and
