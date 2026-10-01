@@ -26,11 +26,14 @@ tasks:
       - task: test-e2e
 
   test:
-    desc: "Go tests with the race detector."
+    desc: "Go tests with the race detector, and a short fuzz run."
     cmds:
       # -race stays on: a proxy that fans streams out to many browsers is where a
       # data race turns into one user seeing another's data.
       - go test -race ./...
+      # A short run of the path-checking property on top of its seeds, which the line
+      # above already runs. -fuzz takes one package and one target at a time.
+      - go test -run '^$' -fuzz '^FuzzCheckPath$' -fuzztime 10s ./internal/proxy/
 
   test-e2e:
     desc: "End-to-end suite against a real API server and a real Dex. Brings the fixture up if needed."

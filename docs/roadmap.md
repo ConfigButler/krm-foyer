@@ -3,18 +3,20 @@
 What is left to build, and in what order. The [design](design.md) says what krm-foyer
 must do; this file tracks how far along that is.
 
-**Nothing in the design's security model is implemented yet.** Server-held tokens,
+**The design's security model is mostly not implemented yet.** Server-held tokens,
 access decided by Kubernetes alone and no service-account fallback are requirements. Each becomes a property of
-krm-foyer when the test that tries to get past it exists and passes, and not before.
+krm-foyer when the test that tries to get past it exists and passes, and not before. The
+proxy's boundaries have unit tests; none is proved against a real cluster until step 2.
 
 ## Order of work
 
 Each step makes pending specs real and ends with `task verify` green.
 
-1. **The proxy, unit tests only.** Path checking first, as a pure function. Then the
+1. **The proxy, unit tests only** (done). Path checking first, as a pure function. Then the
    proxy, which takes the user's credential from the session and nothing else, so it can
    be tested against an `httptest` API server before login exists. There is deliberately no test-only way to hand krm-foyer a token: a back door
-   behind a build tag is still a back door.
+   behind a build tag is still a back door. So the binary does not serve `/k8s` until
+   step 2 gives the proxy a credential source.
 2. **OIDC login and sessions, deployed into the e2e fixture.** krm-foyer runs in the
    cluster with a cluster-admin bait service account, and the suite logs in by walking
    Dex's login form with a cookie jar. The differential, audit, session, CSRF, logout and
@@ -55,7 +57,7 @@ Security items need tests that try to get past the boundary.
 - [ ] Browser e2e with Playwright: log in, read, edit, get refused with 403, hit a 409,
       log out
 - [ ] Coverage baseline that ratchets upward
-- [ ] Fuzz tests for path checking and policy matching, with a short fuzz run in CI
+- [x] A fuzz test for path checking, with a short fuzz run in `task verify`
 - [ ] Helm chart with `values.schema.json`, `helm lint`, `helm template` tests, and e2e
       that installs through the chart
 - [ ] Signed multi-arch image (cosign keyless) with an SBOM
@@ -93,11 +95,11 @@ Security items need tests that try to get past the boundary.
 
 - [ ] Every answer through krm-foyer equals the API server's answer for the same token
       (the differential specs)
-- [ ] Non-canonical paths (`//`, `..`, encoded slashes) are rejected, not normalized, and
+- [x] Non-canonical paths (`//`, `..`, encoded slashes) are rejected, not normalized, and
       the path forwarded is byte-for-byte the path received
-- [ ] Browser-supplied `Authorization`, `Impersonate-*` and forwarding headers are
-      stripped, and the session cookie never reaches Kubernetes
-- [ ] Upstream responses: redirects are not followed or passed on, `Set-Cookie` and CORS
+- [x] Browser-supplied `Authorization`, `Impersonate-*` and forwarding headers are
+      stripped, and the session cookie never reaches Kubernetes (unit tests; e2e in step 2)
+- [x] Upstream responses: redirects are not followed or passed on, `Set-Cookie` and CORS
       headers are dropped, and every response is `Cache-Control: no-store`. See
       [upstream responses](design.md#upstream-responses)
 - [ ] [Interruptions](design.md#interruptions) as pages for browser navigations and as
@@ -108,11 +110,12 @@ Security items need tests that try to get past the boundary.
 - [ ] A test proves that no request falls back to the service account
 - [ ] A test proves that no response, on any route, contains a token krm-foyer holds,
       including tokens obtained by refresh
-- [ ] Upstream bodies reach the browser decoded: the browser's `Accept-Encoding` is
-      dropped, a gzip answer from the API server arrives uncompressed without
-      `Content-Encoding`, and the response-byte bound counts decoded bytes (a test with a
-      small body that expands past the bound)
-- [ ] Exec, attach, port-forward and the service, node and pod proxy subresources return
+- [x] Upstream bodies reach the browser decoded: the browser's `Accept-Encoding` is
+      dropped, and a gzip answer from the API server arrives uncompressed without
+      `Content-Encoding`
+- [ ] The response-byte bound counts decoded bytes (a test with a small body that expands
+      past the bound)
+- [x] Exec, attach, port-forward and the service, node and pod proxy subresources return
       an explicit unsupported error
 - [ ] Every [interruption](design.md#interruptions) row has a test, and the differential
       specs treat that table as the only exceptions
@@ -143,7 +146,7 @@ Security items need tests that try to get past the boundary.
 - [ ] `Status` errors, content types, patch types, dry-run and Server-Side Apply pass
       through unchanged
 - [ ] Mutations are never replayed, including after the session is refreshed
-- [ ] Native watches and logs stream without buffering, and cancellation reaches the
+- [x] Native watches and logs stream without buffering, and cancellation reaches the
       upstream
 - [ ] Bounds on page size, response bytes, request rate, watch duration and concurrent
       streams

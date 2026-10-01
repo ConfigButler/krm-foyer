@@ -5,9 +5,9 @@ APIs. It owns OIDC login and server-side sessions, proxies Kubernetes API reques
 the user's own credential, and hosts krm-stream resource
 streams on the frontend's origin.
 
-This document is the contract: what krm-foyer must do. **None of it is implemented yet.**
-Every guarantee below is a requirement until the test that tries to break it exists; the
-[roadmap](roadmap.md) tracks which do. Why the service exists, and what it expects from
+This document is the contract: what krm-foyer must do. **Most of it is not implemented
+yet.** Every guarantee below is a requirement until the test that tries to break it
+exists; the [roadmap](roadmap.md) tracks which do. Why the service exists, and what it expects from
 the domains behind it, is in the [vision](vision.md).
 
 ## Architecture and ownership
@@ -100,7 +100,10 @@ A lost response may already have committed a write.
 The service has no hardcoded resource catalogue. Its initial transport scope covers ordinary
 HTTP APIs, streaming logs and native HTTP watches. Exec, attach and port-forward require
 separate upgrade-protocol support and tests; return an explicit unsupported error until
-implemented. The browser cannot supply an arbitrary upstream URL.
+implemented. Any request asking to upgrade the connection (and any `CONNECT`) gets the
+same error, whatever its path. The browser cannot supply an arbitrary upstream URL, and
+under `/k8s` only the routes in the table above exist: the API server's other endpoints
+(`/healthz`, `/metrics`, `/logs`, `/openid/...`) are not routes of krm-foyer.
 
 **Service, node and pod proxy subresources are deferred** and get the same explicit
 unsupported error. RBAC would still decide who may use them, but what sits behind them
@@ -122,8 +125,8 @@ subresources, which return whatever their backend sends:
 
 - **Content types are allowlisted.** JSON, YAML, Kubernetes protobuf and the watch
   stream types pass; `text/plain` passes for logs. Anything else, `text/html` above all,
-  is held back. A pod log or a proxied service must not be able to serve a page that
-  runs as the user on the shared origin.
+  is held back, and so is a body with no content type. A pod log or a proxied service
+  must not be able to serve a page that runs as the user on the shared origin.
 - **Every proxied response carries** `X-Content-Type-Options: nosniff`,
   `Content-Security-Policy: default-src 'none'; sandbox` and `Cache-Control: no-store`,
   replacing anything upstream sent. A shared cache in front of the origin must never
@@ -132,7 +135,9 @@ subresources, which return whatever their backend sends:
 - **Response headers are allowlisted** (content type and length, `Audit-Id`, `Warning`,
   `Retry-After` and the API priority-and-fairness headers). Everything else is dropped,
   including `Set-Cookie`, which would reach every service on the origin, and
-  `Access-Control-*`: krm-foyer is same-origin only and never grants CORS.
+  `Access-Control-*`: krm-foyer is same-origin only and never grants CORS. Headers that
+  arrive outside the checked response, in an informational (1xx) response or as
+  trailers, are dropped with it.
 - **Bodies reach the browser decoded.** Dropping `Content-Encoding` while passing a
   gzip body on would hand the browser bytes it cannot read. krm-foyer drops the
   browser's `Accept-Encoding`, so Go's transport asks the API server for gzip and
@@ -163,9 +168,11 @@ answer, it says so in a form the requester can read:
 | Upstream content held back | 502 | `Status` with the content type | A page showing the response as escaped text, truncated at a bound |
 | Session store unavailable | 503 | `Status` | A page saying so, with no retry loop |
 | Non-canonical path | 400 | `Status` naming the [path rule](#access) | A page saying so |
+| Path under `/k8s` that is not an [API route](#api-contract) | 404 | `Status`, reason `NotFound` | A page saying so |
 | Missing CSRF proof or cross-origin request | 403 | `Status` with a reason that is not RBAC's | A page saying so |
 | Unsupported protocol or subresource | 501 | `Status` naming what is unsupported | A page saying so |
 | A [bound](#access) reached | 429, or 502 when a response exceeds its size bound | `Status` naming the bound, with `Retry-After` where waiting helps | A page saying so |
+| API server unreachable | 502 | `Status` | A page saying so |
 
 This table is the complete list of answers krm-foyer gives instead of the API server's.
 Anything not in it is the API server's answer.
@@ -205,10 +212,17 @@ beyond RBAC is a separate, deferred design: [application scope](application-scop
 
 What krm-foyer still does on every request, none of it an access decision:
 
-- **Path hygiene.** Non-canonical paths (encoded slashes, dot segments, repeated slashes,
-  needless percent-encoding) are rejected rather than normalized, and the path forwarded
-  is byte-for-byte the path received, minus the `/k8s` prefix. Real Kubernetes clients
-  never send such paths, and a scope layer added later can rely on there being one parse.
+- **Path hygiene.** Non-canonical paths are rejected rather than normalized: encoded
+  slashes, dot segments, empty segments (repeated or trailing slashes), percent-encoding
+  of characters that need none (letters, digits, `-`, `.`, `_`, `~`), lower-case or
+  malformed percent-encoding, and raw characters RFC 3986 does not allow in a path
+  segment. The path forwarded is byte-for-byte the path received, minus the `/k8s`
+  prefix. Real Kubernetes clients never send such paths, and a scope layer added later
+  can rely on there being one parse.
+- **Request headers are allowlisted.** `Accept`, `Content-Type` and `User-Agent` go to
+  the API server, with the user's token as the only `Authorization`. Everything else the
+  browser sends is dropped: its own `Authorization`, `Impersonate-*`, `Cookie`,
+  forwarding headers and `Accept-Encoding` among them.
 - **Bounds** on page size, response bytes, request rate, watch duration and concurrent
   streams. They protect krm-foyer and the API server; they do not prevent export. A user
   allowed to list a namespace can retrieve all of it through repeated pages.

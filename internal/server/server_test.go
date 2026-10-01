@@ -65,3 +65,30 @@ func TestSecurityHeadersOnEveryResponse(t *testing.T) {
 		}
 	}
 }
+
+// /k8s in any spelling reaches the API handler, which refuses what is not
+// canonical. ServeMux must not get the chance to redirect it to a cleaned path.
+func TestKubernetesRoutesReachTheProxy(t *testing.T) {
+	reached := ""
+	h := New(Config{Version: "test", Kubernetes: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		reached = r.RequestURI
+	})})
+	for _, target := range []string{
+		"/k8s", "/k8s/", "/k8s/api/v1/pods?watch=1", "//k8s/api", "/k8s/../healthz",
+		"/k8s/api/../../healthz", "/%6B8s/api", "/x/../k8s/api", "/k8s%2Fapi",
+	} {
+		reached = ""
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil))
+		if reached != target {
+			t.Errorf("GET %s did not reach the API handler (status %d, Location %q)", target, rec.Code, rec.Header().Get("Location"))
+		}
+	}
+	for _, target := range []string{"/k8sx", "/k8s-api/x", "/healthz", "/"} {
+		reached = ""
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil))
+		if reached != "" {
+			t.Errorf("GET %s reached the API handler", target)
+		}
+	}
+}

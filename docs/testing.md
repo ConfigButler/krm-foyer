@@ -60,7 +60,7 @@ Both layers run in `task verify` and in CI.
 These use the standard library `testing` package, with table tests. Most boundary
 bugs are here, where they are cheap to find:
 
-- **Path checking** is a pure function: a path in, the upstream path or a refusal out.
+- **Path checking** ([internal/proxy](../internal/proxy)) is a pure function: a path in, the upstream path or a refusal out.
   The table covers [path hygiene](design.md#access): encoded slashes, `..`, repeated
   slashes and needless percent-encoding are all rejected. The fuzz property: for any path
   accepted, the path sent upstream is byte-for-byte the path received, minus `/k8s`.

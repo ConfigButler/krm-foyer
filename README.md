@@ -12,9 +12,11 @@ KRM is the [Kubernetes Resource Model](https://github.com/kubernetes/design-prop
 the idea that everything is a declarative resource with a spec and a status. krm-foyer is
 for applications whose domain is modelled that way.
 
-> **Status: a design and a server skeleton.** The skeleton serves health endpoints and a
-> start page, and an e2e fixture puts a real API server behind a real Dex. Login, the API
-> proxy and streams are specified in [docs/design.md](docs/design.md) but not implemented.
+> **Status: a design, a server skeleton and the API proxy.** The skeleton serves health
+> endpoints and a start page, and an e2e fixture puts a real API server behind a real Dex.
+> The API proxy exists with unit tests but is not wired into the binary, because there is
+> no login yet to give it a credential. Login and streams are specified in
+> [docs/design.md](docs/design.md) but not implemented.
 > The principles below are requirements, not properties of the code yet; the
 > [roadmap](docs/roadmap.md) tracks which have tests.
 
