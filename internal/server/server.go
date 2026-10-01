@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"path"
 	"strings"
 )
 
@@ -18,6 +19,8 @@ var templates = template.Must(template.ParseFS(pages, "pages/*.html"))
 type Config struct {
 	// Version is shown on the start page and should match the image tag.
 	Version string
+	// Kubernetes serves /k8s: the API proxy. Nil leaves /k8s unrouted.
+	Kubernetes http.Handler
 }
 
 // New returns the handler for every route krm-foyer serves.
@@ -41,7 +44,33 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
 		render(w, "start.html", cfg)
 	})
-	return securityHeaders(mux)
+	site := securityHeaders(mux)
+	if cfg.Kubernetes == nil {
+		return site
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isKubernetes(r) {
+			// The proxy sets its own response headers, and gets the request before
+			// ServeMux, which would redirect a non-canonical path to a cleaned one.
+			// Rejecting it is the proxy's job: see docs/ingress.md.
+			cfg.Kubernetes.ServeHTTP(w, r)
+			return
+		}
+		site.ServeHTTP(w, r)
+	})
+}
+
+// isKubernetes reports whether r is for /k8s in any spelling: as received, decoded
+// or cleaned. A disguised /k8s path must reach the proxy to be refused there, not
+// be redirected by ServeMux to a path the proxy would accept.
+func isKubernetes(r *http.Request) bool {
+	raw, _, _ := strings.Cut(r.RequestURI, "?")
+	for _, p := range []string{raw, r.URL.Path, path.Clean(r.URL.Path)} {
+		if p == "/k8s" || strings.HasPrefix(p, "/k8s/") {
+			return true
+		}
+	}
+	return false
 }
 
 // noListing answers 404 for directories, which http.FileServer would otherwise
