@@ -4,7 +4,9 @@
 - [docs/design.md](docs/design.md) is the contract. If code and document disagree, one of
   them is a bug; fix the one that is wrong in the same change.
 - Commit messages are conventional commits, and the prefix is load-bearing: release-please
-  cuts versions from it (`fix:` patch, `feat:` minor, `feat!:` breaking).
+  cuts versions from it (`fix:` patch, `feat:` minor, `feat!:` breaking). Versions stay
+  below 1.0, where a breaking change is a minor too; 1.0 is a deliberate `release-as`
+  once other people use krm-foyer happily, never a side effect of a commit prefix.
 - Security boundaries (tokens never reach the browser, every access decision left to the
   API server, no service account fallback) need tests that try to get past them, not only tests of the happy path.
 - Pin new GitHub Actions by full commit SHA with the version in a comment, and new base

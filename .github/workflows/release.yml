@@ -1,9 +1,11 @@
 # Versions and the published image.
 #
 # On every push to main, release-please keeps a release pull request up to date from the
-# conventional-commit messages: `fix:` is a patch, `feat:` a minor and `feat!:` a major
-# (a minor while the version is below 1.0). Merging that pull request creates the tag and
-# GitHub release. The image is then published only after the full CI workflow has passed
+# conventional-commit messages: `fix:` is a patch, and `feat:` and `feat!:` are both a minor
+# while the version is below 1.0 (`bump-minor-pre-major`). The first release is 0.1.0
+# (`initial-version`; without it release-please starts at 1.0.0). Nothing moves to 1.0 on
+# its own: that is a deliberate `release-as` once other people use krm-foyer happily.
+# Merging that pull request creates the tag and GitHub release. The image is then published only after the full CI workflow has passed
 # on that exact commit.
 #
 # Repository setting required: Settings -> Actions -> General -> "Allow GitHub Actions to
