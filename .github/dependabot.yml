@@ -3,43 +3,48 @@
 # dependency, so Dependabot keeps the pins moving. (The ENV-block tool versions are not
 # something Dependabot can see; bump those by hand.)
 #
-# Grouped, so a week of patch releases is one pull request. Major updates stay separate.
-# `chore(deps):` keeps routine bumps out of the changelog release-please writes.
+# One pull request a week for every ecosystem, majors included, so there is never a set
+# of bumps to merge in the right order. Grouping inside an `updates:` entry still gives
+# one pull request per ecosystem; only the top-level multi-ecosystem group combines them.
+# This is the same setup as gitops-reverser.
+#
+# Entries in a multi-ecosystem group drop their own `schedule` (the group owns it) and
+# must carry `patterns`. `commit-message` is group-only in this setup: on an ecosystem it
+# is a configuration error that stops every update. `chore(deps):` keeps routine bumps
+# out of the changelog release-please writes. Security updates come from Dependabot
+# alerts, not from this file, so they are not held back by the weekly group.
 version: 2
+
+multi-ecosystem-groups:
+  all-dependencies:
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
 
 updates:
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: weekly
-    groups:
-      github-actions:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-    commit-message:
-      prefix: "chore(deps)"
+    patterns: ["*"]
+    multi-ecosystem-group: all-dependencies
 
   - package-ecosystem: gomod
     directory: /
-    schedule:
-      interval: weekly
-    groups:
-      gomod:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-    commit-message:
-      prefix: "chore(deps)"
+    patterns: ["*"]
+    multi-ecosystem-group: all-dependencies
 
   # The shipped image (/) and the devcontainer, so their FROM lines keep moving.
   - package-ecosystem: docker
     directories:
       - /
       - /.devcontainer
-    schedule:
-      interval: weekly
-    groups:
-      docker:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-    commit-message:
-      prefix: "chore(deps)"
+    patterns: ["*"]
+    multi-ecosystem-group: all-dependencies
+
+  # The Features in .devcontainer/devcontainer.json (docker-outside-of-docker and friends)
+  # are versioned dependencies too.
+  - package-ecosystem: devcontainers
+    directory: /
+    patterns: ["*"]
+    multi-ecosystem-group: all-dependencies
