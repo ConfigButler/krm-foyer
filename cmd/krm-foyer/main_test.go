@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // files is a fake file system for parseConfig.
@@ -42,8 +43,9 @@ func TestParseConfigWithLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := cfg.login
-	if l == nil || l.clientSecret != "s3cret" || l.apiServer.Host != "kubernetes.default.svc" ||
-		strings.Join(l.scopes, " ") != "openid email groups" {
+	if l == nil || l.auth.ClientSecret != "s3cret" || l.kubernetes.Server.Host != "kubernetes.default.svc" ||
+		strings.Join(l.auth.Scopes, " ") != "openid email groups" || l.sessions.Origin != "https://foyer.example.test" ||
+		l.sessions.IdleTimeout != time.Hour || l.sessions.AbsoluteTimeout != 8*time.Hour {
 		t.Fatalf("%+v", l)
 	}
 }

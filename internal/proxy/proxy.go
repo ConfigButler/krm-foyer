@@ -17,21 +17,20 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/ConfigButler/krm-foyer/internal/interruption"
 )
 
 // Credentials gives the proxy the token of the user behind a request. It is the
 // only way a token reaches the proxy. Login and sessions sit behind it; there is no
 // other source, no default and no service account.
 type Credentials interface {
-	// Token returns the user's bearer token, ErrNoCredential when the request has no
-	// signed-in user, an *Interruption when the session refuses the request (a
-	// mutation without CSRF proof, say), or another error when none of that can be
-	// established.
-	Token(r *http.Request) (string, error)
+	// Token returns the user's bearer token, or the interruption to answer instead:
+	// no signed-in user, a request the session refuses (a mutation without CSRF
+	// proof, say), or a session that could not be checked. The proxy answers with
+	// it as it is.
+	Token(r *http.Request) (string, *interruption.Interruption)
 }
-
-// ErrNoCredential means the request has no signed-in user. The proxy answers 401.
-var ErrNoCredential = errors.New("no credential for this request")
 
 // Config is what the proxy needs to reach one API server.
 type Config struct {
@@ -109,15 +108,6 @@ var contentTypes = map[string]bool{
 	"text/plain": true,
 }
 
-// setResponseHeaders sets what every answer under Prefix carries, proxied or not,
-// replacing anything upstream sent.
-func setResponseHeaders(h http.Header) {
-	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	h.Set("Cache-Control", "no-store")
-	h.Set("Referrer-Policy", "no-referrer")
-}
-
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// RequestURI is the request target as it arrived. r.URL.Path is a decoded copy
 	// and is never consulted: one parse, of the bytes that are forwarded.
@@ -129,32 +119,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Any Upgrade field counts, even after an empty one: Get reads only the first.
 	if r.Method == http.MethodConnect || len(r.Header.Values("Upgrade")) > 0 {
-		p.interrupt(w, r, &Interruption{
+		p.interrupt(w, r, &interruption.Interruption{
 			Status: http.StatusNotImplemented, Reason: "NotImplemented",
 			Message: "upgrade protocols (exec, attach, port-forward, WebSocket) are not supported by krm-foyer",
 		})
 		return
 	}
 
-	token, err := p.credentials.Token(r)
-	var sessionRefused *Interruption
-	switch {
-	case errors.Is(err, ErrNoCredential) || err == nil && token == "":
+	token, refused := p.credentials.Token(r)
+	if refused == nil && token == "" {
 		// An empty token would make the request anonymous. Never send one.
-		p.interrupt(w, r, &Interruption{
-			Status: http.StatusUnauthorized, Reason: "Unauthorized",
-			Message: "not signed in",
-		})
-		return
-	case errors.As(err, &sessionRefused):
-		p.interrupt(w, r, sessionRefused)
-		return
-	case err != nil:
-		p.logger.Error("credential lookup failed", "err", err)
-		p.interrupt(w, r, &Interruption{
-			Status: http.StatusServiceUnavailable, Reason: "ServiceUnavailable",
-			Message: "the session could not be checked; try again later",
-		})
+		refused = interruption.NotSignedIn()
+	}
+	if refused != nil {
+		p.interrupt(w, r, refused)
 		return
 	}
 
@@ -190,13 +168,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // checkResponse applies the upstream response rules (docs/design.md). An error it
-// returns is an *Interruption, answered by upstreamError.
+// returns is an *interruption.Interruption, answered by upstreamError.
 func checkResponse(resp *http.Response) error {
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 && resp.StatusCode != http.StatusNotModified {
-		return &Interruption{
+		return &interruption.Interruption{
 			Status: http.StatusBadGateway, Reason: "BadGateway",
 			Message: "the API server answered with a redirect, which krm-foyer does not follow or pass on",
-			Causes:  []Cause{{Reason: "Redirect", Field: "Location", Message: resp.Header.Get("Location")}},
+			Causes:  []interruption.Cause{{Reason: "Redirect", Field: "Location", Message: resp.Header.Get("Location")}},
 		}
 	}
 	// Go's transport removes Content-Encoding when it decoded the body itself, so
@@ -226,7 +204,7 @@ func checkResponse(resp *http.Response) error {
 			h[k] = v
 		}
 	}
-	setResponseHeaders(h)
+	interruption.SetHeaders(h)
 	resp.Header = h
 	// Trailers are headers too, and none is on the allowlist. The transport fills
 	// this in again when the body ends; headWriter discards that copy.
@@ -241,22 +219,22 @@ func emptyBody(resp *http.Response) bool {
 		resp.ContentLength == 0 || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified
 }
 
-func heldBack(field, value string) *Interruption {
-	return &Interruption{
+func heldBack(field, value string) *interruption.Interruption {
+	return &interruption.Interruption{
 		Status: http.StatusBadGateway, Reason: "BadGateway",
 		Message: "the API server answered with content krm-foyer does not pass on: " + field + " " + value,
-		Causes:  []Cause{{Reason: "HeldBack", Field: field, Message: value}},
+		Causes:  []interruption.Cause{{Reason: "HeldBack", Field: field, Message: value}},
 	}
 }
 
 func (p *Proxy) upstreamError(w http.ResponseWriter, r *http.Request, err error) {
-	var refused *Interruption
+	var refused *interruption.Interruption
 	if !errors.As(err, &refused) {
 		if r.Context().Err() != nil {
 			return // the browser went away; nobody is left to answer
 		}
 		p.logger.Warn("API server unreachable", "err", err)
-		refused = &Interruption{
+		refused = &interruption.Interruption{
 			Status: http.StatusBadGateway, Reason: "BadGateway",
 			Message: "the API server could not be reached",
 		}
@@ -264,23 +242,11 @@ func (p *Proxy) upstreamError(w http.ResponseWriter, r *http.Request, err error)
 	p.interrupt(w, r, refused)
 }
 
-func (p *Proxy) interrupt(w http.ResponseWriter, r *http.Request, i *Interruption) {
+func (p *Proxy) interrupt(w http.ResponseWriter, r *http.Request, i *interruption.Interruption) {
 	path, _, _ := strings.Cut(r.RequestURI, "?")
 	p.logger.Info("interruption", "status", i.Status, "reason", i.Reason, "message", i.Message,
 		"method", r.Method, "path", path)
-	if isNavigation(r) {
-		i.page(w, r)
-		return
-	}
-	i.Write(w)
-}
-
-// isNavigation reports whether a person opened r's URL in a tab: a GET with exactly
-// one Sec-Fetch-Dest saying document. Browsers set it and page scripts cannot, and
-// clients that are not browsers do not send it, so code always gets the Status.
-func isNavigation(r *http.Request) bool {
-	dest := r.Header.Values("Sec-Fetch-Dest")
-	return r.Method == http.MethodGet && len(dest) == 1 && dest[0] == "document"
+	i.Serve(w, r)
 }
 
 // headWriter lets through only the response head that checkResponse approved.

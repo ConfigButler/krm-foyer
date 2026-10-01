@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -50,8 +52,28 @@ type harness struct {
 	sessions *session.Manager
 	store    *flakyStore
 	foyer    *httptest.Server
-	mu       sync.Mutex
-	seen     []seenResponse
+	// logs is everything krm-foyer logged, for the leak scan.
+	logs syncBuffer
+	mu   sync.Mutex
+	seen []seenResponse
+}
+
+// syncBuffer is a buffer handlers on several goroutines can write to.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 type seenResponse struct {
@@ -88,9 +110,12 @@ func newUndiscovered(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	issuerCA := x509.NewCertPool()
+	issuerCA.AddCert(h.issuer.Certificate())
 	h.auth, err = New(Config{
 		PublicURL: h.foyer.URL, Issuer: h.issuer.URL, ClientID: clientID, ClientSecret: clientSecret,
-		HTTPClient: h.issuer.Client(), Sessions: h.sessions, Now: h.clock.Now,
+		RootCAs: issuerCA, Sessions: h.sessions, Now: h.clock.Now,
+		Logger: slog.New(slog.NewJSONHandler(&h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -228,9 +253,10 @@ func assertLoginError(t *testing.T, resp response, status int, reason string) {
 	}
 }
 
-// scan runs after every test: no response a browser received holds an ID token,
-// the client secret or a PKCE verifier anywhere, and a session ID appears only in
-// the Set-Cookie that issues it.
+// scan runs after every test: no response a browser received and no line krm-foyer
+// logged holds an ID token, an access token, the client secret, an authorization
+// code or a PKCE verifier anywhere, and a session ID appears only in the Set-Cookie
+// that issues it.
 func (h *harness) scan() {
 	h.issuer.mu.Lock()
 	secrets := map[string]string{clientSecret: "the client secret"}
@@ -239,10 +265,16 @@ func (h *harness) scan() {
 		// The signature alone identifies a token, and survives truncation.
 		secrets[tok[strings.LastIndexByte(tok, '.')+1:]] = "an ID token's signature"
 	}
+	for _, tok := range h.issuer.accessTokens {
+		secrets[tok] = "an access token"
+	}
 	for _, v := range h.issuer.verifiers {
 		if v != "" {
 			secrets[v] = "a PKCE verifier"
 		}
+	}
+	for _, c := range h.issuer.issuedCodes {
+		secrets[c] = "an authorization code"
 	}
 	h.issuer.mu.Unlock()
 
@@ -268,6 +300,17 @@ func (h *harness) scan() {
 			if strings.Contains(r.body, id) || headerContains(r.header, id, session.CookieName+"="+id+";") {
 				h.t.Errorf("a session ID reached the browser outside its Set-Cookie, in the answer to %s", r.target)
 			}
+		}
+	}
+	logs := h.logs.String()
+	for secret, what := range secrets {
+		if strings.Contains(logs, secret) {
+			h.t.Errorf("%s was logged:\n%s", what, logs)
+		}
+	}
+	for _, id := range sessionIDs {
+		if strings.Contains(logs, id) {
+			h.t.Errorf("a session ID was logged:\n%s", logs)
 		}
 	}
 }
@@ -500,6 +543,82 @@ func TestTokenResponseIsVerified(t *testing.T) {
 				t.Fatalf("/auth/session = %d", code)
 			}
 		})
+	}
+}
+
+// An issuer that refuses the token request by repeating it, in any part of its
+// error, has its refusal logged by status and error code only. The request held the
+// client secret, the code and the PKCE verifier; the scan after each case looks for
+// them in the log.
+func TestTokenErrorIsNotLogged(t *testing.T) {
+	jsonError := func(status int, body map[string]string) func(http.ResponseWriter, string) {
+		return func(w http.ResponseWriter, _ string) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(body)
+		}
+	}
+	for name, tc := range map[string]struct {
+		echo func(w http.ResponseWriter, request string)
+		// logged are fields the log line must still carry, as JSON.
+		logged []string
+	}{
+		"in error_description": {
+			func(w http.ResponseWriter, req string) {
+				jsonError(http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": req})(w, req)
+			},
+			[]string{`"issuer_status":400`, `"issuer_error":"invalid_grant"`},
+		},
+		"in error_uri": {
+			func(w http.ResponseWriter, req string) {
+				jsonError(http.StatusBadRequest, map[string]string{"error": "invalid_client", "error_uri": "https://issuer.example/e?" + url.QueryEscape(req)})(w, req)
+			},
+			[]string{`"issuer_status":400`, `"issuer_error":"invalid_client"`},
+		},
+		"as the error code": {
+			func(w http.ResponseWriter, req string) {
+				jsonError(http.StatusBadRequest, map[string]string{"error": req})(w, req)
+			},
+			[]string{`"issuer_status":400`, `"issuer_error":"unknown"`},
+		},
+		"in a body with no error code": {
+			func(w http.ResponseWriter, req string) {
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, req) //nolint:gosec // the fake issuer echoing its request is the point
+			},
+			[]string{`"issuer_status":500`, `"issuer_error":"none"`},
+		},
+		"in a success that is not one": {
+			func(w http.ResponseWriter, req string) {
+				jsonError(http.StatusOK, map[string]string{"token_type": req})(w, req)
+			},
+			[]string{`"cause":"invalid-response"`},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.issuer.echo = tc.echo
+			assertLoginError(t, h.browser().login(alice, "/"), http.StatusBadGateway, "token-exchange-failed")
+			logs := h.logs.String()
+			for _, field := range append(tc.logged, `"msg":"token exchange failed"`) {
+				if !strings.Contains(logs, field) {
+					t.Errorf("the log has no %s:\n%s", field, logs)
+				}
+			}
+		})
+	}
+}
+
+// An issuer that cannot be reached for the token request is logged as such.
+func TestTokenEndpointUnreachable(t *testing.T) {
+	h := newHarness(t)
+	b := h.browser()
+	callback := h.issuer.authorize(b.startLogin("/"), alice)
+	h.issuer.Close()
+	assertLoginError(t, b.get(callback), http.StatusBadGateway, "token-exchange-failed")
+	if logs := h.logs.String(); !strings.Contains(logs, `"cause":"unreachable"`) {
+		t.Errorf("the log does not say the issuer was unreachable:\n%s", logs)
 	}
 }
 
@@ -758,6 +877,31 @@ func TestStoreDown(t *testing.T) {
 	resp = b.do(http.MethodPost, "/auth/logout", http.Header{"Origin": {h.foyer.URL}, session.CSRFHeader: {s.CSRFToken}})
 	if resp.code != http.StatusServiceUnavailable || b.cookie(session.CookieName) == "" {
 		t.Errorf("logout that could not delete = %d, cookie kept %v", resp.code, b.cookie(session.CookieName) != "")
+	}
+}
+
+// The issuer is reached only over verified TLS and never through a proxy from the
+// environment: without its CA, discovery fails, and the transport has no proxy
+// function. That is read from the transport, because Go never proxies the loopback
+// address the fake issuer listens on, so an environment variable would prove nothing.
+func TestIssuerTransport(t *testing.T) {
+	h := newUndiscovered(t)
+	if tr, ok := h.auth.client.Transport.(*http.Transport); !ok || tr.Proxy != nil {
+		t.Fatal("the issuer transport may use a proxy from the environment")
+	}
+	if err := h.auth.Discover(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	untrusting, err := New(Config{
+		PublicURL: h.foyer.URL, Issuer: h.issuer.URL, ClientID: clientID, ClientSecret: clientSecret,
+		Sessions: h.sessions,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := untrusting.Discover(t.Context()); err == nil {
+		t.Fatal("discovered an issuer whose certificate nothing vouches for")
 	}
 }
 

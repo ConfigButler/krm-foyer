@@ -15,17 +15,15 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	"github.com/ConfigButler/krm-foyer/internal/proxy"
 )
 
 // CookieName is the session cookie. The __Host- prefix makes browsers refuse it
 // unless it is Secure, host-only and for path /, so no other host can set it.
 const CookieName = "__Host-krm-foyer-session"
 
-// ErrNoSession means the request has no live session. It is a proxy.ErrNoCredential,
-// which the proxy answers with 401.
-var ErrNoSession = fmt.Errorf("no session: %w", proxy.ErrNoCredential)
+// ErrNoSession means the request has no live session. Any other error from a Manager,
+// apart from CheckMutation's refusals, means the store could not say.
+var ErrNoSession = errors.New("no session")
 
 // Session is what krm-foyer knows about a signed-in user.
 type Session struct {
@@ -176,8 +174,7 @@ func (m *Manager) End(ctx context.Context, w http.ResponseWriter, r *http.Reques
 }
 
 // Use returns the session r belongs to if r may act on it: Lookup, then
-// CheckMutation. A refused request is answered with an *proxy.Interruption before it
-// counts as activity.
+// CheckMutation. A refused request does not count as activity.
 func (m *Manager) Use(r *http.Request) (Session, error) {
 	key, s, err := m.find(r)
 	if err != nil {
@@ -187,15 +184,6 @@ func (m *Manager) Use(r *http.Request) (Session, error) {
 		return Session{}, err
 	}
 	return m.touch(r.Context(), key, s)
-}
-
-// Token implements proxy.Credentials: the ID token of the session r may use.
-func (m *Manager) Token(r *http.Request) (string, error) {
-	s, err := m.Use(r)
-	if err != nil {
-		return "", err
-	}
-	return s.IDToken, nil
 }
 
 // ExpiresAt is when s ends however busy it is.

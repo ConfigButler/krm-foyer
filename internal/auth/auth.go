@@ -1,16 +1,20 @@
 // Package auth is krm-foyer's login half: OIDC authorization code with PKCE, state and
 // nonce against one configured issuer, ending in a server-side session. It serves
-// /auth/login, /auth/callback, /auth/session, /auth/logout and /auth/logged-out.
-// docs/design.md, "Login and sessions", is the contract.
+// /auth/login, /auth/callback, /auth/session, /auth/logout and /auth/logged-out, and
+// gives the API half its credential: the token of the session a request may use, or
+// the answer to give instead. docs/design.md, "Login and sessions", is the contract.
 package auth
 
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -20,8 +24,8 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
+	"github.com/ConfigButler/krm-foyer/internal/interruption"
 	"github.com/ConfigButler/krm-foyer/internal/pages"
-	"github.com/ConfigButler/krm-foyer/internal/proxy"
 	"github.com/ConfigButler/krm-foyer/internal/session"
 )
 
@@ -42,8 +46,8 @@ type Config struct {
 	// Scopes are asked for at login. Nil means DefaultScopes. openid is required;
 	// offline_access is refused.
 	Scopes []string
-	// HTTPClient reaches the issuer. Nil means http.DefaultClient.
-	HTTPClient *http.Client
+	// RootCAs verifies the issuer's certificate. Nil means the system roots.
+	RootCAs *x509.CertPool
 	// Sessions is where a login ends.
 	Sessions *session.Manager
 	// Now is the clock. Nil means time.Now.
@@ -97,10 +101,6 @@ func New(cfg Config) (*Auth, error) {
 	if slices.Contains(scopes, oidc.ScopeOfflineAccess) {
 		return nil, fmt.Errorf("scope %q asks for a refresh token, which krm-foyer does not use yet", oidc.ScopeOfflineAccess)
 	}
-	client := cfg.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
@@ -113,11 +113,26 @@ func New(cfg Config) (*Auth, error) {
 		cfg:          cfg,
 		redirectURI:  "https://" + public.Host + "/auth/callback",
 		scopes:       slices.Clone(scopes),
-		client:       client,
+		client:       issuerClient(cfg.RootCAs),
 		now:          now,
 		logger:       logger,
 		transactions: newTransactions(now),
 	}, nil
+}
+
+// issuerClient reaches the OIDC issuer. Like the API server's, the destination is
+// pinned: no proxy from the environment.
+func issuerClient(roots *x509.CertPool) *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			Proxy:               nil,
+			DialContext:         (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+			TLSClientConfig:     &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+			TLSHandshakeTimeout: 10 * time.Second,
+			ForceAttemptHTTP2:   true,
+		},
+	}
 }
 
 // Discover reads the issuer's discovery document once. Until it succeeds, login
@@ -214,6 +229,47 @@ func (a *Auth) fail(w http.ResponseWriter, e loginError, retry, issuerError stri
 	}{e.reason, e.message, issuerError, "/auth/login?" + url.Values{"return_to": {retry}}.Encode()})
 }
 
+// tokenErrors are the error codes RFC 6749 defines for a token response. Only these
+// are logged; anything else the issuer says is not.
+var tokenErrors = []string{
+	"invalid_request", "invalid_client", "invalid_grant", "unauthorized_client",
+	"unsupported_grant_type", "invalid_scope",
+}
+
+// exchangeFailure describes a failed token exchange in fields that are safe to log.
+// The error itself is never logged: oauth2 puts the token endpoint's answer in it
+// (error_description, error_uri, or the whole body when there is no error code), and
+// an issuer may echo the request it refused, which held the client secret, the code
+// and the PKCE verifier.
+func exchangeFailure(err error) []any {
+	var refused *oauth2.RetrieveError
+	var netErr net.Error
+	switch {
+	case errors.As(err, &refused):
+		code := refused.ErrorCode
+		switch {
+		case code == "":
+			code = "none"
+		case !slices.Contains(tokenErrors, code):
+			code = "unknown"
+		}
+		status := 0
+		if refused.Response != nil {
+			status = refused.Response.StatusCode
+		}
+		return []any{"issuer_status", status, "issuer_error", code}
+	case errors.Is(err, context.Canceled):
+		return []any{"cause", "canceled"}
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return []any{"cause", "timeout"}
+	case errors.As(err, new(*url.Error)):
+		return []any{"cause", "unreachable"}
+	default:
+		// A 2xx answer krm-foyer could not read as a token response.
+		return []any{"cause", "invalid-response"}
+	}
+}
+
 // single returns the one value of key in q, or false if there is not exactly one.
 func single(q url.Values, key string) (string, bool) {
 	v := q[key]
@@ -293,7 +349,7 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), oauth2.HTTPClient, a.client)
 	token, err := iss.oauth.Exchange(ctx, code, oauth2.VerifierOption(t.verifier))
 	if err != nil {
-		a.logger.Warn("token exchange failed", "err", err)
+		a.logger.Warn("token exchange failed", exchangeFailure(err)...)
 		a.fail(w, errExchange, t.returnTo, "")
 		return
 	}
@@ -353,8 +409,7 @@ func (a *Auth) session(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, session.ErrNoSession):
 		writeJSON(w, http.StatusUnauthorized, sessionState{})
 	case err != nil:
-		a.logger.Error("session lookup failed", "err", err)
-		storeUnavailable().Write(w)
+		a.refusal(err).Write(w)
 	default:
 		expires := a.cfg.Sessions.ExpiresAt(s)
 		writeJSON(w, http.StatusOK, sessionState{
@@ -369,29 +424,51 @@ func (a *Auth) session(w http.ResponseWriter, r *http.Request) {
 // nothing to protect: the cookie is cleared and the answer is the same.
 func (a *Auth) logout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	_, err := a.cfg.Sessions.Use(r)
-	var refused *proxy.Interruption
-	switch {
-	case errors.As(err, &refused):
-		refused.Write(w)
-		return
-	case err != nil && !errors.Is(err, session.ErrNoSession):
-		a.logger.Error("session lookup failed", "err", err)
-		storeUnavailable().Write(w)
+	if _, err := a.cfg.Sessions.Use(r); err != nil && !errors.Is(err, session.ErrNoSession) {
+		a.refusal(err).Write(w)
 		return
 	}
 	if err := a.cfg.Sessions.End(r.Context(), w, r); err != nil {
-		a.logger.Error("ending a session failed", "err", err)
-		storeUnavailable().Write(w)
+		a.refusal(err).Write(w)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func storeUnavailable() *proxy.Interruption {
-	return &proxy.Interruption{
-		Status: http.StatusServiceUnavailable, Reason: "ServiceUnavailable",
-		Message: "the session could not be checked; try again later",
+// Token is the API half's credential (proxy.Credentials): the ID token of the session
+// r may use, or the interruption to answer r with instead.
+func (a *Auth) Token(r *http.Request) (string, *interruption.Interruption) {
+	s, err := a.cfg.Sessions.Use(r)
+	if err != nil {
+		return "", a.refusal(err)
+	}
+	return s.IDToken, nil
+}
+
+// refusal is the answer to a request the session manager did not let through. This
+// is the one place a session error becomes HTTP. Its refusals are 403s with reasons of
+// their own, never RBAC's Forbidden; any error that is not one of them means the
+// store could not say, and nothing is decided from it.
+func (a *Auth) refusal(err error) *interruption.Interruption {
+	switch {
+	case errors.Is(err, session.ErrNoSession):
+		return interruption.NotSignedIn()
+	case errors.Is(err, session.ErrCrossOrigin):
+		return &interruption.Interruption{
+			Status: http.StatusForbidden, Reason: "CrossOriginRequest",
+			Message: "krm-foyer only accepts this request from its own origin",
+		}
+	case errors.Is(err, session.ErrNoCSRFProof):
+		return &interruption.Interruption{
+			Status: http.StatusForbidden, Reason: "CSRFProofRequired",
+			Message: "this request needs the session's CSRF token in the " + session.CSRFHeader + " header; see /auth/session",
+		}
+	default:
+		a.logger.Error("session store failed", "err", err)
+		return &interruption.Interruption{
+			Status: http.StatusServiceUnavailable, Reason: "ServiceUnavailable",
+			Message: "the session could not be checked; try again later",
+		}
 	}
 }
 

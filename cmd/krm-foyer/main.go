@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -50,21 +49,19 @@ func main() {
 type config struct {
 	listen          string
 	tlsCert, tlsKey string
-	login           *loginConfig
-	idle, absolute  time.Duration
+	// login is nil when no sign-in is configured: krm-foyer then serves its start
+	// page and probes only.
+	login *loginConfig
 }
 
-// loginConfig is everything sign-in and the API proxy need. They come together: the
-// proxy's only credential is a session, and a session only comes from login.
+// loginConfig is sign-in and the API proxy. They come together, because the proxy's
+// only credential is a session and a session only comes from login, but each package
+// keeps its own section. What handler wires (the session store, the sessions, the
+// credentials and the logger) is left out here.
 type loginConfig struct {
-	publicURL    string
-	issuer       string
-	clientID     string
-	clientSecret string
-	issuerCAs    *x509.CertPool
-	scopes       []string
-	apiServer    *url.URL
-	apiServerCAs *x509.CertPool
+	auth       auth.Config
+	sessions   session.Config
+	kubernetes proxy.Config
 }
 
 func parseConfig(args []string, readFile func(string) ([]byte, error), output io.Writer) (config, error) {
@@ -75,6 +72,7 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		publicURL, issuer, clientID    string
 		secretFile, issuerCAFile       string
 		scopes, apiServer, apiServerCA string
+		idle, absolute                 time.Duration
 	)
 	fs.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
 	fs.StringVar(&cfg.tlsCert, "tls-cert-file", "", "serve TLS with this certificate (PEM); needs -tls-key-file")
@@ -87,8 +85,8 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	fs.StringVar(&scopes, "oidc-scopes", strings.Join(auth.DefaultScopes, ","), "comma-separated scopes to ask for at login")
 	fs.StringVar(&apiServer, "kubernetes-server", "", "the API server's URL, such as https://kubernetes.default.svc")
 	fs.StringVar(&apiServerCA, "kubernetes-ca-file", "", "the CA certificates (PEM) that sign the API server's certificate")
-	fs.DurationVar(&cfg.idle, "session-idle-timeout", time.Hour, "end a session unused for this long")
-	fs.DurationVar(&cfg.absolute, "session-absolute-timeout", 8*time.Hour, "end any session this long after login")
+	fs.DurationVar(&idle, "session-idle-timeout", time.Hour, "end a session unused for this long")
+	fs.DurationVar(&absolute, "session-absolute-timeout", 8*time.Hour, "end any session this long after login")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -122,37 +120,43 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 			strings.Join(missing, ", "))
 	}
 
+	// Sign-in.
 	secret, err := readFile(secretFile)
 	if err != nil {
 		return config{}, fmt.Errorf("reading the client secret: %w", err)
 	}
-	login := &loginConfig{
-		publicURL: publicURL, issuer: issuer, clientID: clientID,
+	login := &loginConfig{auth: auth.Config{
+		PublicURL: publicURL, Issuer: issuer, ClientID: clientID,
 		// Secrets mounted from files often end in a newline that is not part of them.
-		clientSecret: strings.TrimRight(string(secret), "\r\n"),
-	}
-	if login.clientSecret == "" {
+		ClientSecret: strings.TrimRight(string(secret), "\r\n"),
+	}}
+	if login.auth.ClientSecret == "" {
 		return config{}, errors.New("the client secret file is empty")
 	}
 	for _, s := range strings.Split(scopes, ",") {
 		if s = strings.TrimSpace(s); s != "" {
-			login.scopes = append(login.scopes, s)
+			login.auth.Scopes = append(login.auth.Scopes, s)
 		}
-	}
-	if login.apiServer, err = url.Parse(apiServer); err != nil {
-		return config{}, fmt.Errorf("-kubernetes-server: %w", err)
 	}
 	if issuerCAFile != "" {
-		if login.issuerCAs, err = x509.SystemCertPool(); err != nil {
+		if login.auth.RootCAs, err = x509.SystemCertPool(); err != nil {
 			return config{}, err
 		}
-		if err := appendCAs(login.issuerCAs, issuerCAFile, readFile); err != nil {
+		if err := appendCAs(login.auth.RootCAs, issuerCAFile, readFile); err != nil {
 			return config{}, err
 		}
 	}
+
+	// Sessions. A mutation must come from the public URL's origin.
+	login.sessions = session.Config{Origin: publicURL, IdleTimeout: idle, AbsoluteTimeout: absolute}
+
+	// The API proxy.
+	if login.kubernetes.Server, err = url.Parse(apiServer); err != nil {
+		return config{}, fmt.Errorf("-kubernetes-server: %w", err)
+	}
 	if apiServerCA != "" {
-		login.apiServerCAs = x509.NewCertPool()
-		if err := appendCAs(login.apiServerCAs, apiServerCA, readFile); err != nil {
+		login.kubernetes.RootCAs = x509.NewCertPool()
+		if err := appendCAs(login.kubernetes.RootCAs, apiServerCA, readFile); err != nil {
 			return config{}, err
 		}
 	}
@@ -177,44 +181,27 @@ func handler(cfg config, logger *slog.Logger) (http.Handler, func(context.Contex
 	if cfg.login == nil {
 		return server.New(server.Config{Version: version}), func(context.Context) {}, nil
 	}
-	l := cfg.login
-	sessions, err := session.New(session.Config{
-		Store: session.NewMemory(nil), Origin: l.publicURL, IdleTimeout: cfg.idle, AbsoluteTimeout: cfg.absolute,
-	})
+	l := *cfg.login
+	l.sessions.Store = session.NewMemory(nil)
+	sessions, err := session.New(l.sessions)
 	if err != nil {
 		return nil, nil, err
 	}
-	login, err := auth.New(auth.Config{
-		PublicURL: l.publicURL, Issuer: l.issuer, ClientID: l.clientID, ClientSecret: l.clientSecret,
-		Scopes: l.scopes, HTTPClient: issuerClient(l.issuerCAs), Sessions: sessions, Logger: logger,
-	})
+	l.auth.Sessions, l.auth.Logger = sessions, logger
+	login, err := auth.New(l.auth)
 	if err != nil {
 		return nil, nil, err
 	}
-	// The session manager is the proxy's only credential source: there is no other
-	// way to give krm-foyer a token, and no service-account fallback.
-	api, err := proxy.New(proxy.Config{Server: l.apiServer, RootCAs: l.apiServerCAs, Credentials: sessions, Logger: logger})
+	// Login is the proxy's only credential source: there is no other way to give
+	// krm-foyer a token, and no service-account fallback.
+	l.kubernetes.Credentials, l.kubernetes.Logger = login, logger
+	api, err := proxy.New(l.kubernetes)
 	if err != nil {
 		return nil, nil, err
 	}
 	return server.New(server.Config{
 		Version: version, Kubernetes: api, Auth: login.Handler(), Ready: login.Ready,
 	}), login.Run, nil
-}
-
-// issuerClient reaches the OIDC issuer. Like the API server's, the destination is
-// pinned: no proxy from the environment.
-func issuerClient(roots *x509.CertPool) *http.Client {
-	return &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			Proxy:               nil,
-			DialContext:         (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
-			TLSClientConfig:     &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
-			TLSHandshakeTimeout: 10 * time.Second,
-			ForceAttemptHTTP2:   true,
-		},
-	}
 }
 
 func run(cfg config, logger *slog.Logger) error {
