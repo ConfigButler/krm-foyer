@@ -23,6 +23,18 @@ Each step makes pending specs real and ends with `task verify` green.
    token-scan specs go green together. The [interruption](design.md#interruptions) pages
    come with it: the 401 page's sign-in link needs login, and this is the first step at
    which a person can browse `/k8s`.
+
+   Sessions live in memory, one replica, and there is no refresh: krm-foyer does not ask
+   for `offline_access`, holds no refresh token, and a session ends with its ID token.
+   That keeps the step small and gives the token scan a complete list of what to look
+   for. Five changes, in order: sessions and CSRF (unit tests); OIDC login and the
+   binary serving `/k8s`; interruption pages; deployment into the fixture with the login
+   and identity specs; then the differential, CSRF, logout and token-scan specs.
+
+   **Step 2b, refresh and shared session storage,** follows directly: refresh serialized
+   per session and bounded, a refused refresh ending the session, the disablement bound
+   measured for Dex, and a shared store so more than one replica works. The token scan
+   then also reads the store, for tokens krm-foyer obtained by refresh.
 3. **Bounds**, before anyone runs krm-foyer for real: page size, response bytes (counted
    decoded), request rate, watch duration and concurrent native watches, each with a test
    that reaches it. Until this step is done, no release is fit for a cluster that matters.
@@ -62,8 +74,8 @@ Security items need tests that try to get past the boundary.
 - [ ] Browser e2e with Playwright: log in, read, edit, get refused with 403, hit a 409,
       log out
 - [ ] Coverage baseline that ratchets upward
-- [x] Fuzz tests for path checking and the upstream response check, with a short fuzz
-      run of each in `task verify`
+- [x] Fuzz tests for path checking, the upstream response check and the CSRF rule, with
+      a short fuzz run of each in `task verify`
 - [ ] Helm chart with `values.schema.json`, `helm lint`, `helm template` tests, and e2e
       that installs through the chart
 - [ ] Signed multi-arch image (cosign keyless) with an SBOM
@@ -130,19 +142,22 @@ Security items need tests that try to get past the boundary.
 ### Login and sessions
 
 - [ ] OIDC authorization code with PKCE, state and nonce, through a maintained library
-- [ ] Opaque server-side sessions: rotated at login, with idle and absolute expiry
-- [ ] Refresh is serialized per session and bounded
-- [ ] A refused refresh ends the session at once: 401s, and its streams close
+- [x] Opaque server-side sessions: rotated at login, with idle and absolute expiry, and
+      ended with the ID token while there is no refresh (unit tests; e2e in step 2)
+- [ ] Refresh is serialized per session and bounded (step 2b)
+- [ ] A refused refresh ends the session at once: 401s, and its streams close (step 2b)
 - [ ] The disablement bound measured for Dex in the fixture (remove a user, time the
       refused refresh), and documented per issuer configuration; elsewhere the documented
       bound is the absolute session expiry
-- [ ] CSRF proof and same-origin checks on every mutation and on logout
+- [x] CSRF proof and same-origin checks on every mutation through `/k8s`, with repeated
+      header fields refused (unit tests and a fuzz property; e2e in step 2)
+- [ ] The same checks on logout
 - [ ] An unauthenticated API request gets a JSON 401, not a redirect
 - [ ] `/auth/whoami` from a SelfSubjectReview, and `/auth/session`
 - [ ] `/_foyer/access`: the rules for a namespace from a SelfSubjectRulesReview, and a
       "can I?" form answered by a SelfSubjectAccessReview. See
       [what may I do](design.md#what-may-i-do)
-- [ ] Shared session storage, so more than one replica works
+- [ ] Shared session storage, so more than one replica works (step 2b)
 - [ ] The [session lifecycle](design.md#session-lifecycle) bounds, each with a test:
       logout seen by every replica at once, logout racing a refresh, the session store
       unavailable, and a stream open across logout and expiry
