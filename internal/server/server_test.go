@@ -43,6 +43,21 @@ func TestStylesheet(t *testing.T) {
 	}
 }
 
+// The browser helper is a module script: browsers refuse to run one served with any
+// type but JavaScript, and nosniff stops them guessing.
+func TestBrowserHelper(t *testing.T) {
+	rec := get(t, "/_foyer/foyer.js")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /_foyer/foyer.js = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/javascript") {
+		t.Errorf("Content-Type = %q, want text/javascript", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "export async function k8s(") {
+		t.Errorf("the helper does not export k8s")
+	}
+}
+
 // The start page answers "/" only. Anything else must not fall through to it,
 // or a mistyped API path would get HTML instead of an error.
 func TestUnknownPathIsNotFound(t *testing.T) {

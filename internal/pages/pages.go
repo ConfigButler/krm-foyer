@@ -1,5 +1,6 @@
 // Package pages renders the few pages krm-foyer serves itself (docs/frontend.md):
-// Go templates and a stylesheet, embedded, with no script.
+// Go templates and a stylesheet, embedded. The pages run no script. The one script
+// among the assets, foyer.js, is the helper for applications on the same origin.
 package pages
 
 import (
@@ -20,7 +21,7 @@ var templates = template.Must(template.ParseFS(files, "templates/*.html"))
 // No inline script can run, and no page can be framed.
 const CSP = "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 
-// Assets is the stylesheet and images, served under /_foyer/.
+// Assets is the stylesheet, the images and the browser helper, served under /_foyer/.
 func Assets() fs.FS {
 	assets, err := fs.Sub(files, "assets")
 	if err != nil {
