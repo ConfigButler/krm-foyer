@@ -11,8 +11,9 @@
     <h1>krm-foyer is running</h1>
     <p class="lede">The browser's way in to Kubernetes: login, API access and live krm-stream resources.</p>
 
-    <p>You are seeing this page because no application frontend is configured yet.
-      Once one is, it is served here instead.</p>
+    <p>You are reaching krm-foyer directly. In a deployment, your ingress or gateway routes
+      <code>/auth/</code>, <code>/k8s/</code>, <code>/stream</code> and <code>/_foyer/</code>
+      here, and everything else, including <code>/</code>, to your application.</p>
 
     <h2>What works in this build</h2>
     <ul>
@@ -25,7 +26,6 @@
       <li>OIDC login and sessions under <code>/auth/</code></li>
       <li>The allowlisted Kubernetes API proxy under <code>/k8s/</code></li>
       <li>krm-stream resource streams under <code>/stream</code></li>
-      <li>Serving your application's static files</li>
     </ul>
 
     <p>Read the <a href="https://github.com/ConfigButler/krm-foyer/blob/main/docs/design.md">service design</a>
