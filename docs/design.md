@@ -54,6 +54,14 @@ token, checked by Kubernetes. Login is a convenience behind that interface: it c
 later accept tokens obtained elsewhere, or move into a separate program, without changing
 the API half.
 
+The code keeps that split. `internal/session` keeps sessions and states its refusals in
+its own terms (no session, not from this origin, no CSRF proof), with no HTTP answers.
+`internal/auth` serves the login routes and is the credential interface: it is the one
+place a session error becomes an answer. `internal/proxy` takes a token or an answer
+from that interface and knows nothing of sessions. `internal/interruption` writes what
+krm-foyer answers instead of the API server, as a `Status` or a page. `cmd/krm-foyer`
+reads the configuration, one section per package, and wires them together.
+
 | Component or team | Responsibility |
 | --- | --- |
 | krm-foyer | OIDC client, sessions, CSRF protection, fixed upstream routing, API proxy and stream host configuration |

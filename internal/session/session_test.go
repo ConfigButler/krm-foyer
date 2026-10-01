@@ -13,8 +13,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/ConfigButler/krm-foyer/internal/proxy"
 )
 
 const (
@@ -106,10 +104,6 @@ func assertNoSession(t *testing.T, err error) {
 	t.Helper()
 	if !errors.Is(err, ErrNoSession) {
 		t.Fatalf("err = %v, want ErrNoSession", err)
-	}
-	// The proxy answers 401 for exactly this.
-	if !errors.Is(err, proxy.ErrNoCredential) {
-		t.Fatalf("err = %v, does not read as proxy.ErrNoCredential", err)
 	}
 }
 
@@ -523,8 +517,8 @@ func (r *racingStore) Touch(ctx context.Context, key Key, lastSeen, expires time
 }
 
 // When the store fails, nothing is decided from a stale or empty answer: the error
-// is not "no session" (a 401 would send the user to log in again), and the proxy
-// answers 503.
+// is not "no session" (a 401 would send the user to log in again), and no session
+// is returned.
 func TestStoreFailureIsNotNoSession(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)}
 	failing := &failingStore{Store: NewMemory(c.Now)}
@@ -534,12 +528,12 @@ func TestStoreFailureIsNotNoSession(t *testing.T) {
 		t.Run(op, func(t *testing.T) {
 			failing.op = op
 			_, err := h.lookup(cookie)
-			if err == nil || errors.Is(err, ErrNoSession) || errors.Is(err, proxy.ErrNoCredential) {
+			if err == nil || errors.Is(err, ErrNoSession) {
 				t.Fatalf("err = %v, want a store error", err)
 			}
-			token, err := h.m.Token(request(http.MethodGet, cookie))
-			if err == nil || token != "" {
-				t.Fatalf("Token = %q, %v with the store down", token, err)
+			s, err := h.m.Use(request(http.MethodGet, cookie))
+			if err == nil || errors.Is(err, ErrNoSession) || s.IDToken != "" {
+				t.Fatalf("Use = %+v, %v with the store down", s, err)
 			}
 			if strings.Contains(err.Error(), cookie.Value) {
 				t.Errorf("the error names the session ID: %v", err)

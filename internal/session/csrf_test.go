@@ -2,16 +2,8 @@ package session
 
 import (
 	"errors"
-	"io"
 	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"slices"
-	"strings"
-	"sync"
 	"testing"
-
-	"github.com/ConfigButler/krm-foyer/internal/proxy"
 )
 
 // csrfKey is CSRFHeader as a key of a parsed request's header map. A test that
@@ -26,18 +18,10 @@ func sameOrigin(r *http.Request, proof string) *http.Request {
 	return r
 }
 
-func assertRefused(t *testing.T, err error, reason string) {
+func assertRefused(t *testing.T, err, want error) {
 	t.Helper()
-	var refused *proxy.Interruption
-	if !errors.As(err, &refused) {
-		t.Fatalf("err = %v, want a refusal", err)
-	}
-	if refused.Status != http.StatusForbidden || refused.Reason != reason {
-		t.Fatalf("refused with %d %s, want 403 %s", refused.Status, refused.Reason, reason)
-	}
-	// RBAC's refusal is 403 Forbidden; this one must not be mistaken for it.
-	if refused.Reason == "Forbidden" {
-		t.Fatal("a CSRF refusal reads as an RBAC refusal")
+	if !errors.Is(err, want) {
+		t.Fatalf("err = %v, want %v", err, want)
 	}
 }
 
@@ -76,47 +60,47 @@ func TestMutationsNeedProofAndTheSameOrigin(t *testing.T) {
 				t.Fatalf("a same-origin request with proof was refused: %v", err)
 			}
 			for name, tc := range map[string]struct {
-				edit   func(http.Header)
-				reason string
+				edit func(http.Header)
+				want error
 			}{
-				"no proof":                {func(h http.Header) { h.Del(CSRFHeader) }, "CSRFProofRequired"},
-				"empty proof":             {func(h http.Header) { h.Set(CSRFHeader, "") }, "CSRFProofRequired"},
-				"another session's proof": {func(h http.Header) { h.Set(CSRFHeader, os.CSRFToken) }, "CSRFProofRequired"},
-				"proof with a suffix":     {func(h http.Header) { h.Set(CSRFHeader, s.CSRFToken+"x") }, "CSRFProofRequired"},
-				"proof cut short":         {func(h http.Header) { h.Set(CSRFHeader, s.CSRFToken[1:]) }, "CSRFProofRequired"},
-				"the session ID as proof": {func(h http.Header) { h.Set(CSRFHeader, c.Value) }, "CSRFProofRequired"},
+				"no proof":                {func(h http.Header) { h.Del(CSRFHeader) }, ErrNoCSRFProof},
+				"empty proof":             {func(h http.Header) { h.Set(CSRFHeader, "") }, ErrNoCSRFProof},
+				"another session's proof": {func(h http.Header) { h.Set(CSRFHeader, os.CSRFToken) }, ErrNoCSRFProof},
+				"proof with a suffix":     {func(h http.Header) { h.Set(CSRFHeader, s.CSRFToken+"x") }, ErrNoCSRFProof},
+				"proof cut short":         {func(h http.Header) { h.Set(CSRFHeader, s.CSRFToken[1:]) }, ErrNoCSRFProof},
+				"the session ID as proof": {func(h http.Header) { h.Set(CSRFHeader, c.Value) }, ErrNoCSRFProof},
 				// Two fields: Get would read only the first.
-				"wrong proof, then right": {func(h http.Header) { h[csrfKey] = []string{"x", s.CSRFToken} }, "CSRFProofRequired"},
-				"right proof, then wrong": {func(h http.Header) { h[csrfKey] = []string{s.CSRFToken, "x"} }, "CSRFProofRequired"},
-				"right proof twice":       {func(h http.Header) { h[csrfKey] = []string{s.CSRFToken, s.CSRFToken} }, "CSRFProofRequired"},
-				"proofs joined by comma":  {func(h http.Header) { h.Set(CSRFHeader, s.CSRFToken+", "+s.CSRFToken) }, "CSRFProofRequired"},
+				"wrong proof, then right": {func(h http.Header) { h[csrfKey] = []string{"x", s.CSRFToken} }, ErrNoCSRFProof},
+				"right proof, then wrong": {func(h http.Header) { h[csrfKey] = []string{s.CSRFToken, "x"} }, ErrNoCSRFProof},
+				"right proof twice":       {func(h http.Header) { h[csrfKey] = []string{s.CSRFToken, s.CSRFToken} }, ErrNoCSRFProof},
+				"proofs joined by comma":  {func(h http.Header) { h.Set(CSRFHeader, s.CSRFToken+", "+s.CSRFToken) }, ErrNoCSRFProof},
 
-				"cross-site origin":       {func(h http.Header) { h.Set("Origin", "https://evil.example") }, "CrossOriginRequest"},
-				"sibling subdomain":       {func(h http.Header) { h.Set("Origin", "https://app.example.test") }, "CrossOriginRequest"},
-				"http origin":             {func(h http.Header) { h.Set("Origin", "http://foyer.example.test") }, "CrossOriginRequest"},
-				"other port":              {func(h http.Header) { h.Set("Origin", origin+":8443") }, "CrossOriginRequest"},
-				"origin as a prefix":      {func(h http.Header) { h.Set("Origin", origin+".evil.example") }, "CrossOriginRequest"},
-				"origin with a path":      {func(h http.Header) { h.Set("Origin", origin+"/") }, "CrossOriginRequest"},
-				"null origin":             {func(h http.Header) { h.Set("Origin", "null") }, "CrossOriginRequest"},
-				"empty origin":            {func(h http.Header) { h.Set("Origin", "") }, "CrossOriginRequest"},
-				"two origins, ours first": {func(h http.Header) { h["Origin"] = []string{origin, "https://evil.example"} }, "CrossOriginRequest"},
-				"ours twice":              {func(h http.Header) { h["Origin"] = []string{origin, origin} }, "CrossOriginRequest"},
+				"cross-site origin":       {func(h http.Header) { h.Set("Origin", "https://evil.example") }, ErrCrossOrigin},
+				"sibling subdomain":       {func(h http.Header) { h.Set("Origin", "https://app.example.test") }, ErrCrossOrigin},
+				"http origin":             {func(h http.Header) { h.Set("Origin", "http://foyer.example.test") }, ErrCrossOrigin},
+				"other port":              {func(h http.Header) { h.Set("Origin", origin+":8443") }, ErrCrossOrigin},
+				"origin as a prefix":      {func(h http.Header) { h.Set("Origin", origin+".evil.example") }, ErrCrossOrigin},
+				"origin with a path":      {func(h http.Header) { h.Set("Origin", origin+"/") }, ErrCrossOrigin},
+				"null origin":             {func(h http.Header) { h.Set("Origin", "null") }, ErrCrossOrigin},
+				"empty origin":            {func(h http.Header) { h.Set("Origin", "") }, ErrCrossOrigin},
+				"two origins, ours first": {func(h http.Header) { h["Origin"] = []string{origin, "https://evil.example"} }, ErrCrossOrigin},
+				"ours twice":              {func(h http.Header) { h["Origin"] = []string{origin, origin} }, ErrCrossOrigin},
 				// Origin decides when present; Sec-Fetch-Site cannot overrule it.
 				"cross-site origin, same-origin fetch": {func(h http.Header) {
 					h.Set("Origin", "https://evil.example")
 					h.Set("Sec-Fetch-Site", "same-origin")
-				}, "CrossOriginRequest"},
+				}, ErrCrossOrigin},
 
-				"no origin, cross-site":  {func(h http.Header) { h.Del("Origin"); h.Set("Sec-Fetch-Site", "cross-site") }, "CrossOriginRequest"},
-				"no origin, same-site":   {func(h http.Header) { h.Del("Origin"); h.Set("Sec-Fetch-Site", "same-site") }, "CrossOriginRequest"},
-				"no origin, typed in":    {func(h http.Header) { h.Del("Origin"); h.Set("Sec-Fetch-Site", "none") }, "CrossOriginRequest"},
-				"no origin, two values":  {func(h http.Header) { h.Del("Origin"); h["Sec-Fetch-Site"] = []string{"same-origin", "cross-site"} }, "CrossOriginRequest"},
-				"no origin, no metadata": {func(h http.Header) { h.Del("Origin"); h.Del("Sec-Fetch-Site") }, "CrossOriginRequest"},
+				"no origin, cross-site":  {func(h http.Header) { h.Del("Origin"); h.Set("Sec-Fetch-Site", "cross-site") }, ErrCrossOrigin},
+				"no origin, same-site":   {func(h http.Header) { h.Del("Origin"); h.Set("Sec-Fetch-Site", "same-site") }, ErrCrossOrigin},
+				"no origin, typed in":    {func(h http.Header) { h.Del("Origin"); h.Set("Sec-Fetch-Site", "none") }, ErrCrossOrigin},
+				"no origin, two values":  {func(h http.Header) { h.Del("Origin"); h["Sec-Fetch-Site"] = []string{"same-origin", "cross-site"} }, ErrCrossOrigin},
+				"no origin, no metadata": {func(h http.Header) { h.Del("Origin"); h.Del("Sec-Fetch-Site") }, ErrCrossOrigin},
 			} {
 				t.Run(name, func(t *testing.T) {
 					r := sameOrigin(request(method, c), s.CSRFToken)
 					tc.edit(r.Header)
-					assertRefused(t, h.m.CheckMutation(r, s), tc.reason)
+					assertRefused(t, h.m.CheckMutation(r, s), tc.want)
 				})
 			}
 		})
@@ -157,81 +141,7 @@ func TestOriginIsNormalized(t *testing.T) {
 // the empty one.
 func TestEmptySessionTokenAcceptsNothing(t *testing.T) {
 	h := newHarness(t)
-	assertRefused(t, h.m.CheckMutation(sameOrigin(request(http.MethodPost), ""), Session{}), "CSRFProofRequired")
-}
-
-// Through the proxy: Manager is the proxy's only credential source, and a refused
-// request never reaches the API server.
-func TestThroughTheProxy(t *testing.T) {
-	h := newHarness(t)
-	c := h.start(t, h.user())
-	s, _ := h.lookup(c)
-
-	var mu sync.Mutex
-	var auths []string
-	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		auths = append(auths, r.Header.Get("Authorization"))
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{}`)
-	}))
-	t.Cleanup(api.Close)
-	u, _ := url.Parse(api.URL)
-	p, err := proxy.New(proxy.Config{
-		Server: u, Credentials: h.m,
-		RootCAs: api.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	send := func(r *http.Request) int {
-		r.RequestURI = "/k8s/api/v1/namespaces/team-a/configmaps"
-		w := httptest.NewRecorder()
-		p.ServeHTTP(w, r)
-		return w.Code
-	}
-	reached := func() []string {
-		mu.Lock()
-		defer mu.Unlock()
-		return slices.Clone(auths)
-	}
-
-	for _, tc := range []struct {
-		name string
-		r    *http.Request
-		code int
-	}{
-		{"read without a session", request(http.MethodGet), http.StatusUnauthorized},
-		{"write without a session", sameOrigin(request(http.MethodPost), s.CSRFToken), http.StatusUnauthorized},
-		{"write without proof", func() *http.Request {
-			r := sameOrigin(request(http.MethodPost, c), s.CSRFToken)
-			r.Header.Del(CSRFHeader)
-			return r
-		}(), http.StatusForbidden},
-		{"cross-site write", func() *http.Request {
-			r := sameOrigin(request(http.MethodPost, c), s.CSRFToken)
-			r.Header.Set("Origin", "https://evil.example")
-			return r
-		}(), http.StatusForbidden},
-	} {
-		if code := send(tc.r); code != tc.code {
-			t.Errorf("%s: status %d, want %d", tc.name, code, tc.code)
-		}
-	}
-	if n := len(reached()); n != 0 {
-		t.Fatalf("%d refused requests reached the API server", n)
-	}
-
-	if code := send(request(http.MethodGet, c)); code != http.StatusOK {
-		t.Errorf("signed-in read: %d", code)
-	}
-	if code := send(sameOrigin(request(http.MethodPost, c), s.CSRFToken)); code != http.StatusOK {
-		t.Errorf("signed-in write with proof: %d", code)
-	}
-	if got := reached(); !slices.Equal(got, []string{"Bearer " + idToken, "Bearer " + idToken}) {
-		t.Errorf("the API server received Authorization %q", got)
-	}
+	assertRefused(t, h.m.CheckMutation(sameOrigin(request(http.MethodPost), ""), Session{}), ErrNoCSRFProof)
 }
 
 // A refused mutation leaves no trace on the session: it does not count as activity.
@@ -241,7 +151,7 @@ func TestRefusedMutationDoesNotTouch(t *testing.T) {
 	h.clock.Advance(idle - 1)
 	r := request(http.MethodPost, c)
 	r.Header.Set("Origin", "https://evil.example")
-	if _, err := h.m.Token(r); err == nil {
+	if _, err := h.m.Use(r); err == nil {
 		t.Fatal("refused nothing")
 	}
 	h.clock.Advance(1)
@@ -298,8 +208,8 @@ func FuzzCheckMutation(f *testing.F) {
 		if (err == nil) != want {
 			t.Fatalf("method %q, headers %q: CheckMutation = %v, want allowed = %v", method, r.Header, err, want)
 		}
-		if err != nil && !strings.Contains(err.Error(), "403") {
-			t.Fatalf("refusal is not a 403: %v", err)
+		if err != nil && !errors.Is(err, ErrCrossOrigin) && !errors.Is(err, ErrNoCSRFProof) {
+			t.Fatalf("refusal is neither ErrCrossOrigin nor ErrNoCSRFProof: %v", err)
 		}
 	})
 }

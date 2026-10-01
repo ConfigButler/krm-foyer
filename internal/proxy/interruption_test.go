@@ -1,13 +1,14 @@
 package proxy
 
 import (
-	"errors"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/ConfigButler/krm-foyer/internal/interruption"
 )
 
 // navigation is the header a browser sends when a person opens a URL in a tab.
@@ -29,13 +30,13 @@ type interruptionCase struct {
 func interruptionCases() []interruptionCase {
 	return []interruptionCase{
 		{name: "no session", target: "/k8s/api/v1/namespaces?labelSelector=team%3Da",
-			creds: credentials{err: ErrNoCredential}, status: http.StatusUnauthorized,
+			creds: credentials{refused: interruption.NotSignedIn()}, status: http.StatusUnauthorized,
 			page: []string{"Sign in", `href="/auth/login?return_to=%2Fk8s%2Fapi%2Fv1%2Fnamespaces%3FlabelSelector%3Dteam%253Da"`}},
 		{name: "session store unavailable", target: "/k8s/api/v1/namespaces",
-			creds: credentials{err: errors.New("store: connection refused")}, status: http.StatusServiceUnavailable,
+			creds: credentials{refused: unavailable}, status: http.StatusServiceUnavailable,
 			page: []string{"session could not be checked"}},
 		{name: "refused by the session", target: "/k8s/api/v1/namespaces",
-			creds: credentials{err: csrfRefusal}, status: http.StatusForbidden,
+			creds: credentials{refused: csrfRefusal}, status: http.StatusForbidden,
 			page: []string{"CSRFProofRequired"}},
 		{name: "non-canonical path", target: "/k8s/api/v1//namespaces",
 			status: http.StatusBadRequest, page: []string{"canonical"}},
@@ -151,7 +152,7 @@ func TestOnlyNavigationsGetAPage(t *testing.T) {
 	for _, method := range []string{http.MethodHead, http.MethodPost, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
 			api := newAPIServer(t, nil)
-			f := newFoyer(t, api, credentials{err: ErrNoCredential})
+			f := newFoyer(t, api, credentials{refused: interruption.NotSignedIn()})
 			resp := f.request(t, method, "/k8s/api/v1/namespaces", nil, navigation)
 			if resp.StatusCode != http.StatusUnauthorized || strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
 				t.Fatalf("%s navigation: %d %s", method, resp.StatusCode, resp.Header.Get("Content-Type"))
@@ -224,7 +225,7 @@ func escapeForCheck(s string) string {
 // The sign-in link brings the person back to the URL they opened.
 func TestSignInReturnsToTheURL(t *testing.T) {
 	api := newAPIServer(t, nil)
-	f := newFoyer(t, api, credentials{err: ErrNoCredential})
+	f := newFoyer(t, api, credentials{refused: interruption.NotSignedIn()})
 	target := "/k8s/api/v1/namespaces/team-a/configmaps?watch=1&labelSelector=a%3Db"
 	resp := f.request(t, http.MethodGet, target, nil, navigation)
 	i := strings.Index(resp.Body, `href="/auth/login?return_to=`)

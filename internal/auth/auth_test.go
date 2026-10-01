@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -109,9 +110,11 @@ func newUndiscovered(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	issuerCA := x509.NewCertPool()
+	issuerCA.AddCert(h.issuer.Certificate())
 	h.auth, err = New(Config{
 		PublicURL: h.foyer.URL, Issuer: h.issuer.URL, ClientID: clientID, ClientSecret: clientSecret,
-		HTTPClient: h.issuer.Client(), Sessions: h.sessions, Now: h.clock.Now,
+		RootCAs: issuerCA, Sessions: h.sessions, Now: h.clock.Now,
 		Logger: slog.New(slog.NewJSONHandler(&h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {
@@ -874,6 +877,31 @@ func TestStoreDown(t *testing.T) {
 	resp = b.do(http.MethodPost, "/auth/logout", http.Header{"Origin": {h.foyer.URL}, session.CSRFHeader: {s.CSRFToken}})
 	if resp.code != http.StatusServiceUnavailable || b.cookie(session.CookieName) == "" {
 		t.Errorf("logout that could not delete = %d, cookie kept %v", resp.code, b.cookie(session.CookieName) != "")
+	}
+}
+
+// The issuer is reached only over verified TLS and never through a proxy from the
+// environment: without its CA, discovery fails, and the transport has no proxy
+// function. That is read from the transport, because Go never proxies the loopback
+// address the fake issuer listens on, so an environment variable would prove nothing.
+func TestIssuerTransport(t *testing.T) {
+	h := newUndiscovered(t)
+	if tr, ok := h.auth.client.Transport.(*http.Transport); !ok || tr.Proxy != nil {
+		t.Fatal("the issuer transport may use a proxy from the environment")
+	}
+	if err := h.auth.Discover(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	untrusting, err := New(Config{
+		PublicURL: h.foyer.URL, Issuer: h.issuer.URL, ClientID: clientID, ClientSecret: clientSecret,
+		Sessions: h.sessions,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := untrusting.Discover(t.Context()); err == nil {
+		t.Fatal("discovered an issuer whose certificate nothing vouches for")
 	}
 }
 

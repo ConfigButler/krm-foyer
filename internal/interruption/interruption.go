@@ -1,4 +1,9 @@
-package proxy
+// Package interruption renders the answers krm-foyer gives instead of the API
+// server's: a Kubernetes Status for code, and a page for a person browsing. Every
+// kind is a row of the interruptions table in docs/design.md. It decides nothing:
+// the proxy and the login half build the Interruption, and this package only writes
+// it.
+package interruption
 
 import (
 	"encoding/json"
@@ -48,6 +53,38 @@ type statusDetails struct {
 	Causes []Cause `json:"causes,omitempty"`
 }
 
+// NotSignedIn answers a request that has no signed-in user.
+func NotSignedIn() *Interruption {
+	return &Interruption{Status: http.StatusUnauthorized, Reason: "Unauthorized", Message: "not signed in"}
+}
+
+// SetHeaders sets what every answer under /k8s carries, proxied or not, replacing
+// anything the API server sent.
+func SetHeaders(h http.Header) {
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	h.Set("Cache-Control", "no-store")
+	h.Set("Referrer-Policy", "no-referrer")
+}
+
+// Serve answers r with the interruption: as a page when a person opened r's URL in a
+// tab, and as a Status otherwise. The status code is the same either way.
+func (i *Interruption) Serve(w http.ResponseWriter, r *http.Request) {
+	if isNavigation(r) {
+		i.page(w, r)
+		return
+	}
+	i.Write(w)
+}
+
+// isNavigation reports whether a person opened r's URL in a tab: a GET with exactly
+// one Sec-Fetch-Dest saying document. Browsers set it and page scripts cannot, and
+// clients that are not browsers do not send it, so code always gets the Status.
+func isNavigation(r *http.Request) bool {
+	dest := r.Header.Values("Sec-Fetch-Dest")
+	return r.Method == http.MethodGet && len(dest) == 1 && dest[0] == "document"
+}
+
 // Write answers with the interruption as a Kubernetes Status.
 func (i *Interruption) Write(w http.ResponseWriter) {
 	s := status{
@@ -62,7 +99,7 @@ func (i *Interruption) Write(w http.ResponseWriter) {
 		panic(err) // only strings and ints: cannot fail
 	}
 	h := w.Header()
-	setResponseHeaders(h)
+	SetHeaders(h)
 	h.Set("Content-Type", "application/json")
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(i.Status)
@@ -81,8 +118,7 @@ var titles = map[string]string{
 	"CrossOriginRequest": "Refused by krm-foyer",
 }
 
-// page answers with the interruption as a page, for a person browsing. The status
-// code is the one code gets.
+// page answers with the interruption as a page, for a person browsing.
 func (i *Interruption) page(w http.ResponseWriter, r *http.Request) {
 	data := struct {
 		Status                     int

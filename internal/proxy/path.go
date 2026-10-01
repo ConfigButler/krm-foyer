@@ -3,6 +3,8 @@ package proxy
 import (
 	"net/http"
 	"strings"
+
+	"github.com/ConfigButler/krm-foyer/internal/interruption"
 )
 
 // Prefix is where krm-foyer serves the Kubernetes API. It is stripped before a
@@ -11,13 +13,13 @@ const Prefix = "/k8s"
 
 // CheckPath takes the path of a request target exactly as it arrived, without the
 // query, and returns the path to send to the API server: the same bytes minus
-// Prefix. It refuses, with an *Interruption, a path that is not canonical, is not
+// Prefix. It refuses, with an *interruption.Interruption, a path that is not canonical, is not
 // one of the API routes, or names a subresource krm-foyer does not support.
 //
 // It works on the escaped form only and never decodes into a second form, so the
 // path checked and the path forwarded cannot differ. See "Path hygiene" in
 // docs/design.md and "Why routing by path is safe" in docs/ingress.md.
-func CheckPath(raw string) (string, *Interruption) {
+func CheckPath(raw string) (string, *interruption.Interruption) {
 	upstream, ok := strings.CutPrefix(raw, Prefix)
 	if !ok || (upstream != "" && upstream[0] != '/') {
 		return "", notAPIRoute()
@@ -29,7 +31,7 @@ func CheckPath(raw string) (string, *Interruption) {
 	segments := strings.Split(upstream[1:], "/")
 	for _, s := range segments {
 		if reason := nonCanonical(s); reason != "" {
-			return "", &Interruption{
+			return "", &interruption.Interruption{
 				Status: http.StatusBadRequest, Reason: "BadRequest",
 				Message: "non-canonical path: " + reason + "; krm-foyer rejects such paths instead of normalizing them",
 			}
@@ -39,7 +41,7 @@ func CheckPath(raw string) (string, *Interruption) {
 	switch segments[0] {
 	case "api", "apis":
 		if what := unsupported(segments); what != "" {
-			return "", &Interruption{
+			return "", &interruption.Interruption{
 				Status: http.StatusNotImplemented, Reason: "NotImplemented",
 				Message: "the " + what + " subresource is not supported by krm-foyer",
 			}
@@ -58,8 +60,8 @@ func CheckPath(raw string) (string, *Interruption) {
 	return upstream, nil
 }
 
-func notAPIRoute() *Interruption {
-	return &Interruption{
+func notAPIRoute() *interruption.Interruption {
+	return &interruption.Interruption{
 		Status: http.StatusNotFound, Reason: "NotFound",
 		Message: "not a Kubernetes API route: krm-foyer serves " + Prefix + "/api, " + Prefix + "/apis, " + Prefix + "/version and " + Prefix + "/openapi",
 	}

@@ -6,8 +6,6 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ConfigButler/krm-foyer/internal/interruption"
 )
 
 const userToken = "user-token-4f1c9a" //nolint:gosec // a marker to search for, not a credential
@@ -26,11 +26,13 @@ const userToken = "user-token-4f1c9a" //nolint:gosec // a marker to search for, 
 // credentials is the test's session: it hands the proxy a fixed answer. It exists
 // only in this test file; the binary has no way to be given a token but a session.
 type credentials struct {
-	token string
-	err   error
+	token   string
+	refused *interruption.Interruption
 }
 
-func (c credentials) Token(*http.Request) (string, error) { return c.token, c.err }
+func (c credentials) Token(*http.Request) (string, *interruption.Interruption) {
+	return c.token, c.refused
+}
 
 // apiServer stands in for the API server and records what reached it.
 type apiServer struct {
@@ -160,6 +162,15 @@ func (f foyer) get(t *testing.T, target string) answer {
 	return f.request(t, http.MethodGet, target, nil, nil)
 }
 
+// status is a Kubernetes metav1.Status as a client reads it.
+type status struct {
+	Kind, APIVersion, Status, Message, Reason string
+	Code                                      int
+	Details                                   *struct {
+		Causes []struct{ Reason, Message, Field string }
+	}
+}
+
 // readStatus reads an interruption and checks that it is a Kubernetes Status with
 // the response's own code.
 func readStatus(t *testing.T, resp answer) status {
@@ -275,26 +286,24 @@ func testSendsOnlyTheUsersToken(t *testing.T, http2 bool) {
 }
 
 // Without a usable credential the request never reaches the API server: no
-// anonymous request, and no other identity in its place.
-var csrfRefusal = &Interruption{Status: http.StatusForbidden, Reason: "CSRFProofRequired", Message: "no CSRF proof"}
+// anonymous request, and no other identity in its place. What the credential source
+// answers instead is given as it is, even alongside a token.
+var (
+	csrfRefusal = &interruption.Interruption{Status: http.StatusForbidden, Reason: "CSRFProofRequired", Message: "no CSRF proof"}
+	unavailable = &interruption.Interruption{Status: http.StatusServiceUnavailable, Reason: "ServiceUnavailable", Message: "the session could not be checked; try again later"}
+)
 
 func TestNoCredentialNeverReachesTheAPIServer(t *testing.T) {
 	for name, tc := range map[string]struct {
 		creds Credentials
 		code  int
 	}{
-		"no session":           {credentials{err: ErrNoCredential}, http.StatusUnauthorized},
-		"wrapped no session":   {credentials{err: errors.Join(errors.New("expired"), ErrNoCredential)}, http.StatusUnauthorized},
-		"empty token":          {credentials{}, http.StatusUnauthorized},
-		"store unavailable":    {credentials{err: errors.New("redis: connection refused")}, http.StatusServiceUnavailable},
-		"token and an error":   {credentials{token: userToken, err: errors.New("redis: timeout")}, http.StatusServiceUnavailable},
-		"token and no session": {credentials{token: userToken, err: ErrNoCredential}, http.StatusUnauthorized},
-		// The session refuses the request itself, for example a mutation without CSRF
-		// proof. That answer is given as it is, even alongside a token.
-		"refused by the session":  {credentials{err: csrfRefusal}, http.StatusForbidden},
-		"wrapped session refusal": {credentials{err: fmt.Errorf("checking the request: %w", csrfRefusal)}, http.StatusForbidden},
-		"token and a refusal":     {credentials{token: userToken, err: csrfRefusal}, http.StatusForbidden},
-		"refusal and no session":  {credentials{err: errors.Join(ErrNoCredential, csrfRefusal)}, http.StatusUnauthorized},
+		"not signed in":           {credentials{refused: interruption.NotSignedIn()}, http.StatusUnauthorized},
+		"empty token":             {credentials{}, http.StatusUnauthorized},
+		"session unavailable":     {credentials{refused: unavailable}, http.StatusServiceUnavailable},
+		"refused by the session":  {credentials{refused: csrfRefusal}, http.StatusForbidden},
+		"token and a refusal":     {credentials{token: userToken, refused: csrfRefusal}, http.StatusForbidden},
+		"token and not signed in": {credentials{token: userToken, refused: interruption.NotSignedIn()}, http.StatusUnauthorized},
 	} {
 		t.Run(name, func(t *testing.T) {
 			api := newAPIServer(t, nil)

@@ -100,7 +100,9 @@ bugs are here, where they are cheap to find:
   authorization codes and PKCE verifiers, and for session IDs outside the `Set-Cookie`
   that issues them. The fake issuer can also refuse a token request by echoing it, in
   each place an OAuth error has room for text, so the scan proves those refusals are
-  logged by status and error code only. Dex is the e2e suite's issuer, for what a real login
+  logged by status and error code only. The proxy runs behind login as the binary wires it, so a
+  refused request is shown never to reach the API server, and each session error,
+  however wrapped, becomes one answer that is never RBAC's `Forbidden`. Dex is the e2e suite's issuer, for what a real login
   does; the fake issuer is for refusals Dex never causes.
 - **Return paths** are fuzzed against a model of how a browser resolves a `Location`
   (the WHATWG URL standard's leniencies: backslashes, stripped tabs, any number of
