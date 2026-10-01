@@ -36,7 +36,7 @@ application. Without a scope, her session there carries her full Kubernetes acce
 | Cross-site scripting in the application, or a compromised npm dependency in its bundle | Reads every Secret in the namespace, creates a RoleBinding or a privileged pod | Edits coffee menus |
 | A careless or compromised service on the shared origin, which is [one trust boundary](ingress.md#what-a-shared-origin-costs) | The same | The same limit |
 | A stolen session ID, which is a [bearer credential](design.md#login-and-sessions) | Everything alice can do with `kubectl`, until the session ends | Only the application's resources |
-| `pods/exec`, `nodes/proxy`, `services/proxy` | Reachable for anyone whose RBAC grants them | Never reachable unless listed |
+| `pods/exec`, `nodes/proxy`, `services/proxy` | Refused as unsupported for now; once supported, reachable for anyone whose RBAC grants them | Never reachable unless listed |
 | An administrator signing in to a small application | The application becomes a cluster console | The application stays a coffee-menu editor |
 
 Every row is about limiting the damage when the frontend goes wrong. None of them is

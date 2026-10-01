@@ -38,11 +38,13 @@ var _ = Describe("krm-foyer", Label("foyer"), func() {
 		PIt("follows a RoleBinding change on the next request, with no restart and no new login")
 		PIt("passes a watch through exactly as the API server answers it, for a user who may list but not watch")
 		PIt("rejects a non-canonical path instead of forwarding it")
+		PIt("refuses service, pod and node proxy subresources as unsupported, without reaching the backend")
 	})
 
 	Context("keeps the credential on the server", func() {
 		PIt("never returns an ID, access or refresh token in any response the suite received")
 		PIt("destroys the session on logout, so a replayed cookie gets a 401")
+		PIt("ends the session when Dex refuses a refresh for a removed user, and records how long that took")
 		PIt("requires CSRF proof and a same-origin request for mutations and logout")
 	})
 

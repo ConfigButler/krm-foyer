@@ -25,6 +25,12 @@ Each step makes pending specs real and ends with `task verify` green.
    krm-foyer. Then measure the operational cost against keeping auth and transport in
    each application.
 
+## Versions
+
+krm-foyer stays below 1.0: `fix:` is a patch, and `feat:` and `feat!:` are a minor.
+1.0 is a deliberate decision, made once other people run krm-foyer and are happy with
+it, not a side effect of a commit.
+
 ## Checklist
 
 Checked items exist today. An item is done when its test exists, not when its code does.
@@ -58,6 +64,10 @@ Security items need tests that try to get past the boundary.
       changelog entry makes it worth it
 
 ### Later, when an adopter needs it
+
+- [ ] Proxy subresources, with CSRF proof required on every request through them,
+      whatever the method; a test that a cross-site `GET` navigation is refused before it
+      reaches the backend
 
 - [ ] [Application scope](application-scope.md): first document a browser identity in the
       cluster's authentication config, proved by one e2e spec; then a scope list in
@@ -98,13 +108,24 @@ Security items need tests that try to get past the boundary.
 - [ ] A test proves that no request falls back to the service account
 - [ ] A test proves that no response, on any route, contains a token krm-foyer holds,
       including tokens obtained by refresh
-- [ ] Exec, attach and port-forward return an explicit unsupported error
+- [ ] Upstream bodies reach the browser decoded: the browser's `Accept-Encoding` is
+      dropped, a gzip answer from the API server arrives uncompressed without
+      `Content-Encoding`, and the response-byte bound counts decoded bytes (a test with a
+      small body that expands past the bound)
+- [ ] Exec, attach, port-forward and the service, node and pod proxy subresources return
+      an explicit unsupported error
+- [ ] Every [interruption](design.md#interruptions) row has a test, and the differential
+      specs treat that table as the only exceptions
 
 ### Login and sessions
 
 - [ ] OIDC authorization code with PKCE, state and nonce, through a maintained library
 - [ ] Opaque server-side sessions: rotated at login, with idle and absolute expiry
 - [ ] Refresh is serialized per session and bounded
+- [ ] A refused refresh ends the session at once: 401s, and its streams close
+- [ ] The disablement bound measured for Dex in the fixture (remove a user, time the
+      refused refresh), and documented per issuer configuration; elsewhere the documented
+      bound is the absolute session expiry
 - [ ] CSRF proof and same-origin checks on every mutation and on logout
 - [ ] An unauthenticated API request gets a JSON 401, not a redirect
 - [ ] `/auth/whoami` from a SelfSubjectReview, and `/auth/session`
@@ -150,6 +171,10 @@ Security items need tests that try to get past the boundary.
       `fetch('/k8s/apis/...')`. It lives in `examples/`, not in the binary
 - [ ] A small, framework-independent JavaScript helper: log in on a 401, show a 403 as a
       refusal, and treat a 409 as a conflict to reconcile
+- [ ] Deployment examples that show who krm-foyer suits without a scope: users granted a
+      Role that matches the application, next to a note on why it is the wrong tool for
+      users with broad grants such as cluster-admin. See
+      [application scope](application-scope.md)
 - [ ] A page for frontend developers: "the responses you will get and what they mean"
       (`generation` versus `resourceVersion`, 409 versus 403, what an empty list means)
 - [ ] Voter's CoffeeConfig editor running on krm-foyer, replacing its own handlers

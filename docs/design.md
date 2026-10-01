@@ -100,16 +100,25 @@ A lost response may already have committed a write.
 The service has no hardcoded resource catalogue. Its initial transport scope covers ordinary
 HTTP APIs, streaming logs and native HTTP watches. Exec, attach and port-forward require
 separate upgrade-protocol support and tests; return an explicit unsupported error until
-implemented. Service, node and pod proxy subresources are Kubernetes routes like any
-other: RBAC decides, and the [upstream response](#upstream-responses) rules keep what they
-return from running on the origin. The browser cannot supply an arbitrary upstream URL.
+implemented. The browser cannot supply an arbitrary upstream URL.
+
+**Service, node and pod proxy subresources are deferred** and get the same explicit
+unsupported error. RBAC would still decide who may use them, but what sits behind them
+is an arbitrary application, and an arbitrary application may change state on a `GET`.
+krm-foyer cannot tell from the method, and a cross-site page can make a signed-in
+browser send a `GET` by navigating to it; holding back the HTML that comes back happens
+after the backend has acted. So when they are supported, **every request through a proxy
+subresource, whatever its method, needs CSRF proof** and is refused without it, which
+also means they cannot be opened by typing a URL into a tab. The
+[upstream response](#upstream-responses) rules apply on top. Kubernetes' own `GET`s are
+safe by API convention, so the rest of `/k8s` stays navigable.
 
 ### Upstream responses
 
 Stripping request headers covers what goes up. What comes back crosses the same
 boundary, onto an origin the browser trusts, and needs rules of its own. They hold for
-every route, and matter most for aggregated APIs and proxy subresources, which return
-whatever their backend sends:
+every route, and matter most for aggregated APIs and, once supported, proxy
+subresources, which return whatever their backend sends:
 
 - **Content types are allowlisted.** JSON, YAML, Kubernetes protobuf and the watch
   stream types pass; `text/plain` passes for logs. Anything else, `text/html` above all,
@@ -124,6 +133,14 @@ whatever their backend sends:
   `Retry-After` and the API priority-and-fairness headers). Everything else is dropped,
   including `Set-Cookie`, which would reach every service on the origin, and
   `Access-Control-*`: krm-foyer is same-origin only and never grants CORS.
+- **Bodies reach the browser decoded.** Dropping `Content-Encoding` while passing a
+  gzip body on would hand the browser bytes it cannot read. krm-foyer drops the
+  browser's `Accept-Encoding`, so Go's transport asks the API server for gzip and
+  decodes it transparently (it does not when the request already names an encoding),
+  and the browser receives the body uncompressed with no `Content-Encoding`. The bound
+  on response bytes counts decoded bytes, so a small compressed body cannot expand past
+  it. A response that still carries a `Content-Encoding` is held back. Compressing
+  towards the browser is a later performance choice, not part of the boundary.
 - **Redirects are not followed and not passed on automatically.** A `Location` from an
   aggregated API could send the browser anywhere, so the user decides.
 
@@ -145,6 +162,13 @@ answer, it says so in a form the requester can read:
 | Upstream redirect | 502 | `Status` with the target in `details` | A notice naming the full target, with a link the user can follow |
 | Upstream content held back | 502 | `Status` with the content type | A page showing the response as escaped text, truncated at a bound |
 | Session store unavailable | 503 | `Status` | A page saying so, with no retry loop |
+| Non-canonical path | 400 | `Status` naming the [path rule](#access) | A page saying so |
+| Missing CSRF proof or cross-origin request | 403 | `Status` with a reason that is not RBAC's | A page saying so |
+| Unsupported protocol or subresource | 501 | `Status` naming what is unsupported | A page saying so |
+| A [bound](#access) reached | 429, or 502 when a response exceeds its size bound | `Status` naming the bound, with `Retry-After` where waiting helps | A page saying so |
+
+This table is the complete list of answers krm-foyer gives instead of the API server's.
+Anything not in it is the API server's answer.
 
 Rules:
 
@@ -254,7 +278,8 @@ Expose authentication-required state before navigation so an editor can offer dr
 or an explicitly designed preservation flow. A 403 represents permission denial, not a login
 loop. Bound refresh attempts and report persistent issuer/cluster configuration errors.
 
-Require CSRF proof and same-origin checks for mutations and logout. Strip browser-supplied
+Require CSRF proof and same-origin checks for mutations, logout and, once supported,
+every request through a proxy subresource. Strip browser-supplied
 Authorization, impersonation and untrusted forwarding headers; never forward the session
 cookie to Kubernetes. Pin upstream destinations, verify TLS, bound request/stream resources
 and avoid credential/body logging. HttpOnly does not prevent malicious same-origin JavaScript
@@ -272,7 +297,19 @@ Revocation is as fast as its slowest path. Each row is a requirement with a test
 | Streams open at logout | Closed on every replica within the session-check interval, a configured bound with a documented default |
 | Token expiry or failed refresh | API requests get 401; streams close at the token's expiry or the session's, whichever comes first |
 | RBAC change | Kubernetes applies it on the next request. A shared watch applies it within its SubjectAccessReview recheck interval; that is reauthorization, not revocation |
-| User disabled at the issuer | krm-foyer learns of it at the next refresh. Until then the API server accepts the ID token it already holds, so the bound is the token lifetime the issuer sets. Document it; do not claim faster |
+| Issuer refuses a refresh | The session ends at once: API requests get 401 and its streams close. krm-foyer never retries a refusal into a success or keeps using the old token past its expiry |
+| User disabled at the issuer | Provider-dependent; see below. The only bound krm-foyer itself guarantees is the session's absolute expiry |
+
+Disabling a user reaches krm-foyer only as a refused refresh. Until then the API server
+accepts the ID token krm-foyer already holds, so the user keeps access for the rest of
+that token's lifetime **plus** however long the issuer goes on granting refreshes after
+the account is disabled. That second part belongs to the issuer, and OAuth leaves it to
+the implementation: an issuer may cache an upstream identity provider's answer, or not
+check it on refresh at all. So krm-foyer documents the bound per issuer configuration,
+and claims one only where a test has disabled a user and measured when the refresh is
+refused. Elsewhere the documented bound is the absolute session expiry. Operators who
+need a tighter one shorten the token lifetime or the absolute expiry, or choose an issuer
+that checks the account on every refresh.
 
 Revoking a session does not revoke tokens the issuer handed to other clients, and does
 not undo writes Kubernetes already accepted.
@@ -311,11 +348,12 @@ of partial success.
 | --- | --- |
 | Reuse | Two frontends using different API groups without application-specific backend handlers |
 | Authentication | Callback failure, expiry, refresh, restart and logout tests across replicas |
-| Session lifecycle | Every bound in [session lifecycle](#session-lifecycle) measured by a test, including logout racing refresh, store outage and streams open at logout |
+| Session lifecycle | Every bound in [session lifecycle](#session-lifecycle) measured by a test, including logout racing refresh, store outage, streams open at logout and a refused refresh; a disablement bound is claimed only for issuer configurations where a test measured it |
 | Credential custody | No token krm-foyer holds, including refreshed ones, and no session ID in any response, log line or error page the suite collects |
-| Access | Every answer through krm-foyer equals the API server's answer for the same token; non-canonical paths are rejected; nothing falls back to the service account |
+| Access | Every answer through krm-foyer equals the API server's answer for the same token, except the [interruptions](#interruptions), each with a test that it happens exactly when the table says; non-canonical paths are rejected; nothing falls back to the service account |
 | Proxy semantics | Kubernetes errors and patch types preserved; conflicting writes and ambiguous create outcomes handled without automatic replay |
-| Upstream responses | An upstream that sends HTML, `Set-Cookie`, CORS headers, cache headers or a redirect has none of them reach the browser unasked |
+| Upstream responses | An upstream that sends HTML, `Set-Cookie`, CORS headers, cache headers or a redirect has none of them reach the browser unasked; a gzip response arrives decoded, and the size bound holds for its decoded bytes |
+| Proxy subresources | Refused as unsupported until supported; then refused without CSRF proof for every method, including a cross-site `GET` navigation |
 | Interruptions | Each interruption gives the same status to code and to a navigation; scripts cannot obtain the page form; no Kubernetes answer is ever replaced |
 | What may I do | `/_foyer/access` agrees with what requests actually get, and follows a RoleBinding change without a new login |
 | Streams | Cancellation, recovery, expiry, subscriber isolation and measured load under declared capacity targets |
