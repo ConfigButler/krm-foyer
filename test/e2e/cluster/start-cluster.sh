@@ -34,11 +34,16 @@ mkdir -p "$E2E_DIR/config"
 chmod 700 "$E2E_DIR"
 
 echo "== certificates"
-if [ ! -f "$E2E_DIR/ca.crt" ]; then
+# Thirty-day certificates in a directory that outlives the cluster, so a rerun renews any
+# that expire within a day. A new CA means a new Dex certificate signed by it; both change
+# the configuration hash below, which restarts Dex and the API server.
+expiring() { [ ! -f "$1" ] || ! openssl x509 -checkend 86400 -noout -in "$1" >/dev/null 2>&1; }
+if expiring "$E2E_DIR/ca.crt"; then
+  rm -f "$E2E_DIR/config/dex.crt"
   openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=krm-foyer e2e CA" \
     -keyout "$E2E_DIR/ca.key" -out "$E2E_DIR/ca.crt" 2>/dev/null
 fi
-if [ ! -f "$E2E_DIR/config/dex.crt" ]; then
+if expiring "$E2E_DIR/config/dex.crt"; then
   openssl req -newkey rsa:2048 -nodes -subj "/CN=$DEX_HOST" \
     -keyout "$E2E_DIR/config/dex.key" -out "$E2E_DIR/dex.csr" 2>/dev/null
   openssl x509 -req -in "$E2E_DIR/dex.csr" -CA "$E2E_DIR/ca.crt" -CAkey "$E2E_DIR/ca.key" \

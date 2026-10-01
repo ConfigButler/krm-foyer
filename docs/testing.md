@@ -42,7 +42,7 @@ received from krm-foyer may contain any of them.
 | Layer | Runs with | What it covers |
 | --- | --- | --- |
 | Unit | `task test` (`go test -race ./...`) | Allowlist matching, path checking, header handling, session and cookie rules, page rendering. Fast and exhaustive |
-| e2e | `task test-e2e` | A real API server trusting a real Dex, and krm-foyer deployed in front of it. Proves the claims above |
+| e2e | `task test-e2e` | A real API server trusting a real Dex. Today it validates that fixture; once krm-foyer is deployed in front of it, the pending specs (differential answers, service-account fallback, token scan) prove the claims above |
 | Browser | Not yet | Playwright, once the example frontend exists. Only for what a Go HTTP client cannot show |
 
 Both layers run in `task verify` and in CI.

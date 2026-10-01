@@ -69,8 +69,8 @@ found three defects, and each one shaped a rule here:
    missing is a frontend helper and documentation that tell a 409 (retry) apart from a 403
    (refusal).
 3. **Nothing recorded the refusals.** The failures had to be reconstructed from
-   `creationTimestamp`s four days later. krm-foyer logs every refusal, whether from policy or
-   from upstream, with the subject and the reason.
+   `creationTimestamp`s four days later. krm-foyer is to log every refusal, whether from
+   policy or from upstream, with the subject and the reason (see the checklist below).
 
 The post-mortem's closing line is this project's working rule too: *being built on the API
 means inheriting its semantics exactly, not approximately.*
