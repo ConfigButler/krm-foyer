@@ -69,8 +69,10 @@ Security items need tests that try to get past the boundary.
       [testing](testing.md)
 - [x] The e2e job green in CI
 - [x] PR title check for conventional commits (squash merges take the PR title)
-- [ ] krm-foyer deployed into the e2e fixture (image imported with `k3d image import`),
-      with the pending `foyer` specs made real
+- [x] krm-foyer deployed into the e2e fixture (image imported with `k3d image import`),
+      with its service account as cluster-admin bait
+- [ ] The remaining `foyer` specs made real: differential answers, CSRF, logout and the
+      token scan (step 2), streams and the ingress (later)
 - [ ] Browser e2e with Playwright: log in, read, edit, get refused with 403, hit a 409,
       log out
 - [ ] Coverage baseline that ratchets upward
@@ -95,7 +97,8 @@ Security items need tests that try to get past the boundary.
 
 ### Deployment
 
-- [ ] krm-foyer serves TLS from a mounted certificate and reloads it on rotation
+- [x] krm-foyer serves TLS from a mounted certificate (the e2e deployment does)
+- [ ] It reloads the certificate on rotation
 - [ ] Behind an ingress: the public URL from configuration and no trust in `Host` or
       `X-Forwarded-*`, with one e2e spec running nginx in front. See [ingress](ingress.md)
 - [ ] Behind an ingress with re-encryption: the ingress verifies krm-foyer's certificate
@@ -116,7 +119,8 @@ Security items need tests that try to get past the boundary.
 - [x] Non-canonical paths (`//`, `..`, encoded slashes) are rejected, not normalized, and
       the path forwarded is byte-for-byte the path received
 - [x] Browser-supplied `Authorization`, `Impersonate-*` and forwarding headers are
-      stripped, and the session cookie never reaches Kubernetes (unit tests; e2e in step 2)
+      stripped, and the session cookie never reaches Kubernetes (unit tests, and e2e with
+      the audit log as witness)
 - [x] Upstream responses: redirects are not followed or passed on, `Set-Cookie` and CORS
       headers are dropped, and every response is `Cache-Control: no-store`. See
       [upstream responses](design.md#upstream-responses)
@@ -126,7 +130,9 @@ Security items need tests that try to get past the boundary.
 - [x] A redirect notice that shows the full target and continues only on a click, linking
       only to absolute web URLs
 - [ ] A held-back page that shows the response as escaped text, truncated at a bound
-- [ ] A test proves that no request falls back to the service account
+- [x] A test proves that no request falls back to the service account: with the bait in
+      place, a request without a session gets 401 and never reaches the API server, and
+      the audit log names the user for every request with one
 - [ ] A test proves that no response, on any route, contains a token krm-foyer holds,
       including tokens obtained by refresh
 - [x] Upstream bodies reach the browser decoded: the browser's `Accept-Encoding` is

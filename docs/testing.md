@@ -50,7 +50,7 @@ response, in any other response, or in a log line still fails the run.
 | Layer | Runs with | What it covers |
 | --- | --- | --- |
 | Unit | `task test` (`go test -race ./...`) | Path checking, header handling, upstream response rules, session and cookie rules, page rendering. Fast and exhaustive |
-| e2e | `task test-e2e` | A real API server trusting a real Dex. Today it validates that fixture; once krm-foyer is deployed in front of it, the pending specs (differential answers, service-account fallback, token scan) prove the claims above |
+| e2e | `task test-e2e` | A real API server trusting a real Dex, and krm-foyer deployed in the cluster in front of it. The fixture's own specs validate the fixture; the `foyer` specs prove the claims above |
 | Browser | Not yet | Playwright, once the example frontend exists. Only for what a Go HTTP client cannot show |
 
 Both layers run in `task verify` and in CI.
@@ -118,9 +118,17 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   with claims rewritten after signing, are rejected; and the audit log names the user.
   Every refusal has a matching acceptance next to it, so a 401 cannot pass for the wrong
   reason. If these fail, nothing else in the suite means anything.
-- **krm-foyer** (label `foyer`) is the list of claims, written as pending specs. Each one
-  becomes a real spec in the change that implements it. `task test-e2e -- -v -ginkgo.v`
-  lists them.
+- **krm-foyer** (label `foyer`) is the list of claims. The suite signs in the way a
+  person does: a cookie jar opens `/auth/login`, walks Dex's login form and comes back
+  through the callback. Claims not built yet are pending specs, each made real in the
+  change that implements it; `task test-e2e -- -v -ginkgo.v` lists them.
+- **Mutation checks against the cluster.** A boundary spec is trusted once a build of
+  krm-foyer that breaks the boundary on purpose, deployed into the fixture, makes it
+  fail: a service-account fallback, a forwarded `Authorization` or `Impersonate-User`,
+  the service account's token sent instead of the user's, an unchecked `state`. The
+  impersonation spec first passed for the wrong reason (alice could not impersonate
+  anyone, so a forwarded header was refused anyway); it now grants alice the right to
+  impersonate bob, so a forwarded header would turn its 403 into a 200.
 
 ## The e2e fixture
 
@@ -128,8 +136,10 @@ and Gomega, like gitops-reverser's suite. It has two parts:
 flowchart LR
     T[Test runner] -->|password grant| D[Dex<br/>dex.krm-foyer.test:5556]
     T -->|bearer token, directly| K[k3s API server]
-    T -.->|session cookie, later| F[krm-foyer pod]
-    F -.->|user's token| K
+    T -->|walks Dex's login form| D
+    T -->|session cookie, NodePort| F[krm-foyer pod<br/>foyer.krm-foyer.test]
+    F -->|user's token| K
+    F -->|discovery and code exchange| D
     K -->|discovery and keys| D
     K -->|discovery and keys| I[Test issuer<br/>issuer.krm-foyer.test:8443]
     K --> A[(audit.log)]
@@ -145,6 +155,15 @@ The devcontainer joins the network, and a CI runner is the Docker host, so both 
 the same way. k3d always publishes the API server's port; it is bound to loopback, and
 the script fails if anything in the fixture is published on another interface.
 
+[deploy-foyer.sh](../test/e2e/cluster/deploy-foyer.sh) deploys krm-foyer from
+[foyer.yaml](../test/e2e/cluster/foyer.yaml). The image `task image` built is imported
+with `k3d image import` under a tag derived from its ID, so the Deployment rolls exactly
+when the binary changes. krm-foyer serves TLS for `foyer.krm-foyer.test` with a
+certificate from the fixture CA, trusts Dex through the same CA, and reaches the API
+server at `kubernetes.default.svc`. The suite reaches it through a NodePort on the node's
+address on the Docker network. Its service account is cluster-admin and its token is
+mounted, as bait; the suite checks both before it starts.
+
 The test issuer is nginx serving a discovery document and a JWKS. The suite holds its
 signing key (`.e2e/issuer-signing.key`), so it can mint tokens with claims Dex never
 issues. Use it for claims; use Dex for anything a real login would do.
@@ -156,7 +175,8 @@ accepts, and `other-app`, whose tokens it must reject.
 
 ```bash
 task e2e-up     # start or reuse the fixture (about 25 seconds the first time)
-task test-e2e   # run the suite; brings the fixture up if needed
+task e2e-deploy # build the image and deploy krm-foyer into the fixture
+task test-e2e   # run the suite; brings the fixture up and deploys krm-foyer first
 task e2e-down   # remove the cluster, Dex, the network and the certificates
 ```
 

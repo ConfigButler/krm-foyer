@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -42,9 +43,17 @@ type fixture struct {
 	// holds its signing key, so it can mint tokens with claims Dex never issues.
 	testIssuer string
 	signingKey *rsa.PrivateKey
-	// client trusts the cluster CA and the fixture CA, and reaches Dex by its issuer
-	// name without the test runner needing a DNS entry for it.
+	// client trusts the cluster CA and the fixture CA, and reaches Dex and krm-foyer
+	// by their names without the test runner needing DNS entries for them.
 	client *http.Client
+
+	// foyerURL is krm-foyer's public URL, deployed by deploy-foyer.sh, and
+	// foyerAccount the service account it runs as: cluster-admin, as bait.
+	foyerURL, foyerNamespace, foyerAccount string
+
+	// seen is every response krm-foyer sent the suite, for the token scan.
+	seenMu sync.Mutex
+	seen   []seenResponse
 }
 
 const (
@@ -63,13 +72,9 @@ func loadFixture() *fixture {
 	if dir == "" {
 		dir = filepath.Join("..", "..", ".e2e")
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, "env"))
-	Expect(err).NotTo(HaveOccurred(), "no e2e fixture found; run `task e2e-up` (or `task test-e2e`)")
-	env := map[string]string{}
-	for line := range strings.Lines(string(raw)) {
-		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
-			env[k] = v
-		}
+	env := readEnv(filepath.Join(dir, "env"), "no e2e fixture found; run `task e2e-up` (or `task test-e2e`)")
+	for k, v := range readEnv(filepath.Join(dir, "foyer-env"), "krm-foyer is not deployed; run `task e2e-deploy` (or `task test-e2e`)") {
+		env[k] = v
 	}
 
 	roots := x509.NewCertPool()
@@ -92,13 +97,20 @@ func loadFixture() *fixture {
 
 	issuer, err := url.Parse(env["DEX_ISSUER"])
 	Expect(err).NotTo(HaveOccurred())
-	dexAddr := net.JoinHostPort(env["DEX_IP"], issuer.Port())
+	foyer, err := url.Parse(env["FOYER_URL"])
+	Expect(err).NotTo(HaveOccurred())
+	// The names the suite reaches without DNS: Dex at its own address, krm-foyer through
+	// its NodePort on the node.
+	addrs := map[string]string{
+		issuer.Host:                         net.JoinHostPort(env["DEX_IP"], issuer.Port()),
+		net.JoinHostPort(foyer.Host, "443"): env["FOYER_ADDR"],
+	}
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if addr == issuer.Host {
-				addr = dexAddr
+			if mapped, ok := addrs[addr]; ok {
+				addr = mapped
 			}
 			return dialer.DialContext(ctx, network, addr)
 		},
@@ -111,6 +123,9 @@ func loadFixture() *fixture {
 		serverContainer: env["SERVER_CONTAINER"],
 		testIssuer:      env["TEST_ISSUER"],
 		signingKey:      key.(*rsa.PrivateKey),
+		foyerURL:        env["FOYER_URL"],
+		foyerNamespace:  env["FOYER_NAMESPACE"],
+		foyerAccount:    env["FOYER_SERVICE_ACCOUNT"],
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   30 * time.Second,
@@ -118,6 +133,18 @@ func loadFixture() *fixture {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
+}
+
+func readEnv(file, missing string) map[string]string {
+	raw, err := os.ReadFile(file)
+	Expect(err).NotTo(HaveOccurred(), missing)
+	env := map[string]string{}
+	for line := range strings.Lines(string(raw)) {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			env[k] = v
+		}
+	}
+	return env
 }
 
 // login returns a Dex ID token for user, issued to clientID. It uses the password
@@ -232,6 +259,21 @@ func (f *fixture) direct(ctx context.Context, token, method, path string, body [
 	b, err := io.ReadAll(resp.Body)
 	Expect(err).NotTo(HaveOccurred())
 	return answer{Code: resp.StatusCode, Header: resp.Header, Body: b, Marker: marker}
+}
+
+// directAs asks the API server directly with token, impersonating username. The
+// suite uses it to check its own setup: that an impersonation grant works.
+func (f *fixture) directAs(ctx context.Context, token, username, path string) answer {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.apiServer+path, nil)
+	Expect(err).NotTo(HaveOccurred())
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Impersonate-User", username)
+	resp, err := f.client.Do(req)
+	Expect(err).NotTo(HaveOccurred())
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	Expect(err).NotTo(HaveOccurred())
+	return answer{Code: resp.StatusCode, Header: resp.Header, Body: b}
 }
 
 // auditEvent is the part of a kube-apiserver audit event the suite asserts on.

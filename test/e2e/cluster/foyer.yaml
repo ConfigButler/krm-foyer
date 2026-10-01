@@ -1,0 +1,139 @@
+# krm-foyer in the e2e fixture. deploy-foyer.sh fills in IMAGE and CONFIG_HASH and
+# creates the Secrets and the ConfigMap this refers to.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: krm-foyer
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: krm-foyer
+  namespace: krm-foyer
+---
+# The bait. krm-foyer never needs its own identity for a user's request, so in a real
+# deployment this account has no grants and its token is not mounted. Here it is
+# cluster-admin and its token is in the pod, so a fallback to it would turn a 401 or a
+# 403 into a 200: loud, where a fallback to a weak account would be silent. The suite
+# checks the bait is in place before trusting any spec that relies on it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: krm-foyer-e2e-bait
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: krm-foyer
+    namespace: krm-foyer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: krm-foyer
+  namespace: krm-foyer
+spec:
+  # Sessions live in memory until shared storage exists (roadmap step 2b).
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: krm-foyer
+  template:
+    metadata:
+      labels:
+        app: krm-foyer
+      annotations:
+        # A new certificate or secret restarts the pod.
+        krm-foyer.test/config-hash: CONFIG_HASH
+    spec:
+      serviceAccountName: krm-foyer
+      # Deliberately mounted: see the bait above.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: krm-foyer
+          image: IMAGE
+          # Imported with k3d image import; never pulled.
+          imagePullPolicy: Never
+          args:
+            - -listen=:8443
+            - -tls-cert-file=/etc/krm-foyer/tls/tls.crt
+            - -tls-key-file=/etc/krm-foyer/tls/tls.key
+            - -public-url=https://foyer.krm-foyer.test
+            - -oidc-issuer=https://dex.krm-foyer.test:5556
+            - -oidc-client-id=krm-foyer
+            - -oidc-client-secret-file=/etc/krm-foyer/oidc/client-secret
+            - -oidc-ca-file=/etc/krm-foyer/issuer-ca/ca.crt
+            - -kubernetes-server=https://kubernetes.default.svc
+            - -kubernetes-ca-file=/etc/krm-foyer/kubernetes-ca/ca.crt
+          ports:
+            - name: https
+              containerPort: 8443
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/krm-foyer/tls
+              readOnly: true
+            - name: oidc
+              mountPath: /etc/krm-foyer/oidc
+              readOnly: true
+            - name: issuer-ca
+              mountPath: /etc/krm-foyer/issuer-ca
+              readOnly: true
+            - name: kubernetes-ca
+              mountPath: /etc/krm-foyer/kubernetes-ca
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: krm-foyer-tls
+        - name: oidc
+          secret:
+            secretName: krm-foyer-oidc
+        - name: issuer-ca
+          configMap:
+            name: krm-foyer-issuer-ca
+        # Every namespace has this ConfigMap: the CA of the API server's certificate.
+        # Reading it is not using the service account.
+        - name: kubernetes-ca
+          configMap:
+            name: kube-root-ca.crt
+---
+# The suite reaches krm-foyer on the node's address on the fixture's Docker network.
+# A NodePort is not published on the host.
+apiVersion: v1
+kind: Service
+metadata:
+  name: krm-foyer
+  namespace: krm-foyer
+spec:
+  type: NodePort
+  selector:
+    app: krm-foyer
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      nodePort: 30443
