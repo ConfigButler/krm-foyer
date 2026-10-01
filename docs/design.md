@@ -81,6 +81,8 @@ come from krm-stream, not from a reimplementation here.
 | `/k8s/apis/...` | Proxy grouped APIs, including CRDs and aggregated APIs |
 | `/k8s/api`, `/k8s/apis`, `/k8s/version`, `/k8s/openapi/...` | Proxy explicitly permitted discovery/schema endpoints |
 | `/stream` | Serve krm-stream with configured scopes and projections |
+| `/auth/whoami` | Who Kubernetes takes the user to be, from a SelfSubjectReview, plus the session's issuer and expiry. Never tokens |
+| `/_foyer/access` | What the user may do through krm-foyer: the allowlist and RBAC together. See [what may I do](#what-may-i-do) |
 
 For example, POSTing to
 `/k8s/apis/workspaces.example.com/v1/namespaces/team-a/workspacerequests` creates a
@@ -140,7 +142,7 @@ answer, it says so in a form the requester can read:
 | Interruption | Status | For code | For a person browsing |
 | --- | --- | --- | --- |
 | No session | 401 | `Status`, reason `Unauthorized` | A page with a **Sign in** link that returns to this URL |
-| Not on the allowlist | 403 | `Status` saying the route is not exposed | A page saying krm-foyer does not expose this route, as opposed to Kubernetes refusing it, with a link to `/auth/whoami` |
+| Not on the allowlist | 403 | `Status` saying the route is not exposed | A page saying krm-foyer does not expose this route, as opposed to Kubernetes refusing it, with a link to [`/_foyer/access`](#what-may-i-do) |
 | Upstream redirect | 502 | `Status` with the target in `details` | A notice naming the full target, with a link the user can follow |
 | Upstream content held back | 502 | `Status` with the content type | A page showing the response as escaped text, truncated at a bound |
 | Session store unavailable | 503 | `Status` | A page saying so, with no retry loop |
@@ -186,6 +188,36 @@ underlying readable resources or provide a restricted domain view.
 Apply restrictions to raw APIs and streams. Kubernetes RBAC and admission remain authoritative;
 the allowlist further limits which permissions browser clients can exercise through this service.
 Never use a privileged service account as a fallback for a user's direct API request.
+
+### What may I do
+
+What a user can do through krm-foyer is what RBAC allows **and** the allowlist exposes.
+A frontend can ask Kubernetes the first half itself, with a native
+SelfSubjectAccessReview, but that answer is the larger set: it would offer actions on
+routes krm-foyer never exposes. Only krm-foyer knows both halves, so it answers the
+question:
+
+- **`/_foyer/access?namespace=team-a`** lists every allowlisted resource with its
+  verbs, and marks each cell **allowed**, **refused by Kubernetes** or **not exposed by
+  krm-foyer**. Those are the two different 403s a frontend has to tell apart.
+- **Each cell is one SelfSubjectAccessReview, sent with the user's own token,** so the
+  answer comes from whatever authorizers the cluster runs and is audited as the user.
+  Not SelfSubjectRulesReview: Kubernetes documents it as possibly incomplete, webhook
+  authorizers often do not support it, and it lists rules for routes that are not exposed.
+- **Namespaces** come from the allowlist when it names them, and from the `namespace`
+  parameter when it allows a pattern. Object names are out of scope: a frontend that
+  needs name-level answers makes the request and handles the 403.
+- **The same URL serves people and code,** under the [interruption](#interruptions)
+  rule: a navigation gets the page, `fetch` gets JSON with the same content.
+- **It is a hint, with a timestamp.** Frontends use it to hide what will be refused, not
+  to protect anything; every request is still decided when it is made. krm-foyer never
+  uses it for its own decisions and caches nothing between requests.
+- **Signed-in users only, about themselves.** It shows the allowlist to signed-in users,
+  which their frontend's requests reveal anyway; anonymous visitors get the 401
+  interruption. One page view costs one review per allowlisted resource and verb, run
+  concurrently, capped and rate-limited per session.
+- **It shows no objects and changes nothing.** A list of routes with their verbs, not a
+  resource browser.
 
 **Review exposure before enabling a route.** An existing application may enforce rules that
 its users' Kubernetes grants do not express. A generic route can bypass those rules as soon
@@ -290,6 +322,7 @@ of partial success.
 | Proxy semantics | Kubernetes errors and patch types preserved; conflicting writes and ambiguous create outcomes handled without automatic replay |
 | Upstream responses | An upstream that sends HTML, `Set-Cookie`, CORS headers, cache headers or a redirect has none of them reach the browser unasked |
 | Interruptions | Each interruption gives the same status to code and to a navigation; scripts cannot obtain the page form; no Kubernetes answer is ever replaced |
+| What may I do | `/_foyer/access` matches what requests through krm-foyer actually get, cell for cell, for allowed, refused and unexposed routes, and follows a RoleBinding change without a new login |
 | Streams | Cancellation, recovery, expiry, subscriber isolation and measured load under declared capacity targets |
 | Editing | Conditional saves and guarded reconciliation preserve newer state and drafts |
 | Example domain | Pending, accepted, rejected and failed processing demonstrated; protected status and restart/duplicate tests prove its declared guarantees |

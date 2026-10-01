@@ -30,10 +30,11 @@ browser is on a krm-foyer URL and no application page exists yet:
 | `/auth/login?return_to=/path` | No page: a redirect to the OIDC provider | The return path is validated as a local path before it is stored in the login transaction. |
 | `/auth/callback` | A redirect to the stored return path on success. On failure, an error page with a stable reason and a "try again" link | An application cannot render this: its code is not loaded yet. |
 | `/auth/logged-out` | Plain confirmation with a "sign in again" link | Where logout lands when the application does not supply its own destination. |
-| `/auth/whoami` | The current session in human-readable form: subject, groups and expiry, never tokens | The first thing to check when Kubernetes answers 403. `/auth/session` stays the JSON form for code. |
+| `/auth/whoami` | Who Kubernetes takes you to be (username, groups and extra, from a SelfSubjectReview), with the session's issuer and expiry. Never tokens | The first thing to check when Kubernetes answers 403. It shows the API server's view, not the token's claims, because that is what RBAC matches. `/auth/session` stays the JSON form for code. |
+| `/_foyer/access` | What you may do through krm-foyer: each allowlisted resource and verb, as allowed, refused by Kubernetes, or not exposed. JSON for code at the same URL | The two halves of the answer live in two places, the allowlist and RBAC, and only krm-foyer sees both. See [what may I do](design.md#what-may-i-do). |
 | `/k8s/...`, `/stream` when krm-foyer interrupts | For a browser navigation only: sign in, not exposed, redirect notice, held-back content, store unavailable. Same status code as the JSON form | The proxy is explorable in a tab. These say what krm-foyer decided, as opposed to what Kubernetes answered. See [interruptions](design.md#interruptions). |
 | `/healthz`, `/readyz` | Plain text | For probes, not people. |
-| `/_foyer/...` | The pages' stylesheet and images | The one prefix krm-foyer reserves for its own files, so it never collides with an application on the same origin. |
+| `/_foyer/...` | The pages' stylesheet and images | The one prefix krm-foyer reserves for its own pages and files that are not part of login, so they never collide with an application on the same origin. |
 
 Rules for these pages:
 

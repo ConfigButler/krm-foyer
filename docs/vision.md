@@ -41,6 +41,11 @@ signed in, the route is not exposed, or the upstream answered with a redirect or
 it will not render, it tells you, in a page instead of a bare error code. For a redirect,
 you see where it leads and choose whether to go.
 
+Two pages answer the questions everyone asks first. `/auth/whoami` shows who Kubernetes
+thinks you are. `/_foyer/access` shows what you may do here: every exposed resource and
+verb, marked allowed, refused by Kubernetes, or not exposed by krm-foyer. Frontends get
+the same answer as JSON, to hide buttons that would only produce a 403.
+
 Not at any price: code always gets the same JSON and status code, krm-foyer never
 replaces an answer from Kubernetes, and no page lets anyone run upstream content as the
 signed-in user. The [design](design.md#interruptions) has the rules.

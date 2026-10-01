@@ -106,8 +106,9 @@ Security items need tests that try to get past the boundary.
 - [ ] Refresh is serialized per session and bounded
 - [ ] CSRF proof and same-origin checks on every mutation and on logout
 - [ ] An unauthenticated API request gets a JSON 401, not a redirect
-- [ ] `/auth/whoami` and `/auth/session`, plus a SelfSubjectRulesReview view of "what may
-      I do?"
+- [ ] `/auth/whoami` from a SelfSubjectReview, and `/auth/session`
+- [ ] `/_foyer/access`: the allowlist and RBAC together, one SelfSubjectAccessReview per
+      cell, as a page and as JSON. See [what may I do](design.md#what-may-i-do)
 - [ ] Shared session storage, so more than one replica works
 - [ ] The [session lifecycle](design.md#session-lifecycle) bounds, each with a test:
       logout seen by every replica at once, logout racing a refresh, the session store
