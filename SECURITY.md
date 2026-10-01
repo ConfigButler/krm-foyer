@@ -22,6 +22,8 @@ we treat the following as security bugs:
 
 - **A token reaching the browser.** An ID, access or refresh token in a response body,
   header, readable cookie, log line or error message.
+- **A session ID leaking.** The session ID is a bearer credential: one in a log line, a
+  URL, an error page, or anywhere outside the cookie is a vulnerability.
 - **A request reaching Kubernetes that the allowlist should have refused.** Including
   through path normalization, alternate API versions, subresources, `watch=true`, selectors,
   pagination or discovery.
@@ -31,7 +33,11 @@ we treat the following as security bugs:
   logout, an open redirect through the login return path, or a callback accepted without
   state, nonce or PKCE validation.
 - **Forwarding what must be stripped.** A browser-supplied `Authorization`, impersonation or
-  forwarding header, or the session cookie, reaching the API server.
+  forwarding header, or the session cookie, reaching the API server. In the other
+  direction: an upstream `Set-Cookie`, CORS header, redirect or HTML page reaching the
+  browser.
+- **A session outliving its revocation** beyond the bounds in the
+  [design](docs/design.md#session-lifecycle).
 
 ## What does not
 

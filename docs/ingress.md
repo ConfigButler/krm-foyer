@@ -8,19 +8,35 @@ records the result; this document records the reasons.
 
 ## Decision (2026-10-01): both TLS models
 
-krm-foyer supports two ways of being deployed, and treats them the same way for security:
+krm-foyer supports two ways of being deployed. They are **not** equally safe:
 
-| Model | How | When |
-| --- | --- | --- |
-| **krm-foyer terminates TLS** | Certificate and key are mounted files, for example from cert-manager. krm-foyer reloads them when they change, so rotation needs no restart | The default. Nothing between the browser and krm-foyer can read a session cookie, and HTTP/2 reaches the browser |
-| **Behind an ingress** | krm-foyer serves plain HTTP inside the cluster; the ingress or gateway terminates TLS | An organization that routes everything through one ingress, or a team that already manages certificates there |
+| Model | How | When | What it assumes |
+| --- | --- | --- | --- |
+| **krm-foyer terminates TLS** | Certificate and key are mounted files, for example from cert-manager. krm-foyer reloads them when they change, so rotation needs no restart | The default | Nothing beyond the usual: no hop carries a session cookie in plain text |
+| **Behind an ingress** | The ingress or gateway terminates the browser's TLS and forwards to krm-foyer | An organization that routes everything through one ingress, or a team that already manages certificates there | The ingress is trusted, and the hop behind it is protected (see below) |
 
-What keeps the two models equally safe is that **krm-foyer never works out its own
-public address from the request.** It is configured with its public URL. That URL is the
+Behind an ingress, every request on the hop to krm-foyer carries the session cookie, and
+the [session ID is a bearer credential](design.md#login-and-sessions). `Secure` only
+protects the browser's own connection; it says nothing about the hops after it. So that
+hop is one of two things:
+
+- **Re-encrypted and verified.** The ingress connects to krm-foyer over TLS and checks
+  its certificate against a CA it is configured with. This is the choice wherever the
+  cluster network is shared with workloads you do not fully trust.
+- **Plain HTTP on a network where only the ingress can reach krm-foyer.** A
+  NetworkPolicy admits the ingress's pods to krm-foyer's port and nothing else, and the
+  cluster network is not observable by other tenants. Anything that can read that hop
+  can take a session. Operators choosing this accept that assumption explicitly; the
+  chart's default is the policy, not an open port.
+
+What both models do share is that **krm-foyer never works out its own public address
+from the request.** It is configured with its public URL. That URL is the
 OIDC redirect URI, the origin that CSRF and same-origin checks compare against, and the
-base for return paths. `Host` and `X-Forwarded-*` headers do not change any of those.
-Forwarded client addresses are used only for logging and rate limiting, and only when
-they come from proxy addresses the operator configured.
+base for return paths. `Host` and `X-Forwarded-*` headers do not change any of those, so
+a spoofed header cannot poison a redirect or the CSRF origin. That protects against
+header tricks; it does nothing for a cookie read off an unencrypted hop. Forwarded client
+addresses are used only for logging and rate limiting, and only when they come from proxy
+addresses the operator configured.
 
 Session cookies are always `Secure`, in both models. Behind an ingress the browser still
 sees HTTPS, and browsers accept `Secure` cookies from `http://localhost`, so local
@@ -145,9 +161,10 @@ everything on it **one trust boundary**:
   Kubernetes access. Anything else belongs on its own host name: the session cookie is
   host-only, so it never reaches a subdomain.
 - **The session cookie reaches every service on the host.** The `__Host-` prefix requires
-  `Path=/`, so the browser sends the cookie with every request. It is an opaque ID and
-  useless without krm-foyer. But a service that logs `Cookie` headers logs session IDs, and
-  co-hosted services must not do that.
+  `Path=/`, so the browser sends the cookie with every request. The ID is opaque, but it
+  is a bearer credential: anyone who holds it can call krm-foyer as the user, from
+  anywhere, until the session ends. A co-hosted service that logs `Cookie` headers hands
+  sessions to whoever reads those logs. Co-hosted services must not log or keep it.
 - **The prefixes are fixed.** An application that already uses `/auth` has to move it.
   Make them configurable when an adopter needs it, not before.
 

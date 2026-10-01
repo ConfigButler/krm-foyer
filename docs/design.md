@@ -1,80 +1,14 @@
-# krm-foyer
+# Service design
 
-**Browser login, Kubernetes API access and live resource streams.**
+krm-foyer is a backend for frontend (BFF) for browser applications built on Kubernetes
+APIs. It owns OIDC login and server-side sessions, proxies an allowlisted set of
+Kubernetes API routes with the user's own credential, and hosts krm-stream resource
+streams on the frontend's origin.
 
-krm-foyer is a proposed backend for frontend (BFF) for applications built on Kubernetes
-APIs. It handles authentication, server-side credentials and resource transport so teams
-can build browser interfaces without implementing those components for every application.
-
-Its purpose is to **make well-designed Kubernetes Resource Model (KRM) domains usable
-from the browser**. Teams define resources, lifecycles and domain rules; krm-foyer connects
-their frontends to those APIs. This document specifies the intended service contract;
-it is not a claim of released functionality.
-
-## Who it helps
-
-A platform team can expose approved APIs through one maintained authentication and transport
-service. A frontend developer can read resources, submit changes and observe progress using
-Kubernetes objects and krm-stream. A domain team can support browsers, command-line clients
-and automation through the same resource contract.
-
-A workspace portal, equipment reservation service and configuration editor can all use
-the same transport. Their domain contracts differ: provisioning is asynchronous, scarce
-reservations need arbitration, and editing needs conflict handling. The
-[decision guide](bff-choice.md#compare-application-fits) compares these cases with reporting
-and payment workflows.
-
-Adding a resource whose permissions and invariants are already enforced should require
-configuration and frontend work, not another backend transport handler. The benefit is
-reuse across applications. A separate service also adds deployment, session storage and
-support costs; it does not guarantee less total code for a single application.
-
-## Domain APIs built with KRM
-
-CustomResourceDefinitions (CRDs) can express desired state or immutable requests. Admission
-checks constraints before storage; domain controllers process resources and publish status.
-The frontend creates or edits a resource and observes its outcome.
-
-### Example: requesting a workspace
-
-A user chooses a template and submits an immutable `WorkspaceRequest`. Assume this example
-domain permits a user to request several workspaces; one-per-person enforcement would need
-an additional identity and uniqueness contract.
-
-1. The browser checks its session and starts OIDC login if required. After login, it POSTs
-   the resource with its CSRF proof. Admission validates the template and binds ownership
-   to trusted identity. It rejects invalid input before storage.
-2. Kubernetes returns HTTP 201 and the stored object's UID. The UI displays **Request
-   received**, not **Workspace ready**, and subscribes to the permitted resource stream.
-3. The domain controller evaluates eligibility and capacity. It publishes acceptance or
-   rejection in protected status. A policy rejection has a stable reason the UI can explain.
-4. For accepted work, the controller provisions using a stable operation key tied to the
-   request UID. After a restart, it discovers or resumes the same work rather than blindly
-   creating another workspace. The UI displays **Provisioning** and any retryable failure.
-5. Once ready, status supplies an authorized workspace reference. The UI offers **Open
-   workspace**. That destination enforces its own access checks; knowing its URL is not a grant.
-
-A lost create response leaves the outcome uncertain: the frontend uses an authorized
-lookup and the domain's stable request key to reconcile before offering a retry. The
-controller contract defines retryable versus terminal failures. A disconnected browser
-shows stale/unknown progress; it must not turn missing updates into a domain rejection.
-Cancellation and cleanup need their own lifecycle rules rather than assuming DELETE
-instantly cancels external work.
-
-This is an illustrative domain, not a built-in API or a proven implementation. Its acceptance,
-provisioning and ready states are domain outcomes transported by krm-foyer and krm-stream.
-
-The domain backend lives in controllers and admission, commonly packaged as a Kubernetes
-operator. Domain developers design and test its guarantees; the platform team operates it.
-The [operator pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)
-supports this division of responsibility. A status field alone does not enforce correctness.
-
-This approach suits durable intent, observable processing and reuse across clients. It
-requires domain knowledge plus expertise in reconciliation, authorization, concurrency,
-API evolution and failure recovery. Immediate transactions, complex private queries and
-high-volume event storage may fit a conventional service better. The
-[BFF decision guide](bff-choice.md) explains those tradeoffs and the different mechanisms
-needed for one stored object, one accepted request and one external effect.
+This document is the contract: what krm-foyer must do. **None of it is implemented yet.**
+Every guarantee below is a requirement until the test that tries to break it exists; the
+[roadmap](roadmap.md) tracks which do. Why the service exists, and what it expects from
+the domains behind it, is in the [vision](vision.md).
 
 ## Architecture and ownership
 
@@ -94,12 +28,17 @@ prefixes (`/auth/`, `/k8s/`, `/stream`, `/_foyer/`) to it and everything else to
 frontend and any domain backend; krm-foyer does not host application files or forward
 traffic outside its prefixes. Every service on that origin is inside the user's trust
 boundary, since it can act as the signed-in user; see
-[sharing one domain](ingress.md#decision-2026-10-01-sharing-one-domain-with-other-services). The initial design uses one configured cluster per deployment and a configurable
-OIDC provider. No particular identity provider or frontend framework is required.
+[sharing one domain](ingress.md#decision-2026-10-01-sharing-one-domain-with-other-services).
+The initial design uses one configured cluster per deployment and a configurable OIDC
+provider. No particular identity provider or frontend framework is required.
 
 krm-foyer terminates TLS itself from a mounted certificate, reloaded when it changes, or
-serves plain HTTP behind an ingress that terminates TLS. Both models are supported. Its
-public URL is configuration: the OIDC redirect URI, same-origin and CSRF checks and return
+sits behind an ingress that terminates TLS. Both are supported, but they are not equally
+safe: behind an ingress, the hop to krm-foyer carries session cookies, and in plain HTTP
+anything that can observe that hop can take a session. Plain HTTP is acceptable only
+where nothing but the ingress can reach krm-foyer; otherwise the ingress re-encrypts and
+verifies krm-foyer's certificate. See [both TLS models](ingress.md#decision-2026-10-01-both-tls-models).
+Its public URL is configuration: the OIDC redirect URI, same-origin and CSRF checks and return
 paths use it, never `Host` or `X-Forwarded-*`. An ingress in front must be transparent: no
 buffering of streams, and no authentication or header rewriting of its own on krm-foyer's
 routes. An ingress's external-authentication feature (`auth_request`, ForwardAuth) is used only as a
@@ -118,19 +57,20 @@ the API half.
 | Component or team | Responsibility |
 | --- | --- |
 | krm-foyer | OIDC client, sessions, CSRF protection, fixed upstream routing, API proxy and stream host configuration |
-| krm-stream | Resource-stream protocol, recovery, projections, optional watch sharing and browser draft/reconciliation primitives |
+| [krm-stream](https://github.com/ConfigButler/krm-stream) | Resource-stream protocol, recovery, projections, optional watch sharing and browser draft/reconciliation primitives |
 | Kubernetes | Discovery, persistence, RBAC, admission execution, API validation and write concurrency |
 | Domain team | Resource contracts, admission rules, controller processing, trusted status and domain guarantees |
 | Frontend team | Forms, resource queries, save intent, navigation and presentation of domain outcomes |
 | Platform team | Deployment, grants, exposure configuration, availability and upgrades |
 
 Application-specific endpoints, DTO transformations, result aggregation and business plugins
-are outside krm-foyer's scope. Domain services and operators own those responsibilities.
-Use the existing krm-stream implementation for streaming and reconciliation.
+are outside krm-foyer's scope; the [vision](vision.md#staying-small) lists what stays out.
+Domain services and operators own those responsibilities. Streaming and reconciliation
+come from krm-stream, not from a reimplementation here.
 
 ## API contract
 
-| Proposed route | Behavior |
+| Route | Behavior |
 | --- | --- |
 | `/auth/login` | Start OIDC authorization-code login with PKCE, state and nonce |
 | `/auth/callback` | Validate the callback and establish a session |
@@ -144,7 +84,8 @@ Use the existing krm-stream implementation for streaming and reconciliation.
 
 For example, POSTing to
 `/k8s/apis/workspaces.example.com/v1/namespaces/team-a/workspacerequests` creates a
-resource through Kubernetes. The response retains Kubernetes' status code and object shape.
+resource through Kubernetes (the [vision](vision.md#what-it-takes-from-the-domain) follows
+that request through its lifecycle). The response retains Kubernetes' status code and object shape.
 The route is available only when explicitly permitted by exposure policy and authorized
 by Kubernetes.
 
@@ -160,6 +101,30 @@ HTTP APIs, streaming logs and native HTTP watches. Exec, attach and port-forward
 separate upgrade-protocol support and tests; return an explicit unsupported error until
 implemented. Service/node/pod proxy subresources require explicit opt-in. The browser
 cannot supply an arbitrary upstream URL.
+
+### Upstream responses
+
+Stripping request headers covers what goes up. What comes back crosses the same
+boundary, onto an origin the browser trusts, and needs rules of its own. They hold for
+every route, and must hold before any aggregated API or proxy subresource is enabled,
+since those return whatever their backend sends:
+
+- **Content types are allowlisted.** JSON, YAML, Kubernetes protobuf and the watch
+  stream types pass; `text/plain` passes for logs. Anything else, `text/html` above all,
+  is refused with 502 unless the route opts in. A pod log or a proxied service must not
+  be able to serve a page that runs as the user on the shared origin.
+- **Every proxied response carries** `X-Content-Type-Options: nosniff`,
+  `Content-Security-Policy: default-src 'none'; sandbox` and `Cache-Control: no-store`,
+  replacing anything upstream sent. A shared cache in front of the origin must never
+  hold one user's answer for another. `/auth/session` and `/auth/check` are `no-store`
+  too.
+- **Response headers are allowlisted** (content type and length, `Audit-Id`, `Warning`,
+  `Retry-After` and the API priority-and-fairness headers). Everything else is dropped,
+  including `Set-Cookie`, which would reach every service on the origin, and
+  `Access-Control-*`: krm-foyer is same-origin only and never grants CORS.
+- **Redirects are not followed and not passed on.** An upstream 3xx becomes 502, and
+  the refusal is logged. A `Location` from an aggregated API could send the browser
+  anywhere.
 
 ## Access boundaries
 
@@ -203,11 +168,16 @@ in a Secure, HttpOnly, host-scoped cookie with appropriate SameSite settings. Se
 sessions support per-session revocation and refresh-token custody. They require shared
 storage across replicas, bounded logout propagation and a defined failure policy.
 
+**The session ID is a bearer credential.** Whoever holds it can call krm-foyer as the
+user, from anywhere, until the session ends. `HttpOnly` keeps it from page scripts and
+`Secure` from plain-HTTP requests; neither keeps it out of a log file, a co-hosted
+service that sees the `Cookie` header, or an unencrypted proxy hop. So krm-foyer treats it
+like a token: it never logs it or puts it in a URL or error page, and the session store
+keys sessions by a hash of the ID, so reading the store does not yield usable IDs.
+
 An encrypted HttpOnly cookie can also keep tokens unreadable by JavaScript; the reason
 for choosing opaque sessions is revocation and lifecycle control. Clearing a browser cookie
-alone does not invalidate a copied stateless session. Revoking a server session does not
-revoke independently issued Kubernetes credentials or undo accepted writes. The BFF pattern
-is described in [OAuth 2.0 for Browser-Based Applications](https://www.rfc-editor.org/rfc/rfc10017.html).
+alone does not invalidate a copied stateless session. The BFF pattern is described in [OAuth 2.0 for Browser-Based Applications](https://www.rfc-editor.org/rfc/rfc10017.html).
 
 Use a maintained OIDC library. Bind login transactions to the browser; validate issuer,
 audience and callback state; accept only validated local return paths. Rotate session IDs
@@ -226,6 +196,23 @@ Authorization, impersonation and untrusted forwarding headers; never forward the
 cookie to Kubernetes. Pin upstream destinations, verify TLS, bound request/stream resources
 and avoid credential/body logging. HttpOnly does not prevent malicious same-origin JavaScript
 from making requests as the user.
+
+### Session lifecycle
+
+Revocation is as fast as its slowest path. Each row is a requirement with a test:
+
+| Event | Required behavior |
+| --- | --- |
+| Logout | The session is deleted from shared storage before the logout response is sent. No replica caches a session's validity, so every replica refuses the ID on its next request |
+| Logout during a refresh | Logout wins. The refreshed tokens are discarded, never written back into a deleted session |
+| Session store unavailable | Fail closed: API and stream requests get 503. Never a stale local copy, never anonymous, never the service account |
+| Streams open at logout | Closed on every replica within the session-check interval, a configured bound with a documented default |
+| Token expiry or failed refresh | API requests get 401; streams close at the token's expiry or the session's, whichever comes first |
+| RBAC change | Kubernetes applies it on the next request. A shared watch applies it within its SubjectAccessReview recheck interval; that is reauthorization, not revocation |
+| User disabled at the issuer | krm-foyer learns of it at the next refresh. Until then the API server accepts the ID token it already holds, so the bound is the token lifetime the issuer sets. Document it; do not claim faster |
+
+Revoking a session does not revoke tokens the issuer handed to other clients, and does
+not undo writes Kubernetes already accepted.
 
 ## Streams and editing
 
@@ -259,8 +246,11 @@ of partial success.
 | --- | --- |
 | Reuse | Two frontends using different API groups without application-specific backend handlers |
 | Authentication | Callback failure, expiry, refresh, restart and logout tests across replicas |
+| Session lifecycle | Every bound in [session lifecycle](#session-lifecycle) measured by a test, including logout racing refresh, store outage and streams open at logout |
+| Credential custody | No token krm-foyer holds, including refreshed ones, and no session ID in any response, log line or error page the suite collects |
 | Exposure | Empty policy denies access; paths, selectors, watch queries, pagination, alternate versions and subresources cannot bypass restrictions |
 | Proxy semantics | Kubernetes errors and patch types preserved; conflicting writes and ambiguous create outcomes handled without automatic replay |
+| Upstream responses | An upstream that sends HTML, `Set-Cookie`, CORS headers, cache headers or a redirect has none of them reach the browser |
 | Streams | Cancellation, recovery, expiry, subscriber isolation and measured load under declared capacity targets |
 | Editing | Conditional saves and guarded reconciliation preserve newer state and drafts |
 | Example domain | Pending, accepted, rejected and failed processing demonstrated; protected status and restart/duplicate tests prove its declared guarantees |
@@ -270,26 +260,11 @@ The domain operator's tests establish domain guarantees; the gateway's tests est
 transport and access behavior. Publish the service with its own integration fixture,
 versioned image and documented supported protocols.
 
-## Status and next decision
+## Related decisions
 
-The [naming assessment](name.md) records why the service is called krm-foyer, and the
-[frontend decision](frontend.md) records which pages the service itself serves.
-
-The service is a design proposal. This repository holds a server skeleton with health
-endpoints and a start page, and an [e2e fixture](testing.md) whose API server trusts a real
-Dex issuer; none of the routes above are implemented yet. The next decision is whether to fund an independent
-prototype and assign its maintainers. Product and platform leads should agree on one
-example domain, supported protocols, session-store ownership and measurable load targets.
-
-Build the prototype in this order:
-
-1. Implement OIDC sessions and the default-deny native API proxy in an isolated fixture.
-2. Add krm-stream and demonstrate the workspace request lifecycle, including rejection,
-   uncertain create outcomes, controller recovery and session expiry.
-3. Integrate a second frontend/API group without domain-specific gateway handlers, then
-   measure the full operational cost against keeping authentication/transport in each app.
-
-Maintainers assess the release criteria with domain and platform owners before publishing
-an initial release. Each consuming application then makes its own adoption decision using
-the [decision guide](bff-choice.md#record-the-adoption-decision). Prototype approval does
-not authorize routing an existing application's resources through the new service.
+- [Ingress and TLS](ingress.md): both TLS models, sharing one domain, the login gate,
+  and why an ingress never makes the access decision.
+- [Pages](frontend.md): which pages krm-foyer serves itself.
+- [Testing](testing.md): how the suite proves krm-foyer invents neither authentication
+  nor authorization.
+- [Name](name.md): why it is called krm-foyer.

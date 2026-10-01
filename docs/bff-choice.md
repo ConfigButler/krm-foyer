@@ -135,7 +135,7 @@ These are starting recommendations under the stated assumptions, not built-in fe
 | Customer reporting with private records and flexible queries | Domain query API, possibly beside generic resource access | A small, predefined aggregate resource could serve the required views safely |
 | Payments involving external providers | Domain service or operator with provider-supported idempotency | KRM can expose durable intent/status, but cannot itself guarantee a single external charge |
 
-The [workspace walkthrough](design.md#example-requesting-a-workspace) follows a suitable
+The [workspace walkthrough](vision.md#what-it-takes-from-the-domain) follows a suitable
 KRM case end to end. The quiz below examines a harder case: identity-bound uniqueness and
 private results. Its mechanisms also apply to applications, registrations and reservations.
 

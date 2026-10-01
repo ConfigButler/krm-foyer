@@ -12,9 +12,11 @@ KRM is the [Kubernetes Resource Model](https://github.com/kubernetes/design-prop
 the idea that everything is a declarative resource with a spec and a status. krm-foyer is
 for applications whose domain is modelled that way.
 
-> **Status: design proposal plus a server skeleton.** The skeleton serves health
-> endpoints and a start page. Login, the API proxy and streams are specified in
-> [docs/design.md](docs/design.md) but not implemented yet.
+> **Status: a design and a server skeleton.** The skeleton serves health endpoints and a
+> start page, and an e2e fixture puts a real API server behind a real Dex. Login, the API
+> proxy and streams are specified in [docs/design.md](docs/design.md) but not implemented.
+> The principles below are requirements, not properties of the code yet; the
+> [roadmap](docs/roadmap.md) tracks which have tests.
 
 ## Principles
 
@@ -22,7 +24,8 @@ for applications whose domain is modelled that way.
   reaches the API server with the user's own OIDC token, and RBAC and admission answer it.
   No impersonation, and no fallback to krm-foyer's service account.
 - **Tokens stay on the server.** The browser holds only an opaque session ID in a Secure,
-  HttpOnly cookie. Frontend code never sees a token.
+  HttpOnly cookie. Frontend code never sees a token. The session ID is itself a bearer
+  credential, and is guarded like one.
 - **One domain is one trust boundary.** The application, krm-foyer and any domain backend
   share an origin, routed by path. Everything on that domain can act as the signed-in
   user, so host only what you would trust with that access.
@@ -37,13 +40,15 @@ for applications whose domain is modelled that way.
 
 | Document | What it answers |
 | --- | --- |
-| [docs/design.md](docs/design.md) | The service contract: routes, access boundaries, sessions, streams and release criteria |
+| [docs/vision.md](docs/vision.md) | Why krm-foyer exists, who it helps, what it expects from your domain, and what it will not become |
+| [docs/design.md](docs/design.md) | The contract: routes, access boundaries, sessions, upstream responses, streams and release criteria |
+| [docs/roadmap.md](docs/roadmap.md) | What exists, what is next, and in what order |
 | [docs/bff-choice.md](docs/bff-choice.md) | Whether your application should use a universal BFF like this one, a domain backend, or both |
-| [docs/ingress.md](docs/ingress.md) | Terminating TLS itself or behind an ingress, sharing one domain with other services, and the login gate for an ingress (`auth_request`, ForwardAuth) |
+| [docs/ingress.md](docs/ingress.md) | Terminating TLS itself or behind an ingress, sharing one domain with other services, and the login gate for an ingress |
 | [docs/frontend.md](docs/frontend.md) | Which pages krm-foyer serves itself, and why it ships no single-page application |
+| [docs/testing.md](docs/testing.md) | How the tests prove krm-foyer invents neither authentication nor authorization, and how to run the e2e fixture |
+| [docs/heritage.md](docs/heritage.md) | Where it comes from: the Voter demo, what broke on stage, and its sibling projects |
 | [docs/name.md](docs/name.md) | Why it is called krm-foyer |
-| [docs/testing.md](docs/testing.md) | How the tests prove krm-foyer does not invent authentication or authorization, and how to run the e2e fixture |
-| [docs/heritage.md](docs/heritage.md) | Where it comes from, why it exists, and the checklist of what we want it to have |
 
 ## Run it
 

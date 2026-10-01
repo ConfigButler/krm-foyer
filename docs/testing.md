@@ -14,7 +14,7 @@ document describes how the tests prove that, and in what order they get written.
 | Permission comes from RBAC | krm-foyer deciding something itself, or caching a decision | The same request gets the same answer through krm-foyer as it does directly; a RoleBinding change shows on the next request |
 | No service-account fallback | A request without a usable user credential being sent with krm-foyer's own identity | The e2e deployment gives krm-foyer's service account cluster-admin, so a fallback turns a 403 into a 200 |
 | The allowlist only narrows | A route being exposed without configuration, or a path trick getting past the check | An empty allowlist exposes nothing to a user RBAC allows everything; fuzzed paths never match more than intended |
-| The credential stays on the server | A token in a response body, header or page | Every response the suite receives is scanned for the tokens it holds |
+| The credential stays on the server | A token or session ID in a response body, header, page or log line | Every response and log line is scanned for every token involved, including those krm-foyer obtained by refresh |
 
 ## Four techniques
 
@@ -34,8 +34,11 @@ User-Agent, which finds its audit event.
 cluster-admin. This makes the most dangerous bug the loudest one: a fallback would turn
 a refusal into success.
 
-**Token scan.** The suite knows every token it obtained. After the run, no response it
-received from krm-foyer may contain any of them.
+**Token scan.** After the run, no response the suite received from krm-foyer, and no line
+krm-foyer logged, may contain a token or a session ID. The tokens to look for are the
+ones the suite obtained itself plus the ones krm-foyer holds, read from its session store
+as admin. That second set includes tokens krm-foyer got by refreshing, which the suite
+never saw.
 
 ## The layers
 
@@ -121,19 +124,9 @@ looking around.
 
 ## Order of work
 
-Each step makes pending specs real, and ends with `task verify` green.
-
-1. **The allowlist matcher, unit tests only.** It is the whole default-deny boundary,
-   and it is a pure function, so it is the cheapest place to be thorough.
-2. **The proxy, unit tests only.** It takes the user's credential from the request's
-   session and nothing else, so it can be tested against the `httptest` API server
-   before login exists. There is deliberately no test-only way to hand krm-foyer a
-   token: a back door behind a build tag is still a back door.
-3. **OIDC login and sessions, deployed into the fixture.** krm-foyer runs in the cluster
-   with its bait service account, and the suite logs in by walking Dex's login form with
-   a cookie jar, as a browser would. The differential, audit, empty-allowlist, session,
-   CSRF, logout and token-scan specs go green together.
-4. **Streams**, once the first three hold.
+The [roadmap](roadmap.md#order-of-work) sets the order: the allowlist matcher, then the
+proxy, then login and sessions deployed into the fixture, then streams. Each step makes
+pending specs real.
 
 To keep krm-foyer small, the OIDC work uses maintained libraries (`coreos/go-oidc` and
 `golang.org/x/oauth2`), and the proxy uses `net/http/httputil`. Neither the service nor
