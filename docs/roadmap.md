@@ -129,7 +129,8 @@ Security items need tests that try to get past the boundary.
 
 ### Streams
 
-- [ ] Host krm-stream with scopes from configuration
+- [ ] Host krm-stream, with RBAC deciding what a user may watch; which resources use a
+      shared watch is configuration for efficiency, not access
 - [ ] User-authenticated watches first
 - [ ] Shared watches with per-subscriber SubjectAccessReview and bounded rechecks
 - [ ] A stream ends when its session or its token expires, whichever comes first, and

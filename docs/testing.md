@@ -40,6 +40,11 @@ ones the suite obtained itself plus the ones krm-foyer holds, read from its sess
 as admin. That second set includes tokens krm-foyer got by refreshing, which the suite
 never saw.
 
+A session ID has exactly one place it belongs: the `Set-Cookie` header that issues it,
+on the login callback and wherever the ID is rotated. The scan allows the ID there, and
+only as the value of krm-foyer's own session cookie. A session ID anywhere else in that
+response, in any other response, or in a log line still fails the run.
+
 ## The layers
 
 | Layer | Runs with | What it covers |
