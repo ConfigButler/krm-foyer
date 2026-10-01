@@ -15,21 +15,27 @@
       <code>/auth/</code>, <code>/k8s/</code>, <code>/stream</code> and <code>/_foyer/</code>
       here, and everything else, including <code>/</code>, to your application.</p>
 
-    <h2>What works in this build</h2>
+    <h2>What works in this deployment</h2>
     <ul>
       <li><code>/healthz</code> and <code>/readyz</code> for probes</li>
       <li>This page</li>
+      {{- if .Login}}
+      <li>Sign-in through the configured OIDC issuer: <a href="/auth/login">sign in</a>, and
+        <a href="/auth/session"><code>/auth/session</code></a> to see the session</li>
+      <li>The Kubernetes API under <code>/k8s/</code>, with your own credential</li>
+      {{- end}}
     </ul>
 
-    <h2>Not built yet</h2>
+    <h2>Not here</h2>
     <ul>
-      <li>OIDC login and sessions under <code>/auth/</code></li>
-      <li>The Kubernetes API proxy under <code>/k8s/</code></li>
-      <li>krm-stream resource streams under <code>/stream</code></li>
+      {{- if not .Login}}
+      <li>Sign-in and the Kubernetes API: this deployment has no OIDC issuer configured</li>
+      {{- end}}
+      <li>krm-stream resource streams under <code>/stream</code>, which are not built yet</li>
     </ul>
 
     <p>Read the <a href="https://github.com/ConfigButler/krm-foyer/blob/main/docs/design.md">service design</a>
-      for the contract these will follow.</p>
+      for the contract krm-foyer follows.</p>
   </main>
   <footer>krm-foyer {{.Version}}</footer>
 </body>

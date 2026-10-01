@@ -62,6 +62,20 @@ task run          # http://localhost:8080
 task verify       # everything CI checks, including e2e against k3d and Dex
 ```
 
+Without flags, krm-foyer serves its start page and probes only. Sign-in and the API
+proxy come together, and need:
+
+| Flag | |
+| --- | --- |
+| `-public-url` | krm-foyer's origin as browsers reach it, such as `https://app.example.com` |
+| `-oidc-issuer`, `-oidc-client-id`, `-oidc-client-secret-file` | The issuer the API server trusts, and krm-foyer's client there |
+| `-kubernetes-server` | The API server, such as `https://kubernetes.default.svc` |
+
+Optional: `-oidc-ca-file` and `-kubernetes-ca-file` (CAs to trust), `-oidc-scopes`,
+`-session-idle-timeout` (1h), `-session-absolute-timeout` (8h), `-tls-cert-file` and
+`-tls-key-file` to serve TLS, and `-listen` (`:8080`). Sessions live in memory: run one
+replica.
+
 Or as a container:
 
 ```bash

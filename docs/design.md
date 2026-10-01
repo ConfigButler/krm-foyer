@@ -72,10 +72,10 @@ come from krm-stream, not from a reimplementation here.
 
 | Route | Behavior |
 | --- | --- |
-| `/auth/login` | Start OIDC authorization-code login with PKCE, state and nonce |
-| `/auth/callback` | Validate the callback and establish a session |
-| `/auth/session` | Return minimal identity/session state and CSRF information, never bearer tokens |
-| `/auth/logout` | CSRF-protected POST that destroys the server session |
+| `/auth/login` | Start OIDC authorization-code login with PKCE, state and nonce; `return_to` names a local path to come back to |
+| `/auth/callback` | Validate the callback and establish a session, then `303` to the return path |
+| `/auth/session` | Return minimal identity/session state and CSRF information, never bearer tokens: `200` with `authenticated`, `issuer`, `subject`, `email`, `expiresAt`, `csrfToken` and `csrfHeader`, or `401` with `{"authenticated":false}` |
+| `/auth/logout` | CSRF-protected POST that destroys the server session and answers `204`; the caller then goes where it likes, `/auth/logged-out` by default |
 | `/auth/check` | 204 or 401 (or 302 to login on request) for an ingress gating the application's pages; never a token or identity. See the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages) |
 | `/k8s/api/...` | Proxy core Kubernetes APIs after stripping `/k8s` |
 | `/k8s/apis/...` | Proxy grouped APIs, including CRDs and aggregated APIs |
@@ -278,6 +278,34 @@ user, from anywhere, until the session ends. `HttpOnly` keeps it from page scrip
 service that sees the `Cookie` header, or an unencrypted proxy hop. So krm-foyer treats it
 like a token: it never logs it or puts it in a URL or error page, and the session store
 keys sessions by a hash of the ID, so reading the store does not yield usable IDs.
+
+### Login
+
+- **The flow** is the authorization code flow with PKCE (`S256`), `state` and `nonce`,
+  through `coreos/go-oidc` and `golang.org/x/oauth2`. The scopes default to
+  `openid email profile`; `openid` is required, and `offline_access` is refused, because
+  krm-foyer holds no refresh token until it can refresh. The redirect URI is the
+  configured public URL plus `/auth/callback`.
+- **A login in progress** is kept on the server: state, nonce, PKCE verifier and return
+  path. The browser holds only an opaque ID for it, in `__Host-krm-foyer-login` (Secure,
+  HttpOnly, Lax, ten minutes). A callback uses it up whether it succeeds or not, so a
+  replayed callback, a guessed state or a second tab's answer finds nothing. A callback
+  must carry exactly one login cookie, `state` and `code`. At most 10,000 logins may be in
+  progress; past that, `/auth/login` answers 503 until some expire.
+- **The ID token** must come from the configured issuer, for krm-foyer's client ID,
+  unexpired, signed by a key the issuer publishes and carrying this login's nonce. Its
+  `email` is shown; the API server decides who it belongs to.
+- **The return path** must be a local path: it starts with one `/` and not two, and
+  holds only printable ASCII other than `\`, at most 2,048 bytes. Anything else, or
+  `return_to` given twice, is refused before the issuer is involved. After login the
+  browser goes to exactly that path, uncleaned.
+- **A refused login** gets the [callback error page](frontend.md#what-ships-in-the-binary)
+  with a stable reason (`login-not-in-progress`, `state-mismatch`, `nonce-mismatch`,
+  `id-token-invalid`, ...) and a link to try again. An error code from the issuer is
+  shown only if it is one OAuth or OIDC defines; nothing else the callback says is
+  repeated on the origin.
+- **Until the issuer's discovery document has been read,** `/auth/login` answers 503 and
+  `/readyz` fails; `/healthz` does not. krm-foyer keeps trying in the background.
 
 ### Sessions
 

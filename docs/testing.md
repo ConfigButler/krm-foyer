@@ -82,6 +82,19 @@ bugs are here, where they are cheap to find:
   runs against a store that never expires anything as well, so the session code decides
   on its own. Every way of presenting other than exactly one well-formed cookie is no
   session.
+- **Login** ([internal/auth](../internal/auth)) runs against a fake issuer in the test
+  that behaves like a strict one (PKCE enforced, codes single use) unless told to
+  misbehave: a token for another audience or issuer, expired, signed by a stranger, with
+  another nonce or none. A browser with a cookie jar walks each flow, including login
+  CSRF (the attacker's callback in the victim's browser), replayed and malformed
+  callbacks and an expired login. Every response that browser received is then scanned
+  for ID tokens, the client secret and PKCE verifiers, and for session IDs outside the
+  `Set-Cookie` that issues them. Dex is the e2e suite's issuer, for what a real login
+  does; the fake issuer is for refusals Dex never causes.
+- **Return paths** are fuzzed against a model of how a browser resolves a `Location`
+  (the WHATWG URL standard's leniencies: backslashes, stripped tabs, any number of
+  leading slashes), not against the check itself: whatever is accepted stays on the
+  origin.
 - **CSRF and same origin** are fuzzed with the rule stated from outside: a request is let
   through exactly when it is a `GET` or `HEAD`, or carries one proof field equal to the
   session's token and one `Origin` equal to the configured origin (or, with no `Origin`,

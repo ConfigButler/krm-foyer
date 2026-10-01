@@ -1,0 +1,9 @@
+{{template "top" "Sign-in failed"}}
+    <h1>Sign-in failed</h1>
+    <p class="lede">{{.Message}}</p>
+    {{- if .IssuerError}}
+    <p>The sign-in service answered <code>{{.IssuerError}}</code>.</p>
+    {{- end}}
+    <p><a href="{{.Retry}}">Try again</a></p>
+    <p>Reason: <code>{{.Reason}}</code>. If this keeps happening, give this reason to whoever runs this site.</p>
+{{template "bottom"}}

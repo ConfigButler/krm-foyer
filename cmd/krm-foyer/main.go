@@ -4,46 +4,246 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ConfigButler/krm-foyer/internal/auth"
+	"github.com/ConfigButler/krm-foyer/internal/proxy"
 	"github.com/ConfigButler/krm-foyer/internal/server"
+	"github.com/ConfigButler/krm-foyer/internal/session"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
 func main() {
-	listen := flag.String("listen", ":8080", "address to listen on")
-	flag.Parse()
-
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	if err := run(*listen, logger); err != nil {
+	cfg, err := parseConfig(os.Args[1:], os.ReadFile, os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
+	if err != nil {
+		logger.Error("invalid configuration", "err", err)
+		os.Exit(2)
+	}
+	if err := run(cfg, logger); err != nil {
 		logger.Error("krm-foyer stopped", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(listen string, logger *slog.Logger) error {
+// config is the command line, checked.
+type config struct {
+	listen          string
+	tlsCert, tlsKey string
+	login           *loginConfig
+	idle, absolute  time.Duration
+}
+
+// loginConfig is everything sign-in and the API proxy need. They come together: the
+// proxy's only credential is a session, and a session only comes from login.
+type loginConfig struct {
+	publicURL    string
+	issuer       string
+	clientID     string
+	clientSecret string
+	issuerCAs    *x509.CertPool
+	scopes       []string
+	apiServer    *url.URL
+	apiServerCAs *x509.CertPool
+}
+
+func parseConfig(args []string, readFile func(string) ([]byte, error), output io.Writer) (config, error) {
+	fs := flag.NewFlagSet("krm-foyer", flag.ContinueOnError)
+	fs.SetOutput(output)
+	var (
+		cfg                            config
+		publicURL, issuer, clientID    string
+		secretFile, issuerCAFile       string
+		scopes, apiServer, apiServerCA string
+	)
+	fs.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
+	fs.StringVar(&cfg.tlsCert, "tls-cert-file", "", "serve TLS with this certificate (PEM); needs -tls-key-file")
+	fs.StringVar(&cfg.tlsKey, "tls-key-file", "", "the private key for -tls-cert-file (PEM)")
+	fs.StringVar(&publicURL, "public-url", "", "krm-foyer's origin as browsers reach it, such as https://app.example.com")
+	fs.StringVar(&issuer, "oidc-issuer", "", "the OIDC issuer URL the API server trusts")
+	fs.StringVar(&clientID, "oidc-client-id", "", "krm-foyer's client ID at the issuer; the API server must accept ID tokens for it")
+	fs.StringVar(&secretFile, "oidc-client-secret-file", "", "a file holding the client secret")
+	fs.StringVar(&issuerCAFile, "oidc-ca-file", "", "extra CA certificates (PEM) to trust for the issuer, besides the system's")
+	fs.StringVar(&scopes, "oidc-scopes", strings.Join(auth.DefaultScopes, ","), "comma-separated scopes to ask for at login")
+	fs.StringVar(&apiServer, "kubernetes-server", "", "the API server's URL, such as https://kubernetes.default.svc")
+	fs.StringVar(&apiServerCA, "kubernetes-ca-file", "", "the CA certificates (PEM) that sign the API server's certificate")
+	fs.DurationVar(&cfg.idle, "session-idle-timeout", time.Hour, "end a session unused for this long")
+	fs.DurationVar(&cfg.absolute, "session-absolute-timeout", 8*time.Hour, "end any session this long after login")
+	if err := fs.Parse(args); err != nil {
+		return config{}, err
+	}
+	if fs.NArg() > 0 {
+		return config{}, fmt.Errorf("unexpected arguments %q", fs.Args())
+	}
+	if (cfg.tlsCert == "") != (cfg.tlsKey == "") {
+		return config{}, errors.New("-tls-cert-file and -tls-key-file go together")
+	}
+
+	required := map[string]string{
+		"-public-url": publicURL, "-oidc-issuer": issuer, "-oidc-client-id": clientID,
+		"-oidc-client-secret-file": secretFile, "-kubernetes-server": apiServer,
+	}
+	var missing []string
+	for name, v := range required {
+		if v == "" {
+			missing = append(missing, name)
+		}
+	}
+	switch {
+	case len(missing) == len(required):
+		if issuerCAFile != "" || apiServerCA != "" {
+			return config{}, errors.New("-oidc-ca-file and -kubernetes-ca-file need the sign-in flags too")
+		}
+		return cfg, nil // no sign-in and no API proxy: the start page and probes only
+	case len(missing) > 0:
+		slices.Sort(missing)
+		return config{}, fmt.Errorf("sign-in and the API proxy need all of %s; missing %s",
+			"-public-url, -oidc-issuer, -oidc-client-id, -oidc-client-secret-file and -kubernetes-server",
+			strings.Join(missing, ", "))
+	}
+
+	secret, err := readFile(secretFile)
+	if err != nil {
+		return config{}, fmt.Errorf("reading the client secret: %w", err)
+	}
+	login := &loginConfig{
+		publicURL: publicURL, issuer: issuer, clientID: clientID,
+		// Secrets mounted from files often end in a newline that is not part of them.
+		clientSecret: strings.TrimRight(string(secret), "\r\n"),
+	}
+	if login.clientSecret == "" {
+		return config{}, errors.New("the client secret file is empty")
+	}
+	for _, s := range strings.Split(scopes, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			login.scopes = append(login.scopes, s)
+		}
+	}
+	if login.apiServer, err = url.Parse(apiServer); err != nil {
+		return config{}, fmt.Errorf("-kubernetes-server: %w", err)
+	}
+	if issuerCAFile != "" {
+		if login.issuerCAs, err = x509.SystemCertPool(); err != nil {
+			return config{}, err
+		}
+		if err := appendCAs(login.issuerCAs, issuerCAFile, readFile); err != nil {
+			return config{}, err
+		}
+	}
+	if apiServerCA != "" {
+		login.apiServerCAs = x509.NewCertPool()
+		if err := appendCAs(login.apiServerCAs, apiServerCA, readFile); err != nil {
+			return config{}, err
+		}
+	}
+	cfg.login = login
+	return cfg, nil
+}
+
+func appendCAs(pool *x509.CertPool, file string, readFile func(string) ([]byte, error)) error {
+	pem, err := readFile(file)
+	if err != nil {
+		return fmt.Errorf("reading CA certificates: %w", err)
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return fmt.Errorf("no PEM certificates in %s", file)
+	}
+	return nil
+}
+
+// handler builds every route from cfg. With login configured it returns a function
+// that discovers the issuer in the background.
+func handler(cfg config, logger *slog.Logger) (http.Handler, func(context.Context), error) {
+	if cfg.login == nil {
+		return server.New(server.Config{Version: version}), func(context.Context) {}, nil
+	}
+	l := cfg.login
+	sessions, err := session.New(session.Config{
+		Store: session.NewMemory(nil), Origin: l.publicURL, IdleTimeout: cfg.idle, AbsoluteTimeout: cfg.absolute,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	login, err := auth.New(auth.Config{
+		PublicURL: l.publicURL, Issuer: l.issuer, ClientID: l.clientID, ClientSecret: l.clientSecret,
+		Scopes: l.scopes, HTTPClient: issuerClient(l.issuerCAs), Sessions: sessions, Logger: logger,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	// The session manager is the proxy's only credential source: there is no other
+	// way to give krm-foyer a token, and no service-account fallback.
+	api, err := proxy.New(proxy.Config{Server: l.apiServer, RootCAs: l.apiServerCAs, Credentials: sessions, Logger: logger})
+	if err != nil {
+		return nil, nil, err
+	}
+	return server.New(server.Config{
+		Version: version, Kubernetes: api, Auth: login.Handler(), Ready: login.Ready,
+	}), login.Run, nil
+}
+
+// issuerClient reaches the OIDC issuer. Like the API server's, the destination is
+// pinned: no proxy from the environment.
+func issuerClient(roots *x509.CertPool) *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			Proxy:               nil,
+			DialContext:         (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+			TLSClientConfig:     &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+			TLSHandshakeTimeout: 10 * time.Second,
+			ForceAttemptHTTP2:   true,
+		},
+	}
+}
+
+func run(cfg config, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	h, discover, err := handler(cfg, logger)
+	if err != nil {
+		return err
+	}
+	go discover(ctx)
+
 	srv := &http.Server{
-		Addr:              listen,
-		Handler:           server.New(server.Config{Version: version}),
+		Addr:              cfg.listen,
+		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
 
 	errs := make(chan error, 1)
 	go func() {
-		logger.Info("krm-foyer listening", "addr", listen, "version", version)
-		errs <- srv.ListenAndServe()
+		logger.Info("krm-foyer listening", "addr", cfg.listen, "version", version,
+			"tls", cfg.tlsCert != "", "login", cfg.login != nil)
+		if cfg.tlsCert != "" {
+			errs <- srv.ListenAndServeTLS(cfg.tlsCert, cfg.tlsKey)
+		} else {
+			errs <- srv.ListenAndServe()
+		}
 	}()
 
 	select {

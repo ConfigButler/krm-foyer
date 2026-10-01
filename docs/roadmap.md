@@ -74,8 +74,8 @@ Security items need tests that try to get past the boundary.
 - [ ] Browser e2e with Playwright: log in, read, edit, get refused with 403, hit a 409,
       log out
 - [ ] Coverage baseline that ratchets upward
-- [x] Fuzz tests for path checking, the upstream response check and the CSRF rule, with
-      a short fuzz run of each in `task verify`
+- [x] Fuzz tests for path checking, the upstream response check, the CSRF rule and
+      return paths, with a short fuzz run of each in `task verify`
 - [ ] Helm chart with `values.schema.json`, `helm lint`, `helm template` tests, and e2e
       that installs through the chart
 - [ ] Signed multi-arch image (cosign keyless) with an SBOM
@@ -141,7 +141,8 @@ Security items need tests that try to get past the boundary.
 
 ### Login and sessions
 
-- [ ] OIDC authorization code with PKCE, state and nonce, through a maintained library
+- [x] OIDC authorization code with PKCE, state and nonce, through a maintained library
+      (unit tests against an issuer that misbehaves on request; e2e in step 2)
 - [x] Opaque server-side sessions: rotated at login, with idle and absolute expiry, and
       ended with the ID token while there is no refresh (unit tests; e2e in step 2)
 - [ ] Refresh is serialized per session and bounded (step 2b)
@@ -151,9 +152,11 @@ Security items need tests that try to get past the boundary.
       bound is the absolute session expiry
 - [x] CSRF proof and same-origin checks on every mutation through `/k8s`, with repeated
       header fields refused (unit tests and a fuzz property; e2e in step 2)
-- [ ] The same checks on logout
-- [ ] An unauthenticated API request gets a JSON 401, not a redirect
-- [ ] `/auth/whoami` from a SelfSubjectReview, and `/auth/session`
+- [x] The same checks on logout
+- [x] An unauthenticated API request gets a JSON 401, not a redirect (unit tests; e2e in
+      step 2)
+- [x] `/auth/session`
+- [ ] `/auth/whoami` from a SelfSubjectReview
 - [ ] `/_foyer/access`: the rules for a namespace from a SelfSubjectRulesReview, and a
       "can I?" form answered by a SelfSubjectAccessReview. See
       [what may I do](design.md#what-may-i-do)

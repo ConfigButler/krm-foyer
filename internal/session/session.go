@@ -175,23 +175,31 @@ func (m *Manager) End(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	return nil
 }
 
-// Token implements proxy.Credentials: the session's ID token, for a request that
-// may use it. A mutation without CSRF proof is refused with an *proxy.Interruption
-// before it counts as activity.
-func (m *Manager) Token(r *http.Request) (string, error) {
+// Use returns the session r belongs to if r may act on it: Lookup, then
+// CheckMutation. A refused request is answered with an *proxy.Interruption before it
+// counts as activity.
+func (m *Manager) Use(r *http.Request) (Session, error) {
 	key, s, err := m.find(r)
 	if err != nil {
-		return "", err
+		return Session{}, err
 	}
 	if err := m.CheckMutation(r, s); err != nil {
-		return "", err
+		return Session{}, err
 	}
-	s, err = m.touch(r.Context(), key, s)
+	return m.touch(r.Context(), key, s)
+}
+
+// Token implements proxy.Credentials: the ID token of the session r may use.
+func (m *Manager) Token(r *http.Request) (string, error) {
+	s, err := m.Use(r)
 	if err != nil {
 		return "", err
 	}
 	return s.IDToken, nil
 }
+
+// ExpiresAt is when s ends however busy it is.
+func (m *Manager) ExpiresAt(s Session) time.Time { return m.end(s) }
 
 // find returns the live session named by r's one session cookie.
 func (m *Manager) find(r *http.Request) (Key, Session, error) {
