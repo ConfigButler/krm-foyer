@@ -33,7 +33,8 @@ This starts a disposable k3d cluster with Dex, deploys krm-foyer, and puts the
 sign in as `alice@example.com`, who may edit the notes, or `bob@example.com`, who may only
 read them. The password is `password`. The certificates come from the fixture's own CA, so
 import `.e2e/ca.crt` into your browser or accept the warnings. `task e2e-down` removes it
-all.
+all. A fixture made by an older version of the scripts is refused with a message saying
+so; run `task e2e-down` once, then `task demo` again.
 
 The example is one HTML file and one script with no backend of its own: everything it
 does goes through `/k8s` as the signed-in user, and the 403 and 409 it shows are

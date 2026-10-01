@@ -42,7 +42,7 @@ export async function requireSession() {
 
 /** Ends the session, then sends the browser to next. */
 export async function logout(next = '/auth/logged-out') {
-  const res = await fetch('/auth/logout', { method: 'POST', headers: await proof() });
+  const res = await change('/auth/logout', { method: 'POST' });
   if (res.status !== 204) {
     throw new Error(`/auth/logout answered ${res.status}`);
   }
@@ -55,6 +55,23 @@ async function proof() {
     await session();
   }
   return csrf ? { [csrf.header]: csrf.token } : {};
+}
+
+// change sends a request that changes state, with the session's CSRF proof. The proof
+// goes stale when the user signs in again in another tab. krm-foyer then refuses the
+// request before it reaches Kubernetes, so it is safe to read the proof anew and send
+// the request once more. That is the only request this helper ever sends twice.
+async function change(url, init) {
+  const send = async () => fetch(url, { ...init, headers: { ...init.headers, ...(await proof()) } });
+  const res = await send();
+  if (res.status === 403) {
+    const refusal = await res.clone().json().catch(() => null);
+    if (refusal && refusal.reason === 'CSRFProofRequired') {
+      csrf = null;
+      return send();
+    }
+  }
+  return res;
 }
 
 // What each status means for an application. Anything else that is not 2xx is 'error'.
@@ -72,36 +89,21 @@ const outcomes = {
  * above; object is the parsed JSON answer; reason and message come from a Status.
  *
  * Nothing Kubernetes answered is retried: its answer is the answer, and a change that
- * failed is the caller's to make again, after the user has seen why. The one resend is
- * of a change krm-foyer refused for its CSRF proof, which never reached Kubernetes: the
- * user signed in again elsewhere, so the proof is read anew and the change sent once more.
+ * failed is the caller's to make again, after the user has seen why. (A change with a
+ * stale CSRF proof never reaches Kubernetes; see change.)
  *
  *   await k8s('/api/v1/namespaces/default/configmaps')
  *   await k8s(path, { method: 'PUT', body: object })
  *   await k8s(path, { method: 'PATCH', body: patch, contentType: 'application/merge-patch+json' })
  */
-export async function k8s(path, options = {}) {
-  const answer = await send(path, options);
-  if (answer.status === 403 && answer.reason === 'CSRFProofRequired') {
-    csrf = null;
-    return send(path, options);
-  }
-  return answer;
-}
-
-async function send(path, { method = 'GET', body, contentType = 'application/json' }) {
-  const headers = { Accept: 'application/json' };
-  if (method !== 'GET' && method !== 'HEAD') {
-    Object.assign(headers, await proof());
-  }
+export async function k8s(path, { method = 'GET', body, contentType = 'application/json' } = {}) {
+  const init = { method, headers: { Accept: 'application/json' } };
   if (body !== undefined) {
-    headers['Content-Type'] = contentType;
+    init.headers['Content-Type'] = contentType;
+    init.body = JSON.stringify(body);
   }
-  const res = await fetch('/k8s' + path, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const reads = method === 'GET' || method === 'HEAD';
+  const res = await (reads ? fetch('/k8s' + path, init) : change('/k8s' + path, init));
   let object = null;
   if ((res.headers.get('Content-Type') || '').includes('json')) {
     object = await res.json().catch(() => null);

@@ -112,6 +112,30 @@ var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 		Expect(text).To(Equal("bread"))
 	})
 
+	// Signing in again starts a new session with a new CSRF token, and a page loaded before
+	// still holds the old one. Its changes and its logout must still work.
+	It("keeps saving and signs out after alice signs in again in another tab", func() {
+		other, closeOther := chromedp.NewContext(tab)
+		DeferCleanup(closeOther)
+		Expect(chromedp.Run(other)).To(Succeed()) // opens the tab: see startBrowser
+		signInAgain := func() {
+			run(other, chromedp.Navigate(fx.foyerURL+"/auth/login?return_to=/"))
+			signInAtDex(other, alice)
+			run(other, chromedp.WaitVisible("#signed-in", chromedp.ByID))
+		}
+
+		signInAgain()
+		run(tab,
+			chromedp.SetValue(`li[data-name="groceries"] textarea`, "bread, butter"),
+			chromedp.Click(`li[data-name="groceries"] .save`),
+		)
+		expectStatus(tab, "ok", "Saved groceries.")
+		Expect(noteText("groceries")).To(Equal("bread, butter"))
+
+		// Again, so the logout below starts from a stale token too.
+		signInAgain()
+	})
+
 	It("signs alice out", func() {
 		var location string
 		run(tab, chromedp.Click("#logout", chromedp.ByID))
@@ -137,7 +161,7 @@ var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 		)
 		// The message is the API server's own, naming bob: RBAC refused, not krm-foyer.
 		expectStatus(tab, "refused", `User "oidc:bob@example.com" cannot update resource "notes"`)
-		Expect(noteText("groceries")).To(Equal("bread"))
+		Expect(noteText("groceries")).To(Equal("bread, butter"))
 	})
 })
 

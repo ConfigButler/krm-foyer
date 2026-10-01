@@ -148,7 +148,8 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   namespace, so `*.localhost` means to it what it means on a person's machine. It trusts
   exactly the front door's and Dex's certificates, by their public keys. Its specs were
   each seen to fail against a broken build: the browser not trusting Dex, the example
-  re-reading and saving again on a 409, and the helper leaving out the CSRF header.
+  re-reading and saving again on a 409, the helper leaving out the CSRF header, and the
+  helper not reading a new CSRF token after the user signed in again in another tab.
 
 ## The e2e fixture
 

@@ -13,6 +13,17 @@ const notes = `/apis/hello.krm-foyer.example/v1/namespaces/${encodeURIComponent(
 
 const $ = (id) => document.getElementById(id);
 
+// busy keeps button disabled while work runs, so a second click cannot send the same
+// change twice: the second POST would fail with 409 and hide the first one's success.
+async function busy(button, work) {
+  button.disabled = true;
+  try {
+    await work();
+  } finally {
+    button.disabled = false;
+  }
+}
+
 // What to tell the user for each outcome the helper reports.
 const explain = {
   'signed-out': 'You are signed out. Sign in again to go on.',
@@ -68,7 +79,7 @@ function noteItem(note) {
   save.type = 'button';
   save.className = 'save';
   save.textContent = 'Save';
-  save.addEventListener('click', async () => {
+  save.addEventListener('click', () => busy(save, async () => {
     // A PUT of the object as it was loaded, metadata.resourceVersion included: if anyone
     // changed the note since, Kubernetes answers 409 instead of overwriting their change.
     const changed = structuredClone(note);
@@ -80,13 +91,17 @@ function noteItem(note) {
     }
     note = answer.object;
     say(`Saved ${note.metadata.name}.`, 'ok');
-  });
+  }));
   li.append(name, save);
   return li;
 }
 
-async function create(event) {
+function create(event) {
   event.preventDefault();
+  return busy($('create'), createNote);
+}
+
+async function createNote() {
   const name = $('new-name').value;
   const answer = await k8s(notes, {
     method: 'POST',
