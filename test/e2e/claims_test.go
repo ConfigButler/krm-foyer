@@ -3,9 +3,12 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"slices"
@@ -50,21 +53,92 @@ func (u user) viaFoyer(ctx context.Context, method, path string, body []byte, he
 }
 
 // compare asks the API server directly with the user's own token, then krm-foyer with
-// the user's session, and expects the same answer: status, content type and, for a
-// Status, the whole body. If krm-foyer made any decision of its own, they would differ.
+// the user's session, and expects the same answer: status, content type and body. If
+// krm-foyer made any decision of its own, or changed what it passed on, they would
+// differ. A JSON body is compared as JSON values (a watch is a stream of them), with
+// what the API server generates afresh for each request set aside; see generated.
 func (u user) compare(ctx context.Context, method, path string, body []byte, header http.Header) (direct, via answer) {
 	GinkgoHelper()
 	direct = fx.directWith(ctx, u.token, method, path, body, header)
 	via = u.viaFoyer(ctx, method, path, body, header)
 	Expect(via.Code).To(Equal(direct.Code), "%s %s\ndirect: %s\nvia krm-foyer: %s", method, path, direct.Body, via.Body)
 	Expect(via.Header.Get("Content-Type")).To(Equal(direct.Header.Get("Content-Type")), "%s %s", method, path)
-	if direct.status().Kind == "Status" {
-		var d, v map[string]any
-		Expect(json.Unmarshal(direct.Body, &d)).To(Succeed())
-		Expect(json.Unmarshal(via.Body, &v)).To(Succeed(), "%s", via.Body)
-		Expect(v).To(Equal(d), "%s %s: krm-foyer's Status differs from the API server's", method, path)
+	if direct.Header.Get("Content-Type") != "application/json" {
+		Expect(via.Body).To(Equal(direct.Body), "%s %s: krm-foyer's body differs from the API server's", method, path)
+		return direct, via
 	}
+	write := method != http.MethodGet && method != http.MethodHead
+	d, v := jsonValues(direct.Body), jsonValues(via.Body)
+	Expect(d).NotTo(BeEmpty(), "%s %s: the API server sent no body to compare", method, path)
+	for _, x := range append(slices.Clone(d), v...) {
+		generated(x, write)
+	}
+	Expect(v).To(Equal(d), "%s %s: krm-foyer's body differs from the API server's\ndirect: %s\nvia krm-foyer: %s",
+		method, path, direct.Body, via.Body)
 	return direct, via
+}
+
+// jsonValues decodes every JSON value in body, in order.
+func jsonValues(body []byte) []any {
+	GinkgoHelper()
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var values []any
+	for {
+		var v any
+		err := dec.Decode(&v)
+		if errors.Is(err, io.EOF) {
+			return values
+		}
+		Expect(err).NotTo(HaveOccurred(), "%s", body)
+		values = append(values, v)
+	}
+}
+
+// generated replaces, in a decoded body, the fields the API server fills in afresh
+// for each request, so two answers to the same request can be compared. They are
+// replaced rather than removed: a field krm-foyer dropped still shows as a difference.
+//
+//   - A list read has the store's current resourceVersion, which any write anywhere in
+//     the cluster moves; leases renew every few seconds.
+//   - A write creates a new object, or acts on one, at a new moment: uid,
+//     creationTimestamp, resourceVersion and each managedFields time are new, and so is
+//     the name when the request asked for a generateName.
+//
+// Nothing else is set aside: every other field, in every item of a list and every
+// event of a watch, must be equal.
+func generated(v any, write bool) {
+	obj, _ := v.(map[string]any)
+	meta, _ := obj["metadata"].(map[string]any)
+	if meta == nil {
+		return
+	}
+	set := func(field string) {
+		if _, ok := meta[field]; ok {
+			meta[field] = "<generated>"
+		}
+	}
+	if kind, _ := obj["kind"].(string); strings.HasSuffix(kind, "List") {
+		set("resourceVersion")
+		return
+	}
+	if !write {
+		return
+	}
+	set("uid")
+	set("creationTimestamp")
+	set("resourceVersion")
+	if _, ok := meta["generateName"]; ok {
+		set("name")
+	}
+	managed, _ := meta["managedFields"].([]any)
+	for _, m := range managed {
+		if entry, ok := m.(map[string]any); ok {
+			if _, ok := entry["time"]; ok {
+				entry["time"] = "<generated>"
+			}
+		}
+	}
 }
 
 func configMap(name string) []byte {

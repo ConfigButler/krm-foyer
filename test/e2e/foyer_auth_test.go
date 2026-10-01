@@ -307,15 +307,24 @@ var _ = Describe("krm-foyer", Label("foyer"), func() {
 				Expect(direct.Code).To(Equal(tc.code), "%s: the fixture answered differently than this spec expects: %s", tc.name, direct.Body)
 			}
 
-			By("creating for real: both get 201, and the objects exist")
-			Expect(fx.directWith(ctx, alice.token, http.MethodPost, cms, configMap("direct"), nil).Code).To(Equal(http.StatusCreated))
-			Expect(alice.viaFoyer(ctx, http.MethodPost, cms, configMap("via-foyer"), nil).Code).To(Equal(http.StatusCreated))
-			Expect(fx.kubectl("-n", ns, "get", "configmaps", "-o", "name")).To(And(
-				ContainSubstring("configmap/direct"), ContainSubstring("configmap/via-foyer"), Not(ContainSubstring("configmap/dry"))))
+			By("creating for real: both get 201 and the same object, and both objects exist")
+			created := []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"generateName":"real-"},"data":{"k":"v"}}`)
+			direct, via := alice.compare(ctx, http.MethodPost, cms, created, nil)
+			Expect(direct.Code).To(Equal(http.StatusCreated))
+			names := fx.kubectl("-n", ns, "get", "configmaps", "-o", "name")
+			for _, a := range []answer{direct, via} {
+				var cm struct {
+					Metadata struct{ Name string } `json:"metadata"`
+				}
+				Expect(a.decode(&cm)).To(Succeed())
+				Expect(cm.Metadata.Name).To(HavePrefix("real-"))
+				Expect(names).To(ContainSubstring("configmap/" + cm.Metadata.Name))
+			}
+			Expect(names).NotTo(ContainSubstring("configmap/dry"))
 
 			By("asking Kubernetes who the user is: the same answer either way")
 			review := []byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`)
-			_, via := alice.compare(ctx, http.MethodPost, "/apis/authentication.k8s.io/v1/selfsubjectreviews", review, nil)
+			_, via = alice.compare(ctx, http.MethodPost, "/apis/authentication.k8s.io/v1/selfsubjectreviews", review, nil)
 			Expect(string(via.Body)).To(ContainSubstring(`"username":"` + aliceK8sName + `"`))
 		})
 

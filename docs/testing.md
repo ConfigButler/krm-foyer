@@ -20,10 +20,15 @@ describes how the tests prove that.
 
 **Differential answers.** The suite logs in to Dex as a user and keeps that user's own
 token. For any request, it asks the API server directly with that token and then asks
-krm-foyer with that user's session. Status code, `Status` body and content type must be
-the same. If krm-foyer made any decision of its own, the two would differ. This one
-technique covers most of "does not invent authorization", and it needs no list of
-expected answers to maintain: the API server supplies the expected answer.
+krm-foyer with that user's session. Status code, content type and body must be the same,
+for successes as much as for refusals: transparent answers are the promise, and an empty
+or altered object would break it as surely as a wrong status. Only what the API server
+generates afresh for each request is set aside, and named: a list's `resourceVersion`,
+and on a write the new object's `uid`, `creationTimestamp`, `resourceVersion`,
+`managedFields` times and generated name. If krm-foyer made any decision of its own, or
+changed what it passed on, the two would differ. This one technique covers most of "does
+not invent authorization", and it needs no list of expected answers to maintain: the API
+server supplies the expected answer.
 
 **The audit log as witness.** The fixture's API server writes an audit log. krm-foyer can
 influence what it sends, but not what the API server writes down, so the log settles
