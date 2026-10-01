@@ -6,12 +6,12 @@
 #
 # Every check runs inside the CI image: the `ci` stage of .devcontainer/Dockerfile, the same
 # image the devcontainer is built on. The first job builds it and hands it to the others as
-# an artifact; .github/actions/in-ci-container runs a `task` target inside it. So nothing is
-# installed on the runner, every tool comes from one Dockerfile at the versions in its ENV
+# an artifact; each job then loads it and runs one `task` target inside it, as a step of its
+# own so the job's log shows it at the top level. So nothing is installed on the runner, every tool comes from one Dockerfile at the versions in its ENV
 # block, and a red job reproduces locally with the same command. This is how gitops-reverser
 # runs its CI too. Unlike there, the image is never pushed: the release does not reuse it, so
 # an artifact on every run is enough, and CI never needs a token that can write packages.
-name: ci
+name: CI
 
 on:
   pull_request:
@@ -26,6 +26,13 @@ on:
 permissions:
   contents: read
 
+env:
+  CI_IMAGE: krm-foyer-ci:local
+  # The same path as in the devcontainer. Each run step marks it a git safe.directory: the
+  # checkout belongs to the runner's user, the container runs as root, and git refuses to
+  # read a repository owned by someone else (the Taskfile takes its version from git).
+  CI_WORKDIR: /workspaces/krm-foyer
+
 # A new push to a pull request cancels the previous run. A release run has no pull request
 # number, and github.run_id keeps its group unique so it can never be cancelled.
 concurrency:
@@ -34,7 +41,7 @@ concurrency:
 
 jobs:
   ci-container:
-    name: CI image
+    name: CI base container
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -51,14 +58,14 @@ jobs:
           target: ci
           load: true
           push: false
-          tags: krm-foyer-ci:local
+          tags: ${{ env.CI_IMAGE }}
           cache-from: type=gha,scope=ci-container
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=ci-container' || '' }}
       # A tool that fails to install should fail here, by name, not as a confusing error
       # halfway through some later job.
       - name: every tool the checks use is in the image
         run: |
-          docker run --rm krm-foyer-ci:local bash -lc '
+          docker run --rm "$CI_IMAGE" bash -lc '
             set -e
             go version
             task --version
@@ -71,7 +78,7 @@ jobs:
             openssl version
           '
       - name: save the image
-        run: docker save krm-foyer-ci:local -o "$RUNNER_TEMP/ci-image.tar"
+        run: docker save "$CI_IMAGE" -o "$RUNNER_TEMP/ci-image.tar"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-image
@@ -79,8 +86,8 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  checks:
-    name: lint and unit tests
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: ci-container
@@ -89,13 +96,47 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
-      # tidy-check, then go vet, golangci-lint, actionlint and hadolint, then go test -race.
-      - uses: ./.github/actions/in-ci-container
+      - name: Download CI image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          run: task tidy-check lint test
+          name: ci-image
+          path: ${{ runner.temp }}
+      # Removed after loading: the tarball would otherwise hold a gigabyte of runner disk
+      # for the whole job.
+      - name: Load CI image
+        run: docker load -i "$RUNNER_TEMP/ci-image.tar" && rm -f "$RUNNER_TEMP/ci-image.tar"
+      # go mod tidy, go vet, golangci-lint, actionlint and hadolint.
+      - name: task tidy-check lint
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:$CI_WORKDIR" -w "$CI_WORKDIR" \
+            "$CI_IMAGE" bash -lc 'git config --global --add safe.directory "$PWD" && task tidy-check lint'
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: ci-container
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - name: Download CI image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-image
+          path: ${{ runner.temp }}
+      # Removed after loading: the tarball would otherwise hold a gigabyte of runner disk
+      # for the whole job.
+      - name: Load CI image
+        run: docker load -i "$RUNNER_TEMP/ci-image.tar" && rm -f "$RUNNER_TEMP/ci-image.tar"
+      - name: task test
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:$CI_WORKDIR" -w "$CI_WORKDIR" \
+            "$CI_IMAGE" bash -lc 'git config --global --add safe.directory "$PWD" && task test'
 
   image:
-    name: container image
+    name: Container image
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: ci-container
@@ -104,15 +145,25 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
-      # Build the image, start it, and check that it answers. A Dockerfile that builds but
-      # produces a binary that cannot start fails here.
-      - uses: ./.github/actions/in-ci-container
+      - name: Download CI image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          run: task image-smoke
-          docker: "true"
+          name: ci-image
+          path: ${{ runner.temp }}
+      # Removed after loading: the tarball would otherwise hold a gigabyte of runner disk
+      # for the whole job.
+      - name: Load CI image
+        run: docker load -i "$RUNNER_TEMP/ci-image.tar" && rm -f "$RUNNER_TEMP/ci-image.tar"
+      # Build the image, start it, and check that it answers. A Dockerfile that builds but
+      # produces a binary that cannot start fails here. Shares the runner's Docker daemon.
+      - name: task image-smoke
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:$CI_WORKDIR" -w "$CI_WORKDIR" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            "$CI_IMAGE" bash -lc 'git config --global --add safe.directory "$PWD" && task image-smoke'
 
   e2e:
-    name: e2e (k3d + Dex)
+    name: E2E (k3d + Dex)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: ci-container
@@ -121,19 +172,28 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
-      # The CI image joins the fixture's Docker network exactly as the devcontainer does,
-      # so the fixture is reached the same way in both. -v lists every spec, including
-      # the pending ones.
-      - uses: ./.github/actions/in-ci-container
+      - name: Download CI image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          run: task test-e2e -- -v -ginkgo.v
-          docker: "true"
+          name: ci-image
+          path: ${{ runner.temp }}
+      # Removed after loading: the tarball would otherwise hold a gigabyte of runner disk
+      # for the whole job.
+      - name: Load CI image
+        run: docker load -i "$RUNNER_TEMP/ci-image.tar" && rm -f "$RUNNER_TEMP/ci-image.tar"
+      # Shares the runner's Docker daemon; the container joins the fixture's network exactly
+      # as the devcontainer does. -v lists every spec, including the pending ones.
+      - name: task test-e2e -- -v -ginkgo.v
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:$CI_WORKDIR" -w "$CI_WORKDIR" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            "$CI_IMAGE" bash -lc 'git config --global --add safe.directory "$PWD" && task test-e2e -- -v -ginkgo.v'
       - name: API server log on failure
         if: failure()
         run: docker logs k3d-krm-foyer-e2e-server-0 2>&1 | tail -200
 
   devcontainer:
-    name: devcontainer builds
+    name: Validate Dev Container
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

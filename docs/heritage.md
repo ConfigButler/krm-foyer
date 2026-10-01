@@ -135,7 +135,9 @@ get past the boundary.
 - [ ] Helm chart with `values.schema.json`, `helm lint`, `helm template` tests, and e2e that
       installs through the chart
 - [ ] Signed multi-arch image (cosign keyless) with an SBOM
-- [ ] PR title check for conventional commits
+- [x] PR title check for conventional commits (squash merges take the PR title)
+- [ ] Parse the whole squash message the way release-please does, as gitops-reverser's
+      "Squash message parses" check does, once a dropped changelog entry makes it worth it
 - [ ] Docs lint: markdownlint and link checking
 
 ### Deployment
