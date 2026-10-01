@@ -4,25 +4,23 @@ What is left to build, and in what order. The [design](design.md) says what krm-
 must do; this file tracks how far along that is.
 
 **Nothing in the design's security model is implemented yet.** Server-held tokens,
-default deny and no service-account fallback are requirements. Each becomes a property of
+access decided by Kubernetes alone and no service-account fallback are requirements. Each becomes a property of
 krm-foyer when the test that tries to get past it exists and passes, and not before.
 
 ## Order of work
 
 Each step makes pending specs real and ends with `task verify` green.
 
-1. **The allowlist matcher, unit tests only.** It is the whole default-deny boundary,
-   and a pure function, so it is the cheapest place to be thorough.
-2. **The proxy, unit tests only.** It takes the user's credential from the session and
-   nothing else, so it can be tested against an `httptest` API server before login
-   exists. There is deliberately no test-only way to hand krm-foyer a token: a back door
+1. **The proxy, unit tests only.** Path checking first, as a pure function. Then the
+   proxy, which takes the user's credential from the session and nothing else, so it can
+   be tested against an `httptest` API server before login exists. There is deliberately no test-only way to hand krm-foyer a token: a back door
    behind a build tag is still a back door.
-3. **OIDC login and sessions, deployed into the e2e fixture.** krm-foyer runs in the
+2. **OIDC login and sessions, deployed into the e2e fixture.** krm-foyer runs in the
    cluster with a cluster-admin bait service account, and the suite logs in by walking
-   Dex's login form with a cookie jar. The differential, audit, empty-allowlist, session,
-   CSRF, logout and token-scan specs go green together.
-4. **Streams**, once the first three hold.
-5. **An example domain** with pending, accepted, rejected and failed outcomes, and a
+   Dex's login form with a cookie jar. The differential, audit, session, CSRF, logout and
+   token-scan specs go green together.
+3. **Streams**, once the first two hold.
+4. **An example domain** with pending, accepted, rejected and failed outcomes, and a
    second frontend on a different API group, with no application-specific code in
    krm-foyer. Then measure the operational cost against keeping auth and transport in
    each application.
@@ -59,6 +57,12 @@ Security items need tests that try to get past the boundary.
 - [ ] Parse the whole squash message the way release-please does, once a dropped
       changelog entry makes it worth it
 
+### Later, when an adopter needs it
+
+- [ ] [Application scope](application-scope.md): first document a browser identity in the
+      cluster's authentication config, proved by one e2e spec; then a scope list in
+      krm-foyer for clusters where that is not possible
+
 ### Deployment
 
 - [ ] krm-foyer serves TLS from a mounted certificate and reloads it on rotation
@@ -75,15 +79,12 @@ Security items need tests that try to get past the boundary.
 - [ ] Later, when a hybrid application asks: identity headers from the check for a domain
       backend, never the token
 
-### Access boundaries
+### Access
 
-- [ ] An empty policy exposes no API route and no stream scope
-- [ ] The allowlist covers group, version, resource, namespace, verb, subresource and
-      non-resource URL
+- [ ] Every answer through krm-foyer equals the API server's answer for the same token
+      (the differential specs)
 - [ ] Non-canonical paths (`//`, `..`, encoded slashes) are rejected, not normalized, and
-      the path forwarded is byte-for-byte the path checked
-- [ ] `watch=true` on a collection counts as watch, not list
-- [ ] Selectors, `limit` and `continue` are part of policy evaluation
+      the path forwarded is byte-for-byte the path received
 - [ ] Browser-supplied `Authorization`, `Impersonate-*` and forwarding headers are
       stripped, and the session cookie never reaches Kubernetes
 - [ ] Upstream responses: redirects are not followed or passed on, `Set-Cookie` and CORS
@@ -107,8 +108,9 @@ Security items need tests that try to get past the boundary.
 - [ ] CSRF proof and same-origin checks on every mutation and on logout
 - [ ] An unauthenticated API request gets a JSON 401, not a redirect
 - [ ] `/auth/whoami` from a SelfSubjectReview, and `/auth/session`
-- [ ] `/_foyer/access`: the allowlist and RBAC together, one SelfSubjectAccessReview per
-      cell, as a page and as JSON. See [what may I do](design.md#what-may-i-do)
+- [ ] `/_foyer/access`: the rules for a namespace from a SelfSubjectRulesReview, and a
+      "can I?" form answered by a SelfSubjectAccessReview. See
+      [what may I do](design.md#what-may-i-do)
 - [ ] Shared session storage, so more than one replica works
 - [ ] The [session lifecycle](design.md#session-lifecycle) bounds, each with a test:
       logout seen by every replica at once, logout racing a refresh, the session store

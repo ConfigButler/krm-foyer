@@ -26,7 +26,7 @@ Voter also showed what a generic service would remove. Its browser never calls
 `/apis/...` directly. Each feature has its own `/public/*` handler, and the streams
 are limited by a Go variable that lists five resources plus namespace and name pins from
 environment variables. Every application built this way writes that code again. krm-foyer
-replaces it with configuration: an allowlist and the native API paths.
+replaces it with the native API paths, and leaves the decisions to RBAC.
 
 The service was designed inside Voter under the working name **k8s-front**.
 Voter's adoption review recommended building it as a separate product with its own tests,

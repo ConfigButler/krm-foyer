@@ -37,14 +37,13 @@ a single application it does not guarantee less code in total.
 Most traffic will come from a library or a few lines of JavaScript, but krm-foyer should
 also make sense to a person with nothing but a browser tab. Open a `/k8s/...` URL and you
 see what Kubernetes answered for you. Where krm-foyer itself steps in, because you are not
-signed in, the route is not exposed, or the upstream answered with a redirect or a page
-it will not render, it tells you, in a page instead of a bare error code. For a redirect,
+signed in, or the upstream answered with a redirect or a page it will not render, it tells you, in a page instead of a bare error code. For a redirect,
 you see where it leads and choose whether to go.
 
 Two pages answer the questions everyone asks first. `/auth/whoami` shows who Kubernetes
-thinks you are. `/_foyer/access` shows what you may do here: every exposed resource and
-verb, marked allowed, refused by Kubernetes, or not exposed by krm-foyer. Frontends get
-the same answer as JSON, to hide buttons that would only produce a 403.
+thinks you are. `/_foyer/access` shows what you may do, from Kubernetes' own reviews,
+with a "can I?" form. Code asks Kubernetes the same questions natively, to hide buttons
+that would only produce a 403.
 
 Not at any price: code always gets the same JSON and status code, krm-foyer never
 replaces an answer from Kubernetes, and no page lets anyone run upstream content as the
@@ -83,6 +82,8 @@ The project stays useful by staying small, so these stay out:
 - **Application-specific endpoints, DTOs or aggregation.** Domain logic belongs in
   operators and admission.
 - **A single-page application or resource browser.** See the [frontend decision](frontend.md).
+- **Access rules of its own,** for now. Kubernetes decides; limiting an application
+  further is a [deferred design](application-scope.md).
 - **Impersonation**, and any fallback to krm-foyer's own service account for a user's
   request.
 - **Exec, attach and port-forward**, until they have their own design and tests.

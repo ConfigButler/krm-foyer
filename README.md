@@ -3,8 +3,8 @@
 **The browser's way in to Kubernetes: login, API access and live krm-stream resources.**
 
 krm-foyer is a backend for frontend (BFF) for browser applications built on Kubernetes
-APIs. It owns OIDC login and server-side sessions, proxies an allowlisted set of Kubernetes
-API routes with the user's own credential, and hosts
+APIs. It owns OIDC login and server-side sessions, proxies Kubernetes API requests with
+the user's own credential, and hosts
 [krm-stream](https://github.com/ConfigButler/krm-stream) resource streams on the same
 origin as your frontend. The browser never holds a cluster credential.
 
@@ -30,8 +30,10 @@ for applications whose domain is modelled that way.
   share an origin, routed by path. Everything on that domain can act as the signed-in
   user, so host only what you would trust with that access.
   [More](docs/ingress.md#what-a-shared-origin-costs)
-- **Default deny, and krm-foyer only narrows.** With an empty allowlist, nothing is
-  exposed. The allowlist can only take away what RBAC grants, never add to it.
+- **No access rules of our own.** krm-foyer has no allowlist: what RBAC allows the user
+  is reachable, and what it refuses is refused by the API server. So a session carries the
+  user's full Kubernetes access; give users grants that match the application.
+  [Why, and what a scope would add](docs/application-scope.md)
 - **Kubernetes semantics, exactly.** Status codes, errors, patch types and conflicts pass
   through unchanged, and nothing is retried on the user's behalf.
   [Why](docs/heritage.md#what-broke-on-stage)
@@ -41,7 +43,8 @@ for applications whose domain is modelled that way.
 | Document | What it answers |
 | --- | --- |
 | [docs/vision.md](docs/vision.md) | Why krm-foyer exists, who it helps, what it expects from your domain, and what it will not become |
-| [docs/design.md](docs/design.md) | The contract: routes, access boundaries, sessions, upstream responses, streams and release criteria |
+| [docs/design.md](docs/design.md) | The contract: routes, access, sessions, upstream responses, streams and release criteria |
+| [docs/application-scope.md](docs/application-scope.md) | Why a browser application might be limited beyond RBAC, what that would block, and why krm-foyer starts without it |
 | [docs/roadmap.md](docs/roadmap.md) | What exists, what is next, and in what order |
 | [docs/bff-choice.md](docs/bff-choice.md) | Whether your application should use a universal BFF like this one, a domain backend, or both |
 | [docs/ingress.md](docs/ingress.md) | Terminating TLS itself or behind an ingress, sharing one domain with other services, and the login gate for an ingress |

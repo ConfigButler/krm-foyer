@@ -31,8 +31,8 @@ browser is on a krm-foyer URL and no application page exists yet:
 | `/auth/callback` | A redirect to the stored return path on success. On failure, an error page with a stable reason and a "try again" link | An application cannot render this: its code is not loaded yet. |
 | `/auth/logged-out` | Plain confirmation with a "sign in again" link | Where logout lands when the application does not supply its own destination. |
 | `/auth/whoami` | Who Kubernetes takes you to be (username, groups and extra, from a SelfSubjectReview), with the session's issuer and expiry. Never tokens | The first thing to check when Kubernetes answers 403. It shows the API server's view, not the token's claims, because that is what RBAC matches. `/auth/session` stays the JSON form for code. |
-| `/_foyer/access` | What you may do through krm-foyer: each allowlisted resource and verb, as allowed, refused by Kubernetes, or not exposed. JSON for code at the same URL | The two halves of the answer live in two places, the allowlist and RBAC, and only krm-foyer sees both. See [what may I do](design.md#what-may-i-do). |
-| `/k8s/...`, `/stream` when krm-foyer interrupts | For a browser navigation only: sign in, not exposed, redirect notice, held-back content, store unavailable. Same status code as the JSON form | The proxy is explorable in a tab. These say what krm-foyer decided, as opposed to what Kubernetes answered. See [interruptions](design.md#interruptions). |
+| `/_foyer/access` | What you may do in a namespace, from a SelfSubjectRulesReview, and a "can I?" form answered by a SelfSubjectAccessReview | `kubectl auth can-i` for someone with only a browser. Code asks the same reviews natively. See [what may I do](design.md#what-may-i-do). |
+| `/k8s/...`, `/stream` when krm-foyer interrupts | For a browser navigation only: sign in, redirect notice, held-back content, store unavailable. Same status code as the JSON form | The proxy is explorable in a tab. These say what krm-foyer decided, as opposed to what Kubernetes answered. See [interruptions](design.md#interruptions). |
 | `/healthz`, `/readyz` | Plain text | For probes, not people. |
 | `/_foyer/...` | The pages' stylesheet and images | The one prefix krm-foyer reserves for its own pages and files that are not part of login, so they never collide with an application on the same origin. |
 
@@ -46,15 +46,13 @@ Rules for these pages:
 - **Every page is replaceable.** Operators can point the logged-out and error destinations
   at their own application URLs. The built-in pages are defaults, not branding.
 - **Nothing reveals configuration to anonymous visitors.** The start page says which features
-  are switched on, never issuer secrets, cluster addresses or allowlist contents.
+  are switched on, never issuer secrets or cluster addresses.
 
 ## What deliberately does not ship
 
 - **A resource browser or dashboard.** Raw API answers are viewable in a tab, as JSON;
   there is no UI on top of them. A dashboard would compete with the applications krm-foyer
   exists to serve, and name.md picked "foyer" partly so the name would not suggest one.
-  Showing arbitrary resources is also exactly the generic exposure the allowlist is there
-  to prevent.
 - **A login page with its own form.** Login happens at the OIDC provider. krm-foyer only
   redirects to it.
 - **A frontend framework or component library.** Applications choose their own.
@@ -73,7 +71,7 @@ separate:
    ingress cannot run the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages). Every
    application needs these, and they are easy to get subtly wrong. There is no npm
    package until someone needs one outside a krm-foyer origin.
-3. **`examples/hello/`**: one HTML file and one script. It signs in, lists one allowlisted
+3. **`examples/hello/`**: one HTML file and one script. It signs in, lists one
    resource through `/k8s` and follows it live through `/stream` with krm-stream's ESM
    bundle, with no bundler, served by the same nginx container the e2e fixture puts in
    front of krm-foyer. It is the copy-and-edit starting point, and the browser test

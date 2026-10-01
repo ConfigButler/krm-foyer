@@ -1,8 +1,8 @@
 # Service design
 
 krm-foyer is a backend for frontend (BFF) for browser applications built on Kubernetes
-APIs. It owns OIDC login and server-side sessions, proxies an allowlisted set of
-Kubernetes API routes with the user's own credential, and hosts krm-stream resource
+APIs. It owns OIDC login and server-side sessions, proxies Kubernetes API requests with
+the user's own credential, and hosts krm-stream resource
 streams on the frontend's origin.
 
 This document is the contract: what krm-foyer must do. **None of it is implemented yet.**
@@ -48,8 +48,8 @@ more worth revisiting.
 
 krm-foyer has two halves. The **login half** (`/auth/...`) obtains the user's OIDC token
 and keeps it in the server-side session. The **API half** (`/k8s`, `/stream`) takes the
-user's token from one credential interface, applies the allowlist and sends the request
-with that token, and the API server validates it. The API half's contract is the user's own
+user's token from one credential interface and sends the request with that token, and
+the API server validates it and decides. The API half's contract is the user's own
 token, checked by Kubernetes. Login is a convenience behind that interface: it could
 later accept tokens obtained elsewhere, or move into a separate program, without changing
 the API half.
@@ -61,7 +61,7 @@ the API half.
 | Kubernetes | Discovery, persistence, RBAC, admission execution, API validation and write concurrency |
 | Domain team | Resource contracts, admission rules, controller processing, trusted status and domain guarantees |
 | Frontend team | Forms, resource queries, save intent, navigation and presentation of domain outcomes |
-| Platform team | Deployment, grants, exposure configuration, availability and upgrades |
+| Platform team | Deployment, grants that match each application, availability and upgrades |
 
 Application-specific endpoints, DTO transformations, result aggregation and business plugins
 are outside krm-foyer's scope; the [vision](vision.md#staying-small) lists what stays out.
@@ -79,17 +79,16 @@ come from krm-stream, not from a reimplementation here.
 | `/auth/check` | 204 or 401 (or 302 to login on request) for an ingress gating the application's pages; never a token or identity. See the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages) |
 | `/k8s/api/...` | Proxy core Kubernetes APIs after stripping `/k8s` |
 | `/k8s/apis/...` | Proxy grouped APIs, including CRDs and aggregated APIs |
-| `/k8s/api`, `/k8s/apis`, `/k8s/version`, `/k8s/openapi/...` | Proxy explicitly permitted discovery/schema endpoints |
-| `/stream` | Serve krm-stream with configured scopes and projections |
+| `/k8s/api`, `/k8s/apis`, `/k8s/version`, `/k8s/openapi/...` | Proxy discovery and schema endpoints |
+| `/stream` | Serve krm-stream, for whatever the user may watch |
 | `/auth/whoami` | Who Kubernetes takes the user to be, from a SelfSubjectReview, plus the session's issuer and expiry. Never tokens |
-| `/_foyer/access` | What the user may do through krm-foyer: the allowlist and RBAC together. See [what may I do](#what-may-i-do) |
+| `/_foyer/access` | A page showing what the user may do, from Kubernetes' own reviews. See [what may I do](#what-may-i-do) |
 
 For example, POSTing to
 `/k8s/apis/workspaces.example.com/v1/namespaces/team-a/workspacerequests` creates a
 resource through Kubernetes (the [vision](vision.md#what-it-takes-from-the-domain) follows
 that request through its lifecycle). The response retains Kubernetes' status code and object shape.
-The route is available only when explicitly permitted by exposure policy and authorized
-by Kubernetes.
+Whether it succeeds is Kubernetes' decision alone.
 
 Preserve bodies, Kubernetes `Status` errors, content types, relevant headers and query
 parameters. Support pagination, selectors, native watches, CRUD, patch types, dry-run and
@@ -101,20 +100,21 @@ A lost response may already have committed a write.
 The service has no hardcoded resource catalogue. Its initial transport scope covers ordinary
 HTTP APIs, streaming logs and native HTTP watches. Exec, attach and port-forward require
 separate upgrade-protocol support and tests; return an explicit unsupported error until
-implemented. Service/node/pod proxy subresources require explicit opt-in. The browser
-cannot supply an arbitrary upstream URL.
+implemented. Service, node and pod proxy subresources are Kubernetes routes like any
+other: RBAC decides, and the [upstream response](#upstream-responses) rules keep what they
+return from running on the origin. The browser cannot supply an arbitrary upstream URL.
 
 ### Upstream responses
 
 Stripping request headers covers what goes up. What comes back crosses the same
 boundary, onto an origin the browser trusts, and needs rules of its own. They hold for
-every route, and must hold before any aggregated API or proxy subresource is enabled,
-since those return whatever their backend sends:
+every route, and matter most for aggregated APIs and proxy subresources, which return
+whatever their backend sends:
 
 - **Content types are allowlisted.** JSON, YAML, Kubernetes protobuf and the watch
   stream types pass; `text/plain` passes for logs. Anything else, `text/html` above all,
-  is held back unless the route opts in. A pod log or a proxied service must not be able
-  to serve a page that runs as the user on the shared origin.
+  is held back. A pod log or a proxied service must not be able to serve a page that
+  runs as the user on the shared origin.
 - **Every proxied response carries** `X-Content-Type-Options: nosniff`,
   `Content-Security-Policy: default-src 'none'; sandbox` and `Cache-Control: no-store`,
   replacing anything upstream sent. A shared cache in front of the origin must never
@@ -142,7 +142,6 @@ answer, it says so in a form the requester can read:
 | Interruption | Status | For code | For a person browsing |
 | --- | --- | --- | --- |
 | No session | 401 | `Status`, reason `Unauthorized` | A page with a **Sign in** link that returns to this URL |
-| Not on the allowlist | 403 | `Status` saying the route is not exposed | A page saying krm-foyer does not expose this route, as opposed to Kubernetes refusing it, with a link to [`/_foyer/access`](#what-may-i-do) |
 | Upstream redirect | 502 | `Status` with the target in `details` | A notice naming the full target, with a link the user can follow |
 | Upstream content held back | 502 | `Status` with the content type | A page showing the response as escaped text, truncated at a bound |
 | Session store unavailable | 503 | `Status` | A page saying so, with no retry loop |
@@ -156,7 +155,8 @@ Rules:
   not send it, so `fetch`, the helper and `kubectl`-style clients always get JSON.
 - **Answers from Kubernetes are never replaced.** A 403 from RBAC, a 404 or a 409 is the
   API server's answer and reaches the tab as its JSON. Interruptions are only what
-  krm-foyer itself decided.
+  krm-foyer itself decided. For a 403, [`/_foyer/access`](#what-may-i-do) is where a
+  person finds out why.
 - **Permission is a link, never an action.** Following a redirect is a navigation the
   user starts; nothing is re-sent, and no request with a body is ever continued. An
   upstream HTML page is never rendered on the origin, with or without consent: consent
@@ -165,63 +165,56 @@ Rules:
   a strict Content-Security-Policy, `no-store`, and nothing about configuration beyond
   what the requester is allowed to see.
 
-## Access boundaries
+## Access
 
-An operator-configured allowlist is mandatory from the first release. Empty configuration
-exposes no Kubernetes APIs or stream scopes. Explicitly configure groups, versions,
-resources, namespaces, verbs, subresources and permitted non-resource URLs. Distinguish
-get/list/watch and collection deletion. Reject non-canonical paths (encoded slashes, dot
-segments, repeated slashes) instead of normalizing them, forward exactly the path that was
-checked, and reject unknown or ambiguous scopes. Discovery does not grant access.
+**Kubernetes alone decides what a request may do.** krm-foyer adds no access rules of
+its own: whatever the user's RBAC allows is reachable through `/k8s` and `/stream`, and
+whatever it refuses is refused by the API server, with the API server's answer. There is
+no allowlist, so there is nothing to configure and no second set of rules to keep in step
+with RBAC.
 
-Query parameters are part of policy evaluation. Recognize `watch=true` on a collection
-path as watch access, not an ordinary list. Explicitly configure allowed label/field
-selectors and enforce any required scope on every request, including requests with
-`limit` and `continue`. Reject unsupported or ambiguous query combinations. Selectors
-may narrow an authorized scope; user-controlled selectors cannot establish ownership.
+The consequence has to be said plainly: **a session on krm-foyer carries the user's full
+Kubernetes access.** Any script running on the application's origin can use all of it.
+Deploy krm-foyer for users whose grants match what the application needs, and keep the
+origin to services you trust with that access. Limiting what an application may do
+beyond RBAC is a separate, deferred design: [application scope](application-scope.md).
 
-Bound page sizes, response bytes, request rates, watch duration and concurrent streams.
-Do not claim these bounds prevent export: a user allowed to list a namespace can normally
-retrieve it through repeated pages. If full enumeration is unacceptable, narrow the
-underlying readable resources or provide a restricted domain view.
+What krm-foyer still does on every request, none of it an access decision:
 
-Apply restrictions to raw APIs and streams. Kubernetes RBAC and admission remain authoritative;
-the allowlist further limits which permissions browser clients can exercise through this service.
-Never use a privileged service account as a fallback for a user's direct API request.
+- **Path hygiene.** Non-canonical paths (encoded slashes, dot segments, repeated slashes,
+  needless percent-encoding) are rejected rather than normalized, and the path forwarded
+  is byte-for-byte the path received, minus the `/k8s` prefix. Real Kubernetes clients
+  never send such paths, and a scope layer added later can rely on there being one parse.
+- **Bounds** on page size, response bytes, request rate, watch duration and concurrent
+  streams. They protect krm-foyer and the API server; they do not prevent export. A user
+  allowed to list a namespace can retrieve all of it through repeated pages.
+- **Never a privileged service account** as a fallback for a user's request.
 
 ### What may I do
 
-What a user can do through krm-foyer is what RBAC allows **and** the allowlist exposes.
-A frontend can ask Kubernetes the first half itself, with a native
-SelfSubjectAccessReview, but that answer is the larger set: it would offer actions on
-routes krm-foyer never exposes. Only krm-foyer knows both halves, so it answers the
-question:
+Kubernetes already answers this question, and code should ask it there: a
+SelfSubjectAccessReview through `/k8s` says whether the user may do one thing, and a
+SelfSubjectRulesReview lists what they may do in a namespace. Without a scope layer,
+those native answers are exactly what requests through krm-foyer will get.
 
-- **`/_foyer/access?namespace=team-a`** lists every allowlisted resource with its
-  verbs, and marks each cell **allowed**, **refused by Kubernetes** or **not exposed by
-  krm-foyer**. Those are the two different 403s a frontend has to tell apart.
-- **Each cell is one SelfSubjectAccessReview, sent with the user's own token,** so the
-  answer comes from whatever authorizers the cluster runs and is audited as the user.
-  Not SelfSubjectRulesReview: Kubernetes documents it as possibly incomplete, webhook
-  authorizers often do not support it, and it lists rules for routes that are not exposed.
-- **Namespaces** come from the allowlist when it names them, and from the `namespace`
-  parameter when it allows a pattern. Object names are out of scope: a frontend that
-  needs name-level answers makes the request and handles the 403.
-- **The same URL serves people and code,** under the [interruption](#interruptions)
-  rule: a navigation gets the page, `fetch` gets JSON with the same content.
-- **It is a hint, with a timestamp.** Frontends use it to hide what will be refused, not
-  to protect anything; every request is still decided when it is made. krm-foyer never
-  uses it for its own decisions and caches nothing between requests.
-- **Signed-in users only, about themselves.** It shows the allowlist to signed-in users,
-  which their frontend's requests reveal anyway; anonymous visitors get the 401
-  interruption. One page view costs one review per allowlisted resource and verb, run
-  concurrently, capped and rate-limited per session.
-- **It shows no objects and changes nothing.** A list of routes with their verbs, not a
-  resource browser.
+For a person with a browser tab, krm-foyer adds one page, `/_foyer/access`:
 
-**Review exposure before enabling a route.** An existing application may enforce rules that
-its users' Kubernetes grants do not express. A generic route can bypass those rules as soon
-as it is available, even if the frontend still calls the old endpoint. Likewise, existing
+- **The rules for a namespace,** from a SelfSubjectRulesReview sent with the user's own
+  token, as a table of resources and verbs. When Kubernetes marks the answer incomplete,
+  which it does for authorizers that cannot list rules, the page says so in plain words.
+- **A "can I?" form** (verb, resource, namespace, optionally a name) answered by a
+  SelfSubjectAccessReview, which is authoritative for every authorizer. The form is a
+  `GET`; asking changes nothing.
+- **A page only.** Code uses the native reviews above; a second JSON shape for the same
+  answer would only be something to keep in step.
+- **Signed-in users only, about themselves.** Anonymous visitors get the 401
+  [interruption](#interruptions). Reviews are audited as the user, and rate-limited per
+  session.
+- **It shows no objects and changes nothing.** Rules and answers, not a resource browser.
+
+**Review grants before deploying.** An existing application may enforce rules that its
+users' Kubernetes grants do not express. Once krm-foyer serves those users, every grant
+they hold is reachable from the browser, even if the frontend still calls the old endpoint. Likewise, existing
 list/watch grants may reveal records that an application previously returned only as aggregates.
 Audit effective grants and deploy required admission/read boundaries before enabling access.
 
@@ -286,8 +279,10 @@ not undo writes Kubernetes already accepted.
 
 ## Streams and editing
 
-krm-foyer supplies krm-stream's principal resolution, authorization, backend selection and
-scope configuration. Start with user-authenticated watches. Optional shared watches use a
+krm-foyer supplies krm-stream's principal resolution, authorization and backend
+selection. What a user may watch is what RBAC lets them watch. Which resources use a
+shared watch is configuration for efficiency, not for access. Start with
+user-authenticated watches. Optional shared watches use a
 narrowly scoped service account, Kubernetes-resolved identities and per-subscriber
 SubjectAccessReview checks. Bound reauthorization and session expiry; logout closes that
 session's streams without disrupting others. Measure authorization load as well as watch
@@ -318,11 +313,11 @@ of partial success.
 | Authentication | Callback failure, expiry, refresh, restart and logout tests across replicas |
 | Session lifecycle | Every bound in [session lifecycle](#session-lifecycle) measured by a test, including logout racing refresh, store outage and streams open at logout |
 | Credential custody | No token krm-foyer holds, including refreshed ones, and no session ID in any response, log line or error page the suite collects |
-| Exposure | Empty policy denies access; paths, selectors, watch queries, pagination, alternate versions and subresources cannot bypass restrictions |
+| Access | Every answer through krm-foyer equals the API server's answer for the same token; non-canonical paths are rejected; nothing falls back to the service account |
 | Proxy semantics | Kubernetes errors and patch types preserved; conflicting writes and ambiguous create outcomes handled without automatic replay |
 | Upstream responses | An upstream that sends HTML, `Set-Cookie`, CORS headers, cache headers or a redirect has none of them reach the browser unasked |
 | Interruptions | Each interruption gives the same status to code and to a navigation; scripts cannot obtain the page form; no Kubernetes answer is ever replaced |
-| What may I do | `/_foyer/access` matches what requests through krm-foyer actually get, cell for cell, for allowed, refused and unexposed routes, and follows a RoleBinding change without a new login |
+| What may I do | `/_foyer/access` agrees with what requests actually get, and follows a RoleBinding change without a new login |
 | Streams | Cancellation, recovery, expiry, subscriber isolation and measured load under declared capacity targets |
 | Editing | Conditional saves and guarded reconciliation preserve newer state and drafts |
 | Example domain | Pending, accepted, rejected and failed processing demonstrated; protected status and restart/duplicate tests prove its declared guarantees |
@@ -334,6 +329,8 @@ versioned image and documented supported protocols.
 
 ## Related decisions
 
+- [Application scope](application-scope.md): why a browser application might be limited
+  beyond RBAC, and why krm-foyer starts without it.
 - [Ingress and TLS](ingress.md): both TLS models, sharing one domain, the login gate,
   and why an ingress never makes the access decision.
 - [Pages](frontend.md): which pages krm-foyer serves itself.
