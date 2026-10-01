@@ -73,10 +73,12 @@ The suite lives in [test/e2e](../test/e2e) behind the `e2e` build tag. It uses G
 and Gomega, like gitops-reverser's suite. It has two parts:
 
 - **The fixture's API server** (label `fixture`) involves no krm-foyer code. It shows that
-  the fixture tells the truth: a Dex user is identified by their verified email, RBAC
-  alone decides and follows grant changes, tokens for another client or with an altered
-  payload are rejected, and the audit log names the user. If these fail, nothing else
-  in the suite means anything.
+  the fixture tells the truth: a Dex user is identified by their email, and only when the
+  issuer says that email is verified (`email_verified` absent, `false` or a string is
+  refused); RBAC alone decides and follows grant changes; tokens for another client, or
+  with claims rewritten after signing, are rejected; and the audit log names the user.
+  Every refusal has a matching acceptance next to it, so a 401 cannot pass for the wrong
+  reason. If these fail, nothing else in the suite means anything.
 - **krm-foyer** (label `foyer`) is the list of claims, written as pending specs. Each one
   becomes a real spec in the change that implements it. `task test-e2e -- -v -ginkgo.v`
   lists them.
@@ -90,17 +92,23 @@ flowchart LR
     T -.->|session cookie, later| F[krm-foyer pod]
     F -.->|user's token| K
     K -->|discovery and keys| D
+    K -->|discovery and keys| I[Test issuer<br/>issuer.krm-foyer.test:8443]
     K --> A[(audit.log)]
     T -->|docker exec| A
 ```
 
 [start-cluster.sh](../test/e2e/cluster/start-cluster.sh) creates a Docker network,
-starts Dex at a fixed address on it, and creates a single-node k3d cluster on the same
-network. The API server trusts Dex through an
-[AuthenticationConfiguration](../test/e2e/cluster/authentication-config.yaml) and
-records requests with an [audit policy](../test/e2e/cluster/audit-policy.yaml). No port
-is published. The devcontainer joins the network, and a CI runner is the Docker host,
-so both reach it the same way.
+starts Dex and a test issuer at fixed addresses on it, and creates a single-node k3d
+cluster on the same network. The API server trusts both issuers through an
+[AuthenticationConfiguration](../test/e2e/cluster/authentication-config.yaml), under the
+same rules, and records requests with an [audit policy](../test/e2e/cluster/audit-policy.yaml).
+The devcontainer joins the network, and a CI runner is the Docker host, so both reach it
+the same way. k3d always publishes the API server's port; it is bound to loopback, and
+the script fails if anything in the fixture is published on another interface.
+
+The test issuer is nginx serving a discovery document and a JWKS. The suite holds its
+signing key (`.e2e/issuer-signing.key`), so it can mint tokens with claims Dex never
+issues. Use it for claims; use Dex for anything a real login would do.
 
 Dex has two static users, `alice@example.com` and `bob@example.com` (password
 `password`), which Kubernetes sees as `oidc:alice@example.com` and

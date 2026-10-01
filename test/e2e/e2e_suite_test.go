@@ -33,6 +33,14 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 			[]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`)).Code
 	}).WithContext(ctx).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).
 		Should(Equal(http.StatusCreated))
+
+	By("waiting until the API server accepts a token from the test issuer")
+	minted := fx.mint(map[string]any{"email": "carol@example.com", "email_verified": true})
+	Eventually(func() int {
+		code, _ := fx.selfSubjectReview(ctx, minted)
+		return code
+	}).WithContext(ctx).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).
+		Should(Equal(http.StatusCreated))
 }, NodeTimeout(3*time.Minute))
 
 // eventually polls for things the API server records asynchronously, like audit events.
