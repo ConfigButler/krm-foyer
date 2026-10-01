@@ -39,9 +39,10 @@ tasks:
       - go test -run '^$' -fuzz '^FuzzLocalPath$' -fuzztime 10s ./internal/auth/
 
   test-e2e:
-    desc: "End-to-end suite against a real API server and a real Dex. Brings the fixture up if needed."
-    deps: [e2e-up]
+    desc: "End-to-end suite against a real API server, a real Dex and krm-foyer in the cluster. Brings the fixture up if needed."
     cmds:
+      - task: e2e-up
+      - task: e2e-deploy
       # The suite is behind a build tag so `task test` stays fast. Pending specs are the
       # krm-foyer claims not implemented yet; they are listed, not failed.
       - go test -tags e2e -count=1 -timeout 15m ./test/e2e/ {{.CLI_ARGS}}
@@ -50,6 +51,12 @@ tasks:
     desc: "Start (or reuse) the e2e fixture: k3d, Dex, and an API server that trusts it."
     cmds:
       - test/e2e/cluster/start-cluster.sh
+
+  e2e-deploy:
+    desc: "Build the image and deploy krm-foyer into the e2e fixture, as cluster-admin bait."
+    deps: [image]
+    cmds:
+      - IMAGE={{.IMAGE}}:{{.VERSION}} test/e2e/cluster/deploy-foyer.sh
 
   e2e-down:
     desc: "Delete the e2e fixture and its generated certificates."

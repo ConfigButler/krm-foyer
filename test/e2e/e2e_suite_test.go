@@ -41,6 +41,26 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 		return code
 	}).WithContext(ctx).WithTimeout(90 * time.Second).WithPolling(2 * time.Second).
 		Should(Equal(http.StatusCreated))
+
+	By("checking the bait: krm-foyer's service account is cluster-admin, and its token is in the pod")
+	// The no-fallback specs rely on a fallback being loud. If the bait were missing, a
+	// fallback would be a quiet 403, and those specs would pass for the wrong reason.
+	Expect(fx.kubectl("auth", "can-i", "*", "*", "--as="+fx.foyerAccount)).To(Equal("yes"))
+	Expect(fx.kubectl("-n", fx.foyerNamespace, "get", "pods", "-l", "app=krm-foyer", "-o",
+		"jsonpath={.items[*].spec.containers[0].volumeMounts[*].mountPath}")).
+		To(ContainSubstring("/var/run/secrets/kubernetes.io/serviceaccount"))
+
+	By("waiting until krm-foyer answers")
+	Eventually(func() int {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fx.foyerURL+"/readyz", nil)
+		Expect(err).NotTo(HaveOccurred())
+		resp, err := fx.client.Do(req)
+		if err != nil {
+			return 0
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}).WithContext(ctx).WithTimeout(60 * time.Second).WithPolling(time.Second).Should(Equal(http.StatusOK))
 }, NodeTimeout(3*time.Minute))
 
 // eventually polls for things the API server records asynchronously, like audit events.

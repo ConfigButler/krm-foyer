@@ -191,6 +191,10 @@ jobs:
       - name: API server log on failure
         if: failure()
         run: docker logs k3d-krm-foyer-e2e-server-0 2>&1 | tail -200
+      # The node image has kubectl, so nothing is installed on the runner.
+      - name: krm-foyer log on failure
+        if: failure()
+        run: docker exec k3d-krm-foyer-e2e-server-0 kubectl -n krm-foyer logs deployment/krm-foyer --tail=200 || true
 
   devcontainer:
     name: Validate Dev Container
