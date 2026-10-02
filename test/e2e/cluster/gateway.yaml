@@ -1,0 +1,88 @@
+# The front door, in Gateway API: one origin, https://foyer.localhost:8443, with the
+# hello example at / and krm-foyer's prefixes sent to krm-foyer. Traefik implements it
+# (install-traefik.sh); a browser reaches Traefik through kubectl port-forward
+# (port-forward.sh). This is the HTTPRoute recipe of docs/ingress.md, made real.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: front-door
+  namespace: fixture
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: https
+      protocol: HTTPS
+      # Traefik's websecure entrypoint (traefik-values.yaml).
+      port: 8443
+      hostname: foyer.localhost
+      tls:
+        mode: Terminate
+        certificateRefs:
+          # The same certificate as krm-foyer: one public name.
+          - name: front-door-tls
+      # Only the application's and krm-foyer's own routes may attach. Everything on this
+      # origin acts as the signed-in user, so no other namespace gets a path on it.
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [fixture, krm-foyer]
+---
+# The application: static files, everything krm-foyer does not claim.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: hello
+  namespace: fixture
+spec:
+  parentRefs:
+    - name: front-door
+  hostnames: [foyer.localhost]
+  rules:
+    - backendRefs:
+        - name: hello-web
+          port: 8080
+---
+# krm-foyer's prefixes. PathPrefix matches whole path segments: /k8s and /k8s/api, never
+# /k8sfoo.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: krm-foyer
+  namespace: krm-foyer
+spec:
+  parentRefs:
+    - name: front-door
+      namespace: fixture
+  hostnames: [foyer.localhost]
+  rules:
+    - matches:
+        - path: {type: PathPrefix, value: /auth}
+        - path: {type: PathPrefix, value: /k8s}
+        - path: {type: PathPrefix, value: /stream}
+        - path: {type: PathPrefix, value: /_foyer}
+      backendRefs:
+        - name: krm-foyer
+          port: 443
+---
+# Traefik to krm-foyer is TLS too, verified: the session cookie and the user's requests
+# cross it. The CA is the fixture's, from the ConfigMap deploy-foyer.sh creates.
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: krm-foyer
+  namespace: krm-foyer
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: krm-foyer
+  validation:
+    hostname: foyer.localhost
+    caCertificateRefs:
+      - group: ""
+        kind: ConfigMap
+        name: krm-foyer-issuer-ca

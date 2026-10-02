@@ -1,0 +1,74 @@
+# The hello example's files: nginx as a plain file server, in the fixture namespace.
+# front-door.sh fills in the image and the configuration hash, and creates the
+# ConfigMaps. The Gateway routes / here (gateway.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-web
+  namespace: fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hello-web
+  template:
+    metadata:
+      labels:
+        app: hello-web
+      annotations:
+        krm-foyer.test/config-hash: CONFIG_HASH
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: NGINX_IMAGE
+          command: [nginx, -c, /etc/hello-web/config/nginx.conf, -g, "daemon off;"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/hello-web/config
+              readOnly: true
+            - name: files
+              mountPath: /etc/hello-web/files
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: hello-web-config
+        - name: files
+          configMap:
+            name: hello-web
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-web
+  namespace: fixture
+spec:
+  selector:
+    app: hello-web
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

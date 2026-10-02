@@ -54,9 +54,9 @@ An ingress in front of krm-foyer has to stay transparent:
   origin, and long-lived watches use them up. Both models give the browser HTTP/2 once
   TLS is in place.
 
-The e2e fixture runs krm-foyer with its own TLS, because that is the default. The
-ingress model gets one e2e spec with an nginx container in front of krm-foyer. That spec
-checks two things: a spoofed `Host` or `X-Forwarded-Host` changes neither the redirect
+The e2e fixture runs krm-foyer with its own TLS, because that is the default, and its
+browser specs already reach krm-foyer through a gateway (Traefik, re-encrypting). The
+ingress model gets one more e2e spec through that gateway. It checks two things: a spoofed `Host` or `X-Forwarded-Host` changes neither the redirect
 URI nor the CSRF origin, and watch events arrive without delay.
 
 ## Decision (2026-10-01): sharing one domain with other services
@@ -97,8 +97,10 @@ spec:
 
 During development, the frontend's dev server plays the ingress's role: Vite's
 `server.proxy`, for example, sends the four prefixes to a krm-foyer on a local cluster,
-so the browser still sees one origin. The e2e fixture and the examples use a small nginx
-container the same way.
+so the browser still sees one origin. The e2e fixture runs this recipe for real:
+[gateway.yaml](../test/e2e/cluster/gateway.yaml) is a Gateway, an `HTTPRoute` per
+namespace and a `BackendTLSPolicy` that makes the gateway verify krm-foyer's certificate,
+implemented by Traefik.
 
 Sending everything through krm-foyer would be wrong for several reasons:
 

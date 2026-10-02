@@ -48,9 +48,10 @@ tasks:
       - go test -tags e2e -count=1 -timeout 15m ./test/e2e/ {{.CLI_ARGS}}
 
   e2e-up:
-    desc: "Start (or reuse) the e2e fixture: k3d, Dex, and an API server that trusts it."
+    desc: "Start (or reuse) the e2e fixture: k3d, Dex, an API server that trusts it, and Traefik as the Gateway."
     cmds:
       - test/e2e/cluster/start-cluster.sh
+      - test/e2e/cluster/install-traefik.sh
 
   e2e-deploy:
     desc: "Build the image, deploy krm-foyer into the e2e fixture (as cluster-admin bait), and put the hello example in front of it."

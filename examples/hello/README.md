@@ -24,10 +24,10 @@ the page in two tabs, save in one, then save in the other.
 
 ## How it fits together
 
-The application and krm-foyer share one origin. A front door (nginx, in the e2e fixture:
-[front-door-nginx.conf](../../test/e2e/cluster/front-door-nginx.conf)) serves these files
-at `/` and sends `/auth/`, `/k8s`, `/stream` and `/_foyer/` to krm-foyer. Any ingress that
-routes by path can do the same.
+The application and krm-foyer share one origin. In the e2e fixture, a Gateway
+([gateway.yaml](../../test/e2e/cluster/gateway.yaml), implemented by Traefik) sends `/` to
+a file server for these files and `/auth`, `/k8s`, `/stream` and `/_foyer` to krm-foyer.
+Any ingress or gateway that routes by path can do the same.
 
 `app.js` imports krm-foyer's helper from `/_foyer/foyer.js`:
 
@@ -52,7 +52,8 @@ answered. Things to keep when you copy this:
 - **Send the object back with the `resourceVersion` you read.** Then a change made in
   the meantime is a 409 instead of being overwritten.
 - **Serve the page with a strict Content-Security-Policy** that allows scripts from your
-  own origin only, as the front door does.
+  own origin only, as the fixture's file server does
+  ([hello-web-nginx.conf](../../test/e2e/cluster/hello-web-nginx.conf)).
 
 `?namespace=other` points the page at another namespace; the browser specs use that to
 work in a namespace of their own.

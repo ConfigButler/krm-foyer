@@ -43,13 +43,18 @@ RUN apt-get update \
 #   behaves like the one the stream gateway is tested against.
 # ACTIONLINT_VERSION    -> https://github.com/rhysd/actionlint/releases
 # HADOLINT_VERSION      -> https://github.com/hadolint/hadolint/releases
+# HELM_VERSION / HELM_SHA256 -> https://github.com/helm/helm/releases; the checksum is
+#   get.helm.sh/helm-<version>-linux-amd64.tar.gz.sha256sum. The e2e fixture installs
+#   Traefik with it.
 ENV PATH="/go/bin:/usr/local/go/bin:${PATH}" \
     GOLANGCI_LINT_VERSION=v2.13.2 \
     TASK_VERSION=v3.53.1 \
     KUBECTL_VERSION=v1.37.0 \
     K3D_VERSION=v5.9.0 \
     ACTIONLINT_VERSION=1.7.12 \
-    HADOLINT_VERSION=2.15.1
+    HADOLINT_VERSION=2.15.1 \
+    HELM_VERSION=v4.3.0 \
+    HELM_SHA256=86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb
 
 RUN test "$(dpkg --print-architecture)" = "amd64" \
     || (echo "This devcontainer currently supports amd64 only." && exit 1)
@@ -69,6 +74,13 @@ RUN curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONL
     | tar -xzO actionlint > /usr/local/bin/actionlint \
     && chmod +x /usr/local/bin/actionlint \
     && actionlint --version
+
+RUN curl -fsSL -o /tmp/helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+    && echo "${HELM_SHA256}  /tmp/helm.tar.gz" | sha256sum -c - \
+    && tar -xzO -f /tmp/helm.tar.gz linux-amd64/helm > /usr/local/bin/helm \
+    && chmod +x /usr/local/bin/helm \
+    && rm /tmp/helm.tar.gz \
+    && helm version --short
 
 RUN curl -fsSL -o /usr/local/bin/hadolint "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64" \
     && chmod +x /usr/local/bin/hadolint \

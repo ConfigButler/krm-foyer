@@ -165,7 +165,8 @@ flowchart LR
       K[k3s API server]
       D[Dex<br/>dex.localhost:5556]
       I[Test issuer<br/>issuer.krm-foyer.test:8443]
-      FD[Front door<br/>nginx]
+      FD[Front door<br/>Traefik: Gateway, HTTPRoutes]
+      W[hello-web<br/>nginx, files only]
       F[krm-foyer<br/>foyer.localhost:8443]
       A[(audit.log)]
     end
@@ -176,7 +177,8 @@ flowchart LR
     T -->|DevTools| B
     T -->|bearer token, directly| K
     T -->|session cookie, NodePort| F
-    FD -->|/auth/, /k8s, /_foyer/| F
+    FD -->|/| W
+    FD -->|/auth, /k8s, /_foyer, TLS verified| F
     F -->|user's token| K
     F -->|discovery and code exchange| D
     K -->|discovery and keys| D
@@ -212,17 +214,25 @@ address on the Docker network: the `foyer` specs test krm-foyer, not the front d
 service account is cluster-admin and its token is mounted, as bait; the suite checks both
 before it starts.
 
+The front door is Gateway API, implemented by Traefik: the official chart, at the version
+gitops-reverser's e2e uses. k3s's own Traefik is disabled, so k3s stays minimal, and
+[install-traefik.sh](../test/e2e/cluster/install-traefik.sh) installs Traefik with Helm
+and [traefik-values.yaml](../test/e2e/cluster/traefik-values.yaml) (`task e2e-up` runs
+it). The chart brings the Gateway API CRDs.
+
 [front-door.sh](../test/e2e/cluster/front-door.sh) applies the hello example's
-[resources](../examples/hello/manifests.yaml) and deploys the front door
-([front-door.yaml](../test/e2e/cluster/front-door.yaml)): nginx that serves
-`examples/hello/web` at `/` and sends `/auth/`, `/k8s`, `/stream` and `/_foyer/` to
-krm-foyer's Service ([config](../test/e2e/cluster/front-door-nginx.conf)). Then
-[port-forward.sh](../test/e2e/cluster/port-forward.sh) forwards the front door to
+[resources](../examples/hello/manifests.yaml), deploys a file server for its pages
+([hello-web.yaml](../test/e2e/cluster/hello-web.yaml): nginx, files only), and applies
+[gateway.yaml](../test/e2e/cluster/gateway.yaml): a Gateway for `foyer.localhost`, an
+`HTTPRoute` sending `/` to the file server, one sending `/auth`, `/k8s`, `/stream` and
+`/_foyer` to krm-foyer, and a `BackendTLSPolicy` under which Traefik verifies
+krm-foyer's certificate (with a wrong hostname in it, every request fails). Then
+[port-forward.sh](../test/e2e/cluster/port-forward.sh) forwards Traefik to
 `127.0.0.1:8443` and Dex to `127.0.0.1:5556` in this container, detached, and checks both
 by their public names. Browsers resolve `foyer.localhost` and `dex.localhost` to loopback,
 and VS Code forwards both ports to the machine the browser runs on, keeping their numbers
 (`devcontainer.json`), so `https://foyer.localhost:8443` works with no hosts-file entry,
-wherever Docker runs. A port-forward follows one pod: when Dex or the front door rolls,
+wherever Docker runs. A port-forward follows one pod: when Dex or Traefik rolls,
 run `test/e2e/cluster/port-forward.sh` (or `task e2e-deploy`) again.
 
 The test issuer is nginx serving a discovery document and a JWKS. The suite holds its
@@ -235,7 +245,7 @@ Dex has two static users, `alice@example.com` and `bob@example.com` (password
 accepts, and `other-app`, whose tokens it must reject.
 
 ```bash
-task e2e-up     # start or reuse the fixture (about 25 seconds the first time)
+task e2e-up     # start or reuse the fixture, with Traefik (about a minute the first time)
 task e2e-deploy # build the image, deploy krm-foyer and the front door, and port-forward
 task demo       # e2e-up and e2e-deploy, then how to sign in from your browser
 task test-e2e   # run the suite; brings the fixture up and deploys krm-foyer first
