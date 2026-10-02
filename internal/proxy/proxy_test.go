@@ -25,13 +25,19 @@ const userToken = "user-token-4f1c9a" //nolint:gosec // a marker to search for, 
 
 // credentials is the test's session: it hands the proxy a fixed answer. It exists
 // only in this test file; the binary has no way to be given a token but a session.
+// Its session stays live unless live says otherwise.
 type credentials struct {
 	token   string
 	refused *interruption.Interruption
+	live    func(context.Context) bool
 }
 
-func (c credentials) Token(*http.Request) (string, *interruption.Interruption) {
-	return c.token, c.refused
+func (c credentials) Token(*http.Request) (Credential, *interruption.Interruption) {
+	live := c.live
+	if live == nil {
+		live = func(context.Context) bool { return true }
+	}
+	return Credential{Token: c.token, Live: live}, c.refused
 }
 
 // apiServer stands in for the API server and records what reached it.
@@ -87,12 +93,29 @@ func assertProtocol(t *testing.T, api *apiServer, http2 bool) {
 
 type foyer struct {
 	url  string
-	logs *bytes.Buffer
+	logs *lockedWriter
+	// client reaches the front, over HTTP/2 when it serves that.
+	client http.RoundTripper
 }
 
 // newFoyer serves a proxy to api with the given credentials, on a real listener so
 // that request targets arrive as bytes on the wire.
 func newFoyer(t *testing.T, api *apiServer, creds Credentials) foyer {
+	t.Helper()
+	return newFoyerWith(t, api, creds, frontOptions{})
+}
+
+// frontOptions change how newFoyerWith serves the proxy.
+type frontOptions struct {
+	// config adjusts the proxy's configuration.
+	config func(*Config)
+	// http2 serves browsers over TLS with HTTP/2, as krm-foyer does in production.
+	http2 bool
+	// wrap wraps the proxy's handler, to see when it returns.
+	wrap func(http.Handler) http.Handler
+}
+
+func newFoyerWith(t *testing.T, api *apiServer, creds Credentials, o frontOptions) foyer {
 	t.Helper()
 	server, err := url.Parse(api.URL)
 	if err != nil {
@@ -100,28 +123,51 @@ func newFoyer(t *testing.T, api *apiServer, creds Credentials) foyer {
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(api.Certificate())
-	logs := &bytes.Buffer{}
-	p, err := New(Config{
+	logs := &lockedWriter{}
+	cfg := Config{
 		Server: server, RootCAs: roots, Credentials: creds,
-		Logger: slog.New(slog.NewJSONHandler(&lockedWriter{w: logs}, nil)),
-	})
+		Logger: slog.New(slog.NewJSONHandler(logs, nil)),
+	}
+	if o.config != nil {
+		o.config(&cfg)
+	}
+	p, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	front := httptest.NewServer(p)
+	var h http.Handler = p
+	if o.wrap != nil {
+		h = o.wrap(p)
+	}
+	if !o.http2 {
+		front := httptest.NewServer(h)
+		t.Cleanup(front.Close)
+		return foyer{url: front.URL, logs: logs, client: http.DefaultTransport}
+	}
+	front := httptest.NewUnstartedServer(h)
+	front.EnableHTTP2 = true
+	front.StartTLS()
 	t.Cleanup(front.Close)
-	return foyer{url: front.URL, logs: logs}
+	return foyer{url: front.URL, logs: logs, client: front.Client().Transport}
 }
 
+// lockedWriter keeps what the proxy logs, for a test to read while the proxy may
+// still be writing.
 type lockedWriter struct {
 	mu sync.Mutex
-	w  io.Writer
+	b  bytes.Buffer
 }
 
 func (l *lockedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.w.Write(p)
+	return l.b.Write(p)
+}
+
+func (l *lockedWriter) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 // answer is a response from krm-foyer, read to the end.

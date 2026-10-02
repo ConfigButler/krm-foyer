@@ -47,7 +47,8 @@ func TestParseConfigWithLogin(t *testing.T) {
 	l := cfg.login
 	if l == nil || l.auth.ClientSecret != "s3cret" || l.kubernetes.Server.Host != "kubernetes.default.svc" ||
 		strings.Join(l.auth.Scopes, " ") != "openid email groups" || l.sessions.Origin != "https://foyer.example.test" ||
-		l.sessions.IdleTimeout != time.Hour || l.sessions.AbsoluteTimeout != 8*time.Hour {
+		l.sessions.IdleTimeout != time.Hour || l.sessions.AbsoluteTimeout != 8*time.Hour ||
+		l.kubernetes.SessionCheckInterval != 5*time.Second {
 		t.Fatalf("%+v", l)
 	}
 }
@@ -82,6 +83,7 @@ func TestParseConfigRefuses(t *testing.T) {
 		"CA without login":    {[]string{"-kubernetes-ca-file", "/ca"}, nil, "sign-in flags"},
 		"CA not PEM":          {append(loginArgs, "-kubernetes-ca-file", "/ca"), map[string]string{"/secret": "s", "/ca": "nope"}, "no PEM"},
 		"stray argument":      {[]string{"serve"}, nil, "unexpected"},
+		"no session checks":   {append(loginArgs, "-session-check-interval", "0s"), secret, "-session-check-interval"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := parseConfig(tc.args, files(tc.files), io.Discard)

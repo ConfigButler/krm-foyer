@@ -20,7 +20,14 @@ import (
 type Metrics struct {
 	registry      *prometheus.Registry
 	interruptions *prometheus.CounterVec
+	cutShort      *prometheus.CounterVec
 }
+
+// The causes of krm_foyer_responses_cut_short_total: why krm-foyer cut a response
+// short.
+const (
+	CauseSessionEnded = "session_ended"
+)
 
 // New returns metrics on a registry of their own, with the Go runtime's and the
 // process's beside them.
@@ -31,12 +38,22 @@ func New() *Metrics {
 			Name: "krm_foyer_interruptions_total",
 			Help: "Answers krm-foyer gave instead of the API server's, by the reason in the Krm-Foyer-Interruption header.",
 		}, []string{"reason"}),
+		cutShort: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "krm_foyer_responses_cut_short_total",
+			Help: "Responses krm-foyer cut short, by why: aborted towards the browser and cancelled at the API server.",
+		}, []string{"cause"}),
 	}
 	m.registry.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.interruptions,
+		m.cutShort,
 	)
+	// Every cause is there from the start, so a dashboard shows a zero rather than
+	// no data.
+	for _, cause := range []string{CauseSessionEnded} {
+		m.cutShort.WithLabelValues(cause)
+	}
 	return m
 }
 
@@ -51,4 +68,12 @@ func (m *Metrics) Interruption(reason string) {
 		return
 	}
 	m.interruptions.WithLabelValues(reason).Inc()
+}
+
+// CutShort counts one response krm-foyer cut short, and why.
+func (m *Metrics) CutShort(cause string) {
+	if m == nil {
+		return
+	}
+	m.cutShort.WithLabelValues(cause).Inc()
 }

@@ -29,7 +29,15 @@ type user struct {
 }
 
 func signIn(ctx context.Context, email string) user {
-	b := fx.browser()
+	return signInWith(ctx, fx.browser(), email)
+}
+
+// signInBrief signs in to the brief krm-foyer, whose sessions end within a minute.
+func signInBrief(ctx context.Context, email string) user {
+	return signInWith(ctx, fx.briefBrowser(), email)
+}
+
+func signInWith(ctx context.Context, b *browser, email string) user {
 	csrf := b.signedIn(ctx, email)
 	return user{name: email, b: b, csrf: csrf, token: fx.login(ctx, email, foyerClient, foyerSecret), k8sName: "oidc:" + email}
 }

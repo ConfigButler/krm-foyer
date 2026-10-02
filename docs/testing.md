@@ -94,7 +94,14 @@ bugs are here, where they are cheap to find:
   that is recording activity, and a store failure never read as "no session". Expiry
   runs against a store that never expires anything as well, so the session code decides
   on its own. Every way of presenting other than exactly one well-formed cookie is no
-  session.
+  session. Checking whether a session is still live, as an open response does, never
+  counts as use.
+- **Open responses end with their session** ([internal/proxy](../internal/proxy)), over
+  every pair of HTTP/1.1 and HTTP/2 towards the browser and towards the API server: when
+  the session ends, the browser's response is aborted, never ended cleanly, and the
+  request to the API server is cancelled. So is a response whose session ends before
+  the API server answers, one whose session check hangs, and one whose browser has
+  stopped reading; a live session's response is never touched.
 - **Login** ([internal/auth](../internal/auth)) runs against a fake issuer in the test
   that behaves like a strict one (PKCE enforced, codes single use) unless told to
   misbehave: a token for another audience or issuer, expired, signed by a stranger, with
@@ -141,7 +148,13 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   the service account's token sent instead of the user's, an unchecked `state`. The
   impersonation spec first passed for the wrong reason (alice could not impersonate
   anyone, so a forwarded header was refused anyway); it now grants alice the right to
-  impersonate bob, so a forwarded header would turn its 403 into a 200.
+  impersonate bob, so a forwarded header would turn its 403 into a 200. The session
+  lifecycle specs failed against a build whose session check always says live.
+- **Bounds and the session lifecycle** (in the `foyer` label) read krm-foyer's metrics
+  through the API server's service proxy, as admin. A native watch through `/k8s` is
+  aborted when its session logs out and when it expires, and the audit log shows the API
+  server completed it within a minute although it asked for `timeoutSeconds=600`: the
+  cancellation reached the API server.
 - **The hello example** (label `browser`) is the claim that krm-foyer is usable, not
   only correct. Chromium ([chromedp/headless-shell](https://hub.docker.com/r/chromedp/headless-shell),
   pinned by digest, driven from Go with chromedp) runs in the network namespace of the
@@ -213,6 +226,11 @@ server at `kubernetes.default.svc`. The suite reaches it through a NodePort on t
 address on the Docker network: the `foyer` specs test krm-foyer, not the front door. Its
 service account is cluster-admin and its token is mounted, as bait; the suite checks both
 before it starts.
+
+Beside it runs a second, brief krm-foyer ([foyer-brief.yaml](../test/e2e/cluster/foyer-brief.yaml)):
+the same image, certificate, public URL and Dex client, but sessions that end 45
+seconds after login and a session check every second. The specs that wait for a session
+to expire use it, on a NodePort of its own, so no other spec has to race its session.
 
 The front door is Gateway API, implemented by Traefik: the official chart, at the version
 gitops-reverser's e2e uses. k3s's own Traefik is disabled, so k3s stays minimal, and

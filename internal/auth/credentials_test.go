@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -145,5 +146,44 @@ func TestRefusal(t *testing.T) {
 	}
 	if logs := h.logs.String(); !strings.Contains(logs, "connection refused") {
 		t.Errorf("a store failure was not logged:\n%s", logs)
+	}
+}
+
+// Live follows the session the credential came from: true while it lasts, false
+// after logout, and false whenever it cannot be told, because the store failed or
+// the check ran out of time.
+func TestLiveFollowsTheSession(t *testing.T) {
+	h := newHarness(t)
+	b := h.browser()
+	b.login(alice, "/")
+	_, s := b.session()
+	cred, refused := h.auth.Token(cookieRequest(b))
+	if refused != nil || cred.Token == "" || cred.Live == nil {
+		t.Fatalf("Token = %+v, %v", cred, refused)
+	}
+	if !cred.Live(t.Context()) {
+		t.Fatal("a live session's credential is not live")
+	}
+
+	h.store.down.Store(true)
+	if cred.Live(t.Context()) {
+		t.Error("live while the store is down")
+	}
+	h.store.down.Store(false)
+	if !strings.Contains(h.logs.String(), "session check") {
+		t.Errorf("a failed session check was not logged:\n%s", h.logs.String())
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if cred.Live(ctx) {
+		t.Error("live after the check ran out of time")
+	}
+
+	if resp := b.do(http.MethodPost, "/auth/logout", http.Header{"Origin": {h.foyer.URL}, session.CSRFHeader: {s.CSRFToken}}); resp.code != http.StatusNoContent {
+		t.Fatalf("logout: %d", resp.code)
+	}
+	if cred.Live(t.Context()) {
+		t.Error("live after logout")
 	}
 }

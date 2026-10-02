@@ -25,6 +25,8 @@ import (
 type browser struct {
 	jar    *cookiejar.Jar
 	client *http.Client
+	// transport is the client's, without the recorder, for responses that stream.
+	transport http.RoundTripper
 }
 
 // seenResponse is one response krm-foyer sent the suite.
@@ -34,12 +36,17 @@ type seenResponse struct {
 	body   []byte
 }
 
-func (f *fixture) browser() *browser {
+func (f *fixture) browser() *browser { return f.browserVia(f.client.Transport) }
+
+// briefBrowser reaches the brief krm-foyer, whose sessions end within a minute.
+func (f *fixture) briefBrowser() *browser { return f.browserVia(f.briefTransport) }
+
+func (f *fixture) browserVia(transport http.RoundTripper) *browser {
 	jar, err := cookiejar.New(nil)
 	Expect(err).NotTo(HaveOccurred())
-	return &browser{jar: jar, client: &http.Client{
+	return &browser{jar: jar, transport: transport, client: &http.Client{
 		Jar:           jar,
-		Transport:     recorder{f: f, next: f.client.Transport},
+		Transport:     recorder{f: f, next: transport},
 		Timeout:       30 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}

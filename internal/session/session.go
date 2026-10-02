@@ -186,6 +186,15 @@ func (m *Manager) Use(r *http.Request) (Session, error) {
 	return m.touch(r.Context(), key, s)
 }
 
+// Check reports whether the session r belongs to is still live, without recording
+// activity: a response kept open asks it, and staying open is not use. It answers
+// ErrNoSession once the session has ended, and any other error when the store
+// could not say.
+func (m *Manager) Check(r *http.Request) error {
+	_, _, err := m.find(r)
+	return err
+}
+
 // ExpiresAt is when s ends however busy it is.
 func (m *Manager) ExpiresAt(s Session) time.Time { return m.end(s) }
 

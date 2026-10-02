@@ -7,17 +7,27 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-// metric reads one sample from krm-foyer's metrics, through the API server's service
-// proxy as admin: series is the name with its labels as scraped, such as
-// krm_foyer_interruptions_total{reason="BadRequest"}. A series not yet recorded is 0.
-func (f *fixture) metric(series string) float64 {
+// metric reads one sample from the main krm-foyer's metrics: series is the name with
+// its labels as scraped, such as krm_foyer_interruptions_total{reason="BadRequest"}.
+// A series not yet recorded is 0.
+func (f *fixture) metric(series string) float64 { return f.metricOf("krm-foyer-metrics", series) }
+
+// briefMetric reads one sample from the brief krm-foyer's metrics.
+func (f *fixture) briefMetric(series string) float64 {
+	return f.metricOf("krm-foyer-brief-metrics", series)
+}
+
+// metricOf reads the metrics of the Service named service through the API server's
+// service proxy, as admin: the way a monitoring system in the cluster reaches them.
+func (f *fixture) metricOf(service, series string) float64 {
 	GinkgoHelper()
-	out := f.kubectl("get", "--raw", "/api/v1/namespaces/krm-foyer/services/http:krm-foyer-metrics:metrics/proxy/metrics")
+	out := f.kubectl("get", "--raw", "/api/v1/namespaces/krm-foyer/services/http:"+service+":metrics/proxy/metrics")
 	scanner := bufio.NewScanner(strings.NewReader(out))
 	for scanner.Scan() {
 		if value, ok := strings.CutPrefix(scanner.Text(), series+" "); ok {
@@ -28,6 +38,20 @@ func (f *fixture) metric(series string) float64 {
 	}
 	return 0
 }
+
+// assertCancelledUpstream checks that the API server completed the request marked
+// marker within a minute of receiving it. The watches here ask for timeoutSeconds=600,
+// so only a cancellation from krm-foyer can complete them that soon.
+func assertCancelledUpstream(ctx SpecContext, marker, username string) {
+	GinkgoHelper()
+	var events []auditEvent
+	eventually(ctx, func() []auditEvent { events = fx.audited(marker); return events }).Should(HaveLen(1))
+	Expect(events[0].User.Username).To(Equal(username))
+	Expect(events[0].StageTimestamp.Sub(events[0].RequestReceivedTimestamp)).To(BeNumerically("<", time.Minute),
+		"the API server kept the watch open: the cancellation did not reach it")
+}
+
+const cutForSessionEnded = `krm_foyer_responses_cut_short_total{cause="session_ended"}`
 
 // The bounds of docs/bounds.md, and the metrics that show how close real traffic
 // comes to them.
@@ -44,5 +68,70 @@ var _ = Describe("krm-foyer's bounds", Label("foyer"), func() {
 			a := fx.browser().do(ctx, http.MethodGet, path, nil, nil)
 			Expect(string(a.Body)).NotTo(ContainSubstring("krm_foyer_"), path)
 		}
+	})
+
+	// The "stream open across logout and expiry" row of the session lifecycle table
+	// (docs/design.md), for native watches through /k8s.
+	Context("ends every open response with its session", func() {
+		It("aborts a native watch when its session logs out, and cancels it at the API server", func(ctx SpecContext) {
+			ns := fx.namespace()
+			fx.grant(ns, aliceK8sName, "configmaps", "get", "list", "watch")
+			alice := signIn(ctx, alice)
+			before := fx.metric(cutForSessionEnded)
+			w := alice.watch(ctx, "/api/v1/namespaces/"+ns+"/configmaps?watch=1&timeoutSeconds=600")
+			Expect(w.resp.StatusCode).To(Equal(http.StatusOK))
+			// Every namespace holds kube-root-ca.crt, so a watch starts with an event.
+			Expect(w.event()).To(ContainSubstring(`"type":"ADDED"`))
+
+			out := alice.b.do(ctx, http.MethodPost, "/auth/logout", nil, alice.proof())
+			Expect(out.Code).To(Equal(http.StatusNoContent), "%s", out.Body)
+			loggedOut := time.Now()
+
+			By("within the session-check interval: 5 seconds by default, 10 at worst")
+			at, err := w.end(30 * time.Second)
+			Expect(err).To(HaveOccurred(), "the watch ended cleanly; a response cut short is aborted")
+			Expect(at.Sub(loggedOut)).To(BeNumerically("<", 12*time.Second))
+			assertCancelledUpstream(ctx, w.Marker, aliceK8sName)
+			Expect(fx.metric(cutForSessionEnded)).To(Equal(before + 1))
+
+			By("and the watch, resumed, gets the 401 interruption")
+			again := alice.viaFoyer(ctx, http.MethodGet, "/api/v1/namespaces/"+ns+"/configmaps?watch=1&timeoutSeconds=1", nil, nil)
+			Expect(again.Code).To(Equal(http.StatusUnauthorized), "%s", again.Body)
+			Expect(again.Header.Get("Krm-Foyer-Interruption")).To(Equal("Unauthorized"))
+		})
+
+		It("aborts a native watch when its session expires, and cancels it at the API server", func(ctx SpecContext) {
+			ns := fx.namespace()
+			fx.grant(ns, aliceK8sName, "configmaps", "get", "list", "watch")
+			// The brief instance ends a session 45 seconds after login and checks
+			// open responses every second.
+			beforeLogin := time.Now()
+			alice := signInBrief(ctx, alice)
+			afterLogin := time.Now()
+			before := fx.briefMetric(cutForSessionEnded)
+
+			By("opening the watch late in the session, so nothing but its end can close it")
+			select {
+			case <-time.After(time.Until(beforeLogin.Add(30 * time.Second))):
+			case <-ctx.Done():
+				Fail("interrupted")
+			}
+			w := alice.watch(ctx, "/api/v1/namespaces/"+ns+"/configmaps?watch=1&timeoutSeconds=600")
+			Expect(w.resp.StatusCode).To(Equal(http.StatusOK))
+			// Every namespace holds kube-root-ca.crt, so a watch starts with an event.
+			Expect(w.event()).To(ContainSubstring(`"type":"ADDED"`))
+
+			at, err := w.end(45 * time.Second)
+			Expect(err).To(HaveOccurred(), "the watch ended cleanly; a response cut short is aborted")
+			Expect(at).To(BeTemporally(">=", beforeLogin.Add(45*time.Second)), "the watch ended before its session")
+			Expect(at).To(BeTemporally("<", afterLogin.Add(45*time.Second+2*time.Second+3*time.Second)),
+				"the watch outlived its session by more than two check intervals")
+			assertCancelledUpstream(ctx, w.Marker, aliceK8sName)
+			Expect(fx.briefMetric(cutForSessionEnded)).To(Equal(before + 1))
+
+			By("and the watch, resumed, gets the 401 interruption")
+			again := alice.viaFoyer(ctx, http.MethodGet, "/api/v1/namespaces/"+ns+"/configmaps?watch=1&timeoutSeconds=1", nil, nil)
+			Expect(again.Code).To(Equal(http.StatusUnauthorized), "%s", again.Body)
+		})
 	})
 })

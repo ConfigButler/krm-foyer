@@ -28,10 +28,22 @@ func TestNamesAsScraped(t *testing.T) {
 	m.Interruption("Unauthorized")
 	m.Interruption("BadRequest")
 	got := scrape(t, m)
+	// Every cause is there before anything was cut short.
+	for _, want := range []string{
+		"# TYPE krm_foyer_responses_cut_short_total counter",
+		`krm_foyer_responses_cut_short_total{cause="session_ended"} 0`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("scrape lacks %q", want)
+		}
+	}
+	m.CutShort(CauseSessionEnded)
+	got = scrape(t, m)
 	for _, want := range []string{
 		"# TYPE krm_foyer_interruptions_total counter",
 		`krm_foyer_interruptions_total{reason="Unauthorized"} 2`,
 		`krm_foyer_interruptions_total{reason="BadRequest"} 1`,
+		`krm_foyer_responses_cut_short_total{cause="session_ended"} 1`,
 		// The Go runtime's and the process's come along: a leaked response shows
 		// as goroutines that never go away.
 		"# TYPE go_goroutines gauge",
@@ -47,4 +59,5 @@ func TestNamesAsScraped(t *testing.T) {
 func TestNilRecordsNothing(t *testing.T) {
 	var m *Metrics
 	m.Interruption("Unauthorized")
+	m.CutShort(CauseSessionEnded)
 }

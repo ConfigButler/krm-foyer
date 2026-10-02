@@ -76,7 +76,7 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		publicURL, issuer, clientID    string
 		secretFile, issuerCAFile       string
 		scopes, apiServer, apiServerCA string
-		idle, absolute                 time.Duration
+		idle, absolute, checkEvery     time.Duration
 	)
 	fs.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
 	fs.StringVar(&cfg.tlsCert, "tls-cert-file", "", "serve TLS with this certificate (PEM); needs -tls-key-file")
@@ -92,6 +92,8 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	fs.StringVar(&apiServerCA, "kubernetes-ca-file", "", "the CA certificates (PEM) that sign the API server's certificate")
 	fs.DurationVar(&idle, "session-idle-timeout", time.Hour, "end a session unused for this long")
 	fs.DurationVar(&absolute, "session-absolute-timeout", 8*time.Hour, "end any session this long after login")
+	fs.DurationVar(&checkEvery, "session-check-interval", proxy.DefaultSessionCheckInterval,
+		"how often an open response asks whether its session is still live; it is cut short when not")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -156,6 +158,10 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	login.sessions = session.Config{Origin: publicURL, IdleTimeout: idle, AbsoluteTimeout: absolute}
 
 	// The API proxy.
+	if checkEvery <= 0 {
+		return config{}, fmt.Errorf("-session-check-interval must be positive, got %v", checkEvery)
+	}
+	login.kubernetes.SessionCheckInterval = checkEvery
 	if login.kubernetes.Server, err = url.Parse(apiServer); err != nil {
 		return config{}, fmt.Errorf("-kubernetes-server: %w", err)
 	}

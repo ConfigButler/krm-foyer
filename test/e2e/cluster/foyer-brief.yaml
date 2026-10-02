@@ -1,0 +1,120 @@
+# A second krm-foyer in the e2e fixture, whose sessions end within a minute, for the
+# specs that wait for one to expire. The main instance keeps ordinary timeouts, so no
+# other spec has to race its own session. It is the same image, certificate, public
+# URL and Dex client as foyer.yaml; deploy-foyer.sh fills in IMAGE and CONFIG_HASH.
+# The suite reaches it on its own NodePort, under the same name.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: krm-foyer-brief
+  namespace: krm-foyer
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: krm-foyer-brief
+  template:
+    metadata:
+      labels:
+        app: krm-foyer-brief
+      annotations:
+        krm-foyer.test/config-hash: CONFIG_HASH
+    spec:
+      # The same bait as the main instance: see foyer.yaml.
+      serviceAccountName: krm-foyer
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: krm-foyer
+          image: IMAGE
+          imagePullPolicy: Never
+          args:
+            - -listen=:8443
+            - -tls-cert-file=/etc/krm-foyer/tls/tls.crt
+            - -tls-key-file=/etc/krm-foyer/tls/tls.key
+            - -public-url=https://foyer.localhost:8443
+            - -oidc-issuer=https://dex.localhost:5556
+            - -oidc-client-id=krm-foyer
+            - -oidc-client-secret-file=/etc/krm-foyer/oidc/client-secret
+            - -oidc-ca-file=/etc/krm-foyer/issuer-ca/ca.crt
+            - -kubernetes-server=https://kubernetes.default.svc
+            - -kubernetes-ca-file=/etc/krm-foyer/kubernetes-ca/ca.crt
+            # What makes it brief.
+            - -session-idle-timeout=45s
+            - -session-absolute-timeout=45s
+            - -session-check-interval=1s
+          ports:
+            - name: https
+              containerPort: 8443
+            - name: metrics
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/krm-foyer/tls
+              readOnly: true
+            - name: oidc
+              mountPath: /etc/krm-foyer/oidc
+              readOnly: true
+            - name: issuer-ca
+              mountPath: /etc/krm-foyer/issuer-ca
+              readOnly: true
+            - name: kubernetes-ca
+              mountPath: /etc/krm-foyer/kubernetes-ca
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: krm-foyer-tls
+        - name: oidc
+          secret:
+            secretName: krm-foyer-oidc
+        - name: issuer-ca
+          configMap:
+            name: krm-foyer-issuer-ca
+        - name: kubernetes-ca
+          configMap:
+            name: kube-root-ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: krm-foyer-brief
+  namespace: krm-foyer
+spec:
+  type: NodePort
+  selector:
+    app: krm-foyer-brief
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      nodePort: 30444
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: krm-foyer-brief-metrics
+  namespace: krm-foyer
+spec:
+  selector:
+    app: krm-foyer-brief
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics

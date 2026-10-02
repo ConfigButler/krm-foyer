@@ -5,6 +5,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -26,11 +27,22 @@ import (
 // only way a token reaches the proxy. Login and sessions sit behind it; there is no
 // other source, no default and no service account.
 type Credentials interface {
-	// Token returns the user's bearer token, or the interruption to answer instead:
+	// Token returns the user's credential, or the interruption to answer instead:
 	// no signed-in user, a request the session refuses (a mutation without CSRF
 	// proof, say), or a session that could not be checked. The proxy answers with
 	// it as it is.
-	Token(r *http.Request) (string, *interruption.Interruption)
+	Token(r *http.Request) (Credential, *interruption.Interruption)
+}
+
+// Credential is the user's token, and how to tell whether it may still be used.
+type Credential struct {
+	// Token is the user's bearer token.
+	Token string
+	// Live reports whether the token may still be used, without counting as use:
+	// false once the session it came from has ended, and false when that cannot be
+	// told before ctx ends. Every open response asks it once per session-check
+	// interval, and is cut short when it says no. Nil counts as no.
+	Live func(ctx context.Context) bool
 }
 
 // Config is what the proxy needs to reach one API server.
@@ -45,7 +57,13 @@ type Config struct {
 	Logger *slog.Logger
 	// Metrics counts interruptions. Nil counts nothing.
 	Metrics *metrics.Metrics
+	// SessionCheckInterval is how often an open response asks whether its session
+	// is still live. Zero means DefaultSessionCheckInterval.
+	SessionCheckInterval time.Duration
 }
+
+// DefaultSessionCheckInterval is the session-check interval when none is configured.
+const DefaultSessionCheckInterval = 5 * time.Second
 
 // Proxy serves Prefix. Create it with New.
 type Proxy struct {
@@ -54,6 +72,7 @@ type Proxy struct {
 	credentials Credentials
 	logger      *slog.Logger
 	metrics     *metrics.Metrics
+	checkEvery  time.Duration
 }
 
 // New returns a proxy to cfg.Server.
@@ -68,6 +87,13 @@ func New(cfg Config) (*Proxy, error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
+	}
+	checkEvery := cfg.SessionCheckInterval
+	if checkEvery == 0 {
+		checkEvery = DefaultSessionCheckInterval
+	}
+	if checkEvery < 0 {
+		return nil, fmt.Errorf("session-check interval must be positive, got %v", checkEvery)
 	}
 	return &Proxy{
 		server: url.URL{Scheme: cfg.Server.Scheme, Host: cfg.Server.Host},
@@ -86,6 +112,7 @@ func New(cfg Config) (*Proxy, error) {
 		credentials: cfg.Credentials,
 		logger:      logger,
 		metrics:     cfg.Metrics,
+		checkEvery:  checkEvery,
 	}, nil
 }
 
@@ -131,8 +158,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, refused := p.credentials.Token(r)
-	if refused == nil && token == "" {
+	cred, refused := p.credentials.Token(r)
+	if refused == nil && cred.Token == "" {
 		// An empty token would make the request anonymous. Never send one.
 		refused = interruption.NotSignedIn()
 	}
@@ -140,6 +167,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.interrupt(w, r, refused)
 		return
 	}
+
+	// From here the request may reach the API server. Its context is cancelled when
+	// krm-foyer cuts the response short, which cancels the request upstream too.
+	ctx, cut := context.WithCancelCause(r.Context())
+	r = r.WithContext(ctx)
+	defer p.guard(w, r, cut, cred.Live)()
 
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -158,7 +191,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					h[k] = v
 				}
 			}
-			h.Set("Authorization", "Bearer "+token)
+			h.Set("Authorization", "Bearer "+cred.Token)
 			pr.Out.Header = h
 		},
 		Transport: p.transport,
@@ -235,6 +268,11 @@ func heldBack(field, value string) *interruption.Interruption {
 func (p *Proxy) upstreamError(w http.ResponseWriter, r *http.Request, err error) {
 	var refused *interruption.Interruption
 	if !errors.As(err, &refused) {
+		if cutShort(r.Context()) {
+			// The request may have reached Kubernetes, so no interruption may say it
+			// did not, and an empty answer would pass for a complete one.
+			panic(http.ErrAbortHandler)
+		}
 		if r.Context().Err() != nil {
 			return // the browser went away; nobody is left to answer
 		}
@@ -291,3 +329,60 @@ func (w *headWriter) Write(b []byte) (int, error) {
 
 // Unwrap lets http.ResponseController reach Flush on the real writer.
 func (w *headWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// errSessionEnded is why a response is cut short when its session ends.
+var errSessionEnded = errors.New(metrics.CauseSessionEnded)
+
+// cutShort reports whether krm-foyer cut short the request ctx belongs to, rather
+// than the browser leaving.
+func cutShort(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), errSessionEnded)
+}
+
+// guard watches the response to r while it is open, and cuts it short when its
+// session ends: cut cancels the request to the API server, and the browser's
+// response is aborted. A session check that does not answer within an interval
+// counts as a session that has ended. The returned function stops the guard; it
+// returns once the guard has.
+func (p *Proxy) guard(w http.ResponseWriter, r *http.Request, cut context.CancelCauseFunc, live func(context.Context) bool) (stop func()) {
+	ctx := r.Context()
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		tick := time.NewTicker(p.checkEvery)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+			if p.live(ctx, live) || ctx.Err() != nil {
+				continue
+			}
+			path, _, _ := strings.Cut(r.RequestURI, "?")
+			p.logger.Info("response cut short", "cause", errSessionEnded.Error(), "method", r.Method, "path", path)
+			p.metrics.CutShort(errSessionEnded.Error())
+			cut(errSessionEnded)
+			// The response may be blocked writing to a browser that stopped
+			// reading. A deadline in the past fails that write, so the handler
+			// returns and the abort happens.
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now())
+			return
+		}
+	}()
+	return func() {
+		cut(nil)
+		<-exited
+	}
+}
+
+// live asks whether a session is still live, giving it one interval to answer.
+func (p *Proxy) live(ctx context.Context, live func(context.Context) bool) bool {
+	if live == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, p.checkEvery)
+	defer cancel()
+	return live(ctx) && ctx.Err() == nil
+}

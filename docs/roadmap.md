@@ -222,12 +222,16 @@ Security items need tests that try to get past the boundary.
 - [ ] Mutations are never replayed, including after the session is refreshed
 - [x] Native watches and logs stream without buffering, and cancellation reaches the
       upstream
+- [x] Every open response ends when its session ends: at logout and at expiry it is
+      aborted, never ended cleanly, and cancelled at the API server (unit tests over
+      every pair of protocols; e2e against the real cluster, with the audit log as
+      witness, each checked by deploying a krm-foyer broken on purpose)
 - [ ] [Bounds](bounds.md) on the request rate per session, concurrent requests per
       session and per replica, response duration and response bytes, each reached by a
       test (step 4)
-- [ ] A response cut short by a bound or by the end of its session is aborted, never
-      ended cleanly, and cancelled at the API server (unit tests over HTTP/1.1 and
-      HTTP/2, and e2e with the audit log as witness)
+- [ ] A response cut short by a bound is aborted, never ended cleanly, and cancelled at
+      the API server (unit tests over HTTP/1.1 and HTTP/2, and e2e with the audit log as
+      witness)
 
 ### Streams
 

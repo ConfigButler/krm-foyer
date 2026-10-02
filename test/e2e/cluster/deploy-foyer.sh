@@ -16,6 +16,8 @@ FOYER_HOST="foyer.localhost"
 # part of the public URL; the suite goes to the NodePort directly, under the same name.
 FOYER_URL="https://$FOYER_HOST:8443"
 NODE_PORT=30443
+# A second krm-foyer whose sessions end within a minute (foyer-brief.yaml).
+BRIEF_NODE_PORT=30444
 
 here="$(cd "$(dirname "$0")" && pwd)"
 E2E_DIR="${E2E_DIR:-$(cd "$here/../../.." && pwd)/.e2e}"
@@ -58,18 +60,23 @@ apply create secret tls krm-foyer-tls --cert "$E2E_DIR/foyer/tls.crt" --key "$E2
 apply create secret generic krm-foyer-oidc --from-literal=client-secret=krm-foyer-e2e-secret
 apply create configmap krm-foyer-issuer-ca --from-file=ca.crt="$E2E_DIR/ca.crt"
 config_hash="$(cat "$E2E_DIR/foyer/tls.crt" "$E2E_DIR/ca.crt" | sha256sum | cut -c1-16)"
-sed -e "s|IMAGE|$tag|" -e "s|CONFIG_HASH|$config_hash|" "$here/foyer.yaml" | kubectl apply -f - >/dev/null
-if ! kubectl -n krm-foyer rollout status deployment/krm-foyer --timeout=120s; then
-  kubectl -n krm-foyer describe pods >&2
-  kubectl -n krm-foyer logs deployment/krm-foyer --tail=50 >&2 || true
-  exit 1
-fi
+for manifest in foyer.yaml foyer-brief.yaml; do
+  sed -e "s|IMAGE|$tag|" -e "s|CONFIG_HASH|$config_hash|" "$here/$manifest" | kubectl apply -f - >/dev/null
+done
+for deployment in krm-foyer krm-foyer-brief; do
+  if ! kubectl -n krm-foyer rollout status "deployment/$deployment" --timeout=120s; then
+    kubectl -n krm-foyer describe pods >&2
+    kubectl -n krm-foyer logs "deployment/$deployment" --tail=50 >&2 || true
+    exit 1
+  fi
+done
 
 server_ip="${API_SERVER#https://}"
 server_ip="${server_ip%:*}"
 cat > "$E2E_DIR/foyer-env" <<EOF
 FOYER_URL=$FOYER_URL
 FOYER_ADDR=$server_ip:$NODE_PORT
+FOYER_BRIEF_ADDR=$server_ip:$BRIEF_NODE_PORT
 FOYER_NAMESPACE=krm-foyer
 FOYER_SERVICE_ACCOUNT=system:serviceaccount:krm-foyer:krm-foyer
 EOF
