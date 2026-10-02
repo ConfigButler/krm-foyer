@@ -11,7 +11,9 @@ task demo   # from the repository root; task e2e-down removes it
 ```
 
 Then open <https://foyer.localhost:8443> and sign in with password `password` as
-`alice@example.com` (may edit) or `bob@example.com` (may only read). Open the page in two
+`alice@example.com` (may edit) or `bob@example.com` (may only read); the e2e suite's
+200 rehearsal users, `rehearsal-001@example.com` to `rehearsal-200@example.com`, may read
+as bob does. Open the page in two
 tabs: a note saved in one changes in the other as you watch. Type in a note in one tab
 without saving, save a change to it in the other, and the first shows the conflict,
 keeping what you typed.

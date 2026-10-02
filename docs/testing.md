@@ -213,6 +213,12 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   two streams open, its limit, may still open two native watches, and its third stream
   is krm-foyer's 429 and never reaches the API server; the build before stream limits
   failed it.
+- **The rehearsal** (labels `foyer` and `rehearsal`) holds 1800 streams of 200 signed-in
+  identities on one replica, and fails unless one change reaches all of them, every
+  stream is aborted within the session-check interval of its logout, and streams,
+  watches at the API server and goroutines all return to where they were. What it
+  measured is in [bounds](bounds.md#measured-the-rehearsal). Dex has its 200 users from
+  `start-cluster.sh`, which `task demo` uses too.
 - **The hello example** (label `browser`) is the claim that krm-foyer is usable, not
   only correct. Chromium ([chromedp/headless-shell](https://hub.docker.com/r/chromedp/headless-shell),
   pinned by digest, driven from Go with chromedp) runs in the network namespace of the

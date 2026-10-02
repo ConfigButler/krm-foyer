@@ -25,15 +25,6 @@ oauth2:
   passwordConnector: local
   grantTypes: [authorization_code, refresh_token, password]
 enablePasswordDB: true
-staticPasswords:
-  - email: alice@example.com
-    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
-    username: alice
-    userID: 0f8e5c1a-alice
-  - email: bob@example.com
-    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
-    username: bob
-    userID: 3a1d9b7e-bob
 staticClients:
   - id: krm-foyer
     name: krm-foyer
@@ -47,3 +38,14 @@ staticClients:
     secret: other-app-e2e-secret
     redirectURIs:
       - https://other.krm-foyer.test/callback
+# start-cluster.sh appends the rehearsal's
+# users to this list (rehearsal-001@example.com and on), so it stays last.
+staticPasswords:
+  - email: alice@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: alice
+    userID: 0f8e5c1a-alice
+  - email: bob@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: bob
+    userID: 3a1d9b7e-bob

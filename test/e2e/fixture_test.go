@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,9 @@ type fixture struct {
 	// briefTransport reaches the brief krm-foyer, whose sessions end within a minute,
 	// instead of the main one.
 	briefTransport http.RoundTripper
+	// rehearsalUsers is how many rehearsal users Dex has: rehearsal-001@example.com
+	// and on, with alice's password (start-cluster.sh).
+	rehearsalUsers int
 
 	// seen is every response krm-foyer sent the suite, and tokens every token the
 	// suite obtained, for the token scan.
@@ -114,7 +118,10 @@ func loadFixture() *fixture {
 
 	issuer, err := url.Parse(env["DEX_ISSUER"])
 	Expect(err).NotTo(HaveOccurred())
+	rehearsalUsers, err := strconv.Atoi(env["REHEARSAL_USERS"])
+	Expect(err).NotTo(HaveOccurred(), "REHEARSAL_USERS in the fixture's env (an older fixture? run task e2e-up)")
 	foyer, err := url.Parse(env["FOYER_URL"])
+
 	Expect(err).NotTo(HaveOccurred())
 	// The names the suite reaches without DNS: Dex through the port-forward on this
 	// container's loopback (port-forward.sh), as a browser does, and krm-foyer directly
@@ -150,6 +157,7 @@ func loadFixture() *fixture {
 		foyerNamespace:  env["FOYER_NAMESPACE"],
 		foyerAccount:    env["FOYER_SERVICE_ACCOUNT"],
 		briefTransport:  transportTo(env["FOYER_BRIEF_ADDR"]),
+		rehearsalUsers:  rehearsalUsers,
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   30 * time.Second,

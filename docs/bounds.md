@@ -131,14 +131,16 @@ Why these defaults:
   to a dozen open watches. A page that leaks watches meets the limit, and from then on
   every request of that session is refused, which makes the leak hard to miss.
 - **2000 concurrent requests per replica.** Each one holds a connection or HTTP/2 stream
-  to the browser and another to the API server. This is a capacity hypothesis, not a
-  measurement: the streams rehearsal ([step 5](roadmap.md#order-of-work)) measures what
-  one replica holds, and the default follows what it finds.
+  to the browser and another to the API server. This is still a capacity hypothesis:
+  [the rehearsal](#measured-the-rehearsal) measured streams, not native watches through
+  `/k8s`, which pass through a lighter path. Measure them before relying on it.
 - **32 streams per session.** A page shows a handful of live lists, and one session is
   every tab of the application in that browser. Thirty-two leaves room for several tabs
   with several streams each, and a page that leaks streams meets it.
-- **2000 streams per replica.** The same hypothesis as for requests, and the same
-  rehearsal measures it.
+- **2000 streams per replica.** [Measured](#measured-the-rehearsal): 1800 streams on one
+  replica took about 250 MiB of resident memory, so 2000 take about 300 MiB, and every
+  other number held well within bounds at that load. Give a replica allowed this many
+  memory for it, or lower the limit.
 - **30 minutes per response.** Ordinary requests finish in seconds; the API server gives
   them 60 at most. What stays open is a watch or a followed log. Thirty minutes is the
   shortest time the API server itself keeps a watch open when the client names no
@@ -299,6 +301,35 @@ its slot then until the response duration ends it, and a stream does the same.
 krm-stream can bound each write instead (`WriteTimeout`), which would free the slot
 within seconds; that needs its own test, of a tab that stops reading while a stream
 fills the buffers between, and comes later.
+
+## Measured: the rehearsal
+
+The rehearsal ([rehearsal_test.go](../test/e2e/rehearsal_test.go)) is part of the e2e
+suite and runs with every `task verify`. It restarts krm-foyer, signs in 200 identities
+through Dex's login form, opens nine streams for each, 1800 on one replica, near the
+2000 it allows by default, and changes one note they all watch. Then every identity
+signs out. It fails unless every stream had the change within 10 seconds, every stream
+was aborted within the session-check interval of its logout, and the streams, the
+watches at the API server and the goroutines all went back to where they were. It
+prints what it measured with its report.
+
+Three runs on 2026-10-02, against the e2e fixture (k3s 1.36.4 in k3d, krm-stream 0.4.0,
+one replica, the suite and the cluster on one devcontainer host):
+
+| Measured | Result |
+| --- | --- |
+| Opening 1800 streams at once, until every snapshot was complete | 0.7 to 1.1 seconds |
+| One change reaching all 1800, from `kubectl patch` starting | under 110 ms, the slowest; the spread from first to slowest under 50 ms |
+| Logout to stream aborted, the slowest of 1800 | 4.1 to 4.5 seconds, within the 5-second check |
+| Goroutines per open stream | 6 |
+| Resident memory | 30 MiB idle, 34 MiB with 200 sessions, 235 to 267 MiB with 1800 streams: at most 133 KiB per stream |
+| Watches at the API server | one per stream, 1800, all released at logout |
+
+Resident memory is measured in a fresh process, where it only grows, so the figure per
+stream is an upper bound; the garbage collector made smaller measurements too noisy
+to use. What the rehearsal does not cover: native watches through `/k8s`, many replicas,
+shared watches, a slow or distant API server, and the browser's side. A real cluster's
+numbers belong next to these when someone measures them.
 
 ## Left out: a bound on page size
 

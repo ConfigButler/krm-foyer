@@ -144,6 +144,10 @@ Security items need tests that try to get past the boundary.
 - [ ] A NetworkPolicy in the chart that admits only the ingress to krm-foyer's port, and
       only the monitoring system to the metrics port
 - [ ] Helm chart values for both models
+- [ ] Rolling updates that refuse no connection: krm-foyer stops listening as soon as
+      it is told to stop, while its Service may still route to it for a moment, so a
+      rollout refuses connections briefly (seen by the rehearsal, which restarts it). A
+      wait before shutdown, or readiness turned off first, with a test
 - [ ] Routing recipes for one shared domain: a Gateway API `HTTPRoute`, an nginx server
       block and a Vite dev-server proxy
 - [ ] Login gate: `GET /auth/check` for an ingress gating the application's pages, with
@@ -262,8 +266,10 @@ Security items need tests that try to get past the boundary.
       server within the session-check interval (one replica; unit tests, and e2e with
       the audit log as witness, checked by deploying a krm-foyer whose streams the gate
       could not cancel)
-- [ ] A rehearsal with 200 identities, as a repeatable test, which also sets the
-      per-replica defaults in [bounds](bounds.md)
+- [x] A rehearsal with 200 identities, as a repeatable test, which also sets the
+      per-replica defaults in [bounds](bounds.md): 1800 streams on one replica, part of
+      the e2e suite, with what it measured in [bounds](bounds.md#measured-the-rehearsal).
+      Native watches through `/k8s` are not measured yet
 
 ### Seeing what happened
 
