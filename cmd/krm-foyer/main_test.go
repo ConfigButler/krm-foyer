@@ -49,9 +49,10 @@ func TestParseConfigWithLogin(t *testing.T) {
 	if l == nil || l.auth.ClientSecret != "s3cret" || l.kubernetes.Server.Host != "kubernetes.default.svc" ||
 		strings.Join(l.auth.Scopes, " ") != "openid email groups" || l.sessions.Origin != "https://foyer.example.test" ||
 		l.sessions.IdleTimeout != time.Hour || l.sessions.AbsoluteTimeout != 8*time.Hour ||
-		l.kubernetes.SessionCheckInterval != 5*time.Second || l.kubernetes.MaxResponseDuration != 30*time.Minute ||
-		l.kubernetes.MaxSessionConcurrentRequests != 64 || l.kubernetes.MaxConcurrentRequests != 2000 ||
-		l.kubernetes.SessionRequestRate != 20 || l.kubernetes.SessionRequestBurst != 100 ||
+		l.gate.SessionCheckInterval != 5*time.Second || l.gate.MaxResponseDuration != 30*time.Minute ||
+		l.gate.MaxSessionConcurrentRequests != 64 || l.gate.MaxConcurrentRequests != 2000 ||
+		l.gate.MaxSessionStreams != 32 || l.gate.MaxStreams != 2000 ||
+		l.gate.SessionRequestRate != 20 || l.gate.SessionRequestBurst != 100 ||
 		l.kubernetes.MaxResponseBytes != 32<<20 {
 		t.Fatalf("%+v", l)
 	}
@@ -92,6 +93,8 @@ func TestParseConfigRefuses(t *testing.T) {
 		"duration past idle":     {append(loginArgs, "-max-response-duration", "1h"), secret, "below -session-idle-timeout"},
 		"no concurrency":         {append(loginArgs, "-max-concurrent-requests", "0"), secret, "-max-concurrent-requests"},
 		"no session concurrency": {append(loginArgs, "-max-session-concurrent-requests", "-1"), secret, "-max-session-concurrent-requests"},
+		"no session streams":     {append(loginArgs, "-max-session-streams", "0"), secret, "-max-session-streams"},
+		"no streams":             {append(loginArgs, "-max-streams", "-1"), secret, "-max-streams"},
 		"no request rate":        {append(loginArgs, "-session-request-rate", "0"), secret, "-session-request-rate"},
 		"no request burst":       {append(loginArgs, "-session-request-burst", "0"), secret, "-session-request-burst"},
 		"no byte limit":          {append(loginArgs, "-max-response-bytes", "0"), secret, "-max-response-bytes"},

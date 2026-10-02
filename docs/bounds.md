@@ -24,6 +24,10 @@ A *bound* is something krm-foyer limits, such as how long a response may stay op
   Otherwise the answer has begun, and it is cut short. See [response bytes](#response-bytes).
 - **No bound on page size.** It would not reliably bound what a list costs. See
   [left out](#left-out-a-bound-on-page-size).
+- **Streams are bounded on their own** (2026-10-02): how many a session, and a replica,
+  may have open, counted apart from requests through `/k8s`. Opening one draws on the
+  same request rate, and the response duration and the session check hold it like any
+  other response. See [streams](#streams).
 - **Metrics come from the Prometheus client**, on a listener of their own, labelled only
   by fixed sets of values. OpenTelemetry is kept for tracing, if that is ever added. See
   [metrics](#metrics).
@@ -100,10 +104,7 @@ So the bounds are written not to need it. Concurrency counts every request in fl
 the duration and the session check apply to every response, and a response cut short is
 aborted whatever it is. A watch is simply a request that stays open.
 
-krm-stream's own bounds are a separate matter ([step 5](roadmap.md#order-of-work)). With
-watch sharing, several browser subscriptions can use one upstream watch, so subscriptions
-and upstream watches are counted separately. The `/k8s` bounds do not cover the watches
-krm-stream opens itself.
+krm-stream's streams are bounded on their own: see [streams](#streams).
 
 ## The bounds
 
@@ -112,6 +113,8 @@ krm-stream opens itself.
 | Request rate per session | `-session-request-rate`, `-session-request-burst` | 20 a second, bursts of 100 | 429 `RequestRateExceeded` with `Retry-After` |
 | Concurrent requests per session | `-max-session-concurrent-requests` | 64 | 429 `TooManyConcurrentRequests` |
 | Concurrent requests per replica | `-max-concurrent-requests` | 2000 | 429 `TooManyConcurrentRequests` |
+| Streams open per session | `-max-session-streams` | 32 | 429 `TooManyStreams` |
+| Streams open per replica | `-max-streams` | 2000 | 429 `TooManyStreams` |
 | Response duration | `-max-response-duration` | 30 minutes | The response is [cut short](#cutting-a-response-short) |
 | Response bytes, decoded | `-max-response-bytes` | 32 MiB | 502 `ResponseTooLarge` if known in advance; otherwise [cut short](#cutting-a-response-short) |
 | Session check | `-session-check-interval` | 5 seconds | An open response whose session has ended is [cut short](#the-session-check) |
@@ -128,9 +131,17 @@ Why these defaults:
   to a dozen open watches. A page that leaks watches meets the limit, and from then on
   every request of that session is refused, which makes the leak hard to miss.
 - **2000 concurrent requests per replica.** Each one holds a connection or HTTP/2 stream
-  to the browser and another to the API server. This is a capacity hypothesis, not a
-  measurement: the streams rehearsal ([step 5](roadmap.md#order-of-work)) measures what
-  one replica holds, and the default follows what it finds.
+  to the browser and another to the API server. This is still a capacity hypothesis:
+  [the rehearsal](#measured-the-rehearsal) measured streams, not native watches through
+  `/k8s`, which pass through a lighter path. Measure them before relying on it.
+- **32 streams per session.** A page shows a handful of live lists, and one session is
+  every tab of the application in that browser. Thirty-two leaves room for several tabs
+  with several streams each, and a page that leaks streams meets it.
+- **2000 streams per replica, provisionally.** In [the rehearsal](#measured-the-rehearsal),
+  1800 streams of one small note each took about 250 MiB of resident memory on one
+  replica, so 2000 like them would take about 300 MiB. That holds for that workload only:
+  a stream's cost grows with its snapshot, its objects and how often they change. Measure
+  your own scopes before sizing a replica by it.
 - **30 minutes per response.** Ordinary requests finish in seconds; the API server gives
   them 60 at most. What stays open is a watch or a followed log. Thirty minutes is the
   shortest time the API server itself keeps a watch open when the client names no
@@ -161,8 +172,8 @@ The header says that krm-foyer answered. It does not, on its own, say that Kuber
 never saw the request; that depends on the reason, and the
 [interruptions table](design.md#interruptions) says it for each:
 
-- **`RequestRateExceeded` and `TooManyConcurrentRequests`** are decided before anything
-  is sent. The request did not reach Kubernetes, so code may send it again, a change
+- **`RequestRateExceeded`, `TooManyConcurrentRequests` and `TooManyStreams`** are decided
+  before anything is sent. The request did not reach Kubernetes, so code may send it again, a change
   included.
 - **`ResponseTooLarge`** is decided on the API server's answer. The request reached
   Kubernetes and may have taken effect. Code may repeat a `GET`, but must never resend
@@ -261,6 +272,71 @@ Revisit when the held-back page of the [interruptions](design.md#interruptions) 
 learns to show a response as escaped text. It needs a small buffer for that page anyway,
 and a 502 for small bodies could share it.
 
+## Streams
+
+A stream on `/stream/v1` is krm-stream's: a snapshot of a resource, then its changes, for
+as long as the page keeps it open ([design](design.md#streams-and-editing)). krm-foyer
+counts streams apart from requests, and counts the watches they hold at the API server
+apart again:
+
+- **Streams have limits of their own,** per session and per replica. A page that keeps a
+  few streams open should not lose its room for ordinary requests, and a request
+  should not be refused because live views are open. Past a limit, a stream is a 429
+  `TooManyStreams` interruption, and krm-stream's browser client tries again later.
+- **Opening a stream is a request** for the request rate: one budget per session for
+  `/k8s` and `/stream`, so a page that reconnects in a loop meets the rate bound.
+- **The response duration and the session check** hold a stream as they hold every
+  response: it is cut short at 30 minutes, and krm-stream's client opens it again with a
+  fresh snapshot, which renews the session's idle timeout; and it is cut short within
+  the session-check interval of its session ending.
+- **The response-byte bound does not apply.** It bounds one answer, and a stream is not
+  one: it is many snapshots and changes over half an hour. The size of a snapshot is
+  the size of a list, which the API server answers the same way through `/k8s`.
+- **Upstream watches are counted, not bounded.** Every stream holds at most one watch at
+  the API server, opened as its user, so the stream limits bound them too. They are
+  counted apart (`krm_foyer_upstream_watches_open`) because shared watches, later, will
+  make them differ: several streams on one watch. A bound of their own comes with that.
+
+What is not bounded yet: a tab that stops reading. A native watch through `/k8s` holds
+its slot then until the response duration ends it, and a stream does the same.
+krm-stream can bound each write instead (`WriteTimeout`), which would free the slot
+within seconds; that needs its own test, of a tab that stops reading while a stream
+fills the buffers between, and comes later.
+
+## Measured: the rehearsal
+
+The rehearsal ([rehearsal_test.go](../test/e2e/rehearsal_test.go)) is part of the e2e
+suite and runs with every `task verify`. It restarts krm-foyer, signs in 200 identities
+through Dex's login form, opens nine streams for each, 1800 on one replica, near the
+2000 it allows by default, and changes one note they all watch. Then every identity
+signs out. It fails unless every stream had the change within 10 seconds, every stream
+was aborted within the session-check interval of its logout, and the streams, the
+watches at the API server and the goroutines all went back to where they were. It
+prints what it measured with its report.
+
+Three runs on 2026-10-02, against the e2e fixture (k3s 1.36.4 in k3d, krm-stream 0.4.0,
+one replica, the suite and the cluster on one devcontainer host):
+
+| Measured | Result |
+| --- | --- |
+| Opening 1800 streams at once, until every snapshot was complete | 0.7 to 1.1 seconds |
+| One change reaching all 1800, from `kubectl patch` starting | under 110 ms, the slowest; the spread from first to slowest under 50 ms |
+| Logout to stream aborted, the slowest of 1800 | 4.1 to 4.5 seconds, within the 5-second check |
+| Goroutines per open stream | 6 |
+| Resident memory | 30 MiB idle, 34 MiB with 200 sessions, 235 to 267 MiB with 1800 streams: about 110 to 130 KiB per stream, for this workload |
+| Watches at the API server | one per stream, 1800, all released at logout |
+
+Every stream watches the same scope: one small note. So the memory figures describe
+that workload, not a stream in general. krm-stream keeps per-object bookkeeping for each
+stream, and its list-then-watch fallback holds a whole snapshot while it lists, so
+larger scopes, larger objects and frequent changes cost more, possibly much more.
+Resident memory is measured in a fresh process, where it only grows over a run this
+short; the garbage collector made smaller measurements too noisy to use. What the
+rehearsal does not cover: representative scopes and objects, sustained change, native
+watches through `/k8s`, many replicas, shared watches, a slow or distant API server, and
+the browser's side. A real cluster's
+numbers belong next to these when someone measures them.
+
 ## Left out: a bound on page size
 
 A Kubernetes list takes `limit`, the most items to return in one page; the API server
@@ -344,6 +420,8 @@ Names as scraped:
 | `krm_foyer_bound_usage_ratio` | histogram | `bound` | How much of its bound each request or response let through used, from 0 to 1 |
 | `krm_foyer_bound_reached_total` | counter | `bound` | Requests refused, and responses cut short, because a bound was reached |
 | `krm_foyer_requests_in_flight` | gauge | | Requests through `/k8s` open now, watches included |
+| `krm_foyer_streams_open` | gauge | | Streams through `/stream` open now |
+| `krm_foyer_upstream_watches_open` | gauge | | Watches the streams hold open at the API server now; at most one per stream |
 | `krm_foyer_responses_cut_short_total` | counter | `cause` | Responses krm-foyer cut short, by why |
 | `krm_foyer_interruptions_total` | counter | `reason` | Answers krm-foyer gave instead of the API server's, by the reason in the `Krm-Foyer-Interruption` header |
 
@@ -355,6 +433,8 @@ The `bound` label, and when usage is measured:
 | `session_request_burst` | requests | at every request let through | the share of the session's burst spent, this request included |
 | `session_concurrent_requests` | requests | at every request let through, as it starts | the session's requests in flight, this one included, over the limit |
 | `concurrent_requests` | requests | at every request let through, as it starts | the replica's requests in flight, this one included, over the limit |
+| `session_streams` | streams | at every stream let through, as it opens | the session's streams open, this one included, over the limit |
+| `streams` | streams | at every stream let through, as it opens | the replica's streams open, this one included, over the limit |
 | `response_duration` | seconds | when a response ends | how long it was open, over the limit |
 | `response_bytes` | bytes | when a response ends | its decoded bytes, over the limit |
 

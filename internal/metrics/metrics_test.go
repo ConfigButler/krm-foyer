@@ -38,6 +38,10 @@ func TestNamesAsScraped(t *testing.T) {
 		}
 	}
 	m.CutShort(CauseSessionEnded)
+	m.StreamOpen()
+	closed := m.StreamOpen()
+	closed()
+	m.UpstreamWatch()
 	m.BoundLimit(BoundResponseDuration, 1800)
 	m.BoundUsage(BoundResponseDuration, 0.2)
 	m.BoundUsage(BoundResponseDuration, 3) // past the limit is all of it
@@ -56,6 +60,10 @@ func TestNamesAsScraped(t *testing.T) {
 		`krm_foyer_bound_usage_ratio_bucket{bound="response_duration",le="0.9"} 1`,
 		`krm_foyer_bound_usage_ratio_bucket{bound="response_duration",le="1"} 2`,
 		`krm_foyer_bound_usage_ratio_sum{bound="response_duration"} 1.2`,
+		"# TYPE krm_foyer_streams_open gauge",
+		"krm_foyer_streams_open 1",
+		"# TYPE krm_foyer_upstream_watches_open gauge",
+		"krm_foyer_upstream_watches_open 1",
 		"# TYPE krm_foyer_bound_reached_total counter",
 		`krm_foyer_bound_reached_total{bound="response_duration"} 1`,
 		// The Go runtime's and the process's come along: a leaked response shows
@@ -77,4 +85,6 @@ func TestNilRecordsNothing(t *testing.T) {
 	m.BoundLimit(BoundResponseDuration, 1)
 	m.BoundUsage(BoundResponseDuration, 1)
 	m.BoundReached(BoundResponseDuration)
+	m.StreamOpen()()
+	m.UpstreamWatch()()
 }

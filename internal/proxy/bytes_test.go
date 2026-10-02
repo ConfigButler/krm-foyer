@@ -73,7 +73,7 @@ func TestResponseBytesBoundary(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					m := metrics.New()
 					f := newFoyerWith(t, sizedAPIServer(t, upstream, size, 64, compress), credentials{token: userToken},
-						frontOptions{config: func(c *Config) { c.MaxResponseBytes, c.Metrics = limit, m }})
+						frontOptions{config: func(c *testConfig) { c.MaxResponseBytes, c.Metrics = limit, m }})
 					code, got, err := f.fetch(t)
 					switch {
 					case size <= limit:
@@ -123,7 +123,7 @@ func TestACompressedBombIsStopped(t *testing.T) {
 			}
 		}
 	})
-	f := newFoyerWith(t, api, credentials{token: userToken}, frontOptions{config: func(c *Config) { c.MaxResponseBytes = limit }})
+	f := newFoyerWith(t, api, credentials{token: userToken}, frontOptions{config: func(c *testConfig) { c.MaxResponseBytes = limit }})
 	_, got, err := f.fetch(t)
 	if err == nil || len(got) > limit {
 		t.Fatalf("%d bytes, %v; want at most %d and then an abort", len(got), err, limit)
@@ -137,7 +137,7 @@ func TestHeadIsNotTooLarge(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", "1000000")
 	})
-	f := newFoyerWith(t, api, credentials{token: userToken}, frontOptions{config: func(c *Config) { c.MaxResponseBytes = 10 }})
+	f := newFoyerWith(t, api, credentials{token: userToken}, frontOptions{config: func(c *testConfig) { c.MaxResponseBytes = 10 }})
 	if a := f.request(t, http.MethodHead, "/k8s/api/v1/configmaps", nil, nil); a.StatusCode != http.StatusOK {
 		t.Fatalf("HEAD: %d", a.StatusCode)
 	}
@@ -155,7 +155,7 @@ func TestResponseBytesProperty(t *testing.T) {
 		chunk := 1 + rng.IntN(200)
 		compress := rng.IntN(2) == 0
 		f := newFoyerWith(t, sizedAPIServer(t, rng.IntN(2) == 0, size, chunk, compress), credentials{token: userToken},
-			frontOptions{config: func(c *Config) { c.MaxResponseBytes = limit }})
+			frontOptions{config: func(c *testConfig) { c.MaxResponseBytes = limit }})
 		code, got, err := f.fetch(t)
 		desc := "seed " + strconv.FormatUint(seed, 10) + ": " + strconv.Itoa(size) + " bytes in chunks of " + strconv.Itoa(chunk)
 		if code == http.StatusOK && len(got) > limit {

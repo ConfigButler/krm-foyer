@@ -21,10 +21,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # shellcheck is here for actionlint, which shells out to it for every `run:` block and
-# silently skips that half of its job when it is missing.
+# silently skips that half of its job when it is missing. openssl checks the hello
+# example's krm-stream bundle against npm's integrity (`task vendor-check`).
 RUN apt-get update \
     && apt-get -y install --no-install-recommends \
-    git curl ca-certificates vim less jq sudo acl gnupg unzip openssh-client shellcheck \
+    git curl ca-certificates openssl vim less jq sudo acl gnupg unzip openssh-client shellcheck \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \

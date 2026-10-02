@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
 	"github.com/ConfigButler/krm-foyer/internal/proxy"
 	"github.com/ConfigButler/krm-foyer/internal/session"
@@ -41,8 +42,12 @@ func TestThroughTheProxy(t *testing.T) {
 	}))
 	t.Cleanup(api.Close)
 	u, _ := url.Parse(api.URL)
+	g, err := gate.New(gate.Config{Credentials: h.auth})
+	if err != nil {
+		t.Fatal(err)
+	}
 	p, err := proxy.New(proxy.Config{
-		Server: u, Credentials: h.auth,
+		Server: u, Gate: g,
 		RootCAs: api.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs,
 	})
 	if err != nil {

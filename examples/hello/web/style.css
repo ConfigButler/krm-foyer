@@ -72,12 +72,22 @@ button:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 #notes { list-style: none; padding: 0; margin: 0; }
 #notes li {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 0.75rem;
   padding: 0.75rem 0;
   border-bottom: 1px solid var(--line);
 }
 #notes label { flex: 1; font-weight: 600; }
+/* Below the editor and its button: someone else changed what this user is editing. */
+#notes .conflict { order: 1; flex-basis: 100%; margin: 0; color: var(--warn); }
+#notes .conflict[hidden] { display: none; }
+
+.live { color: var(--muted); font-size: 0.9rem; }
+.live[data-state="live"] { color: var(--ok); }
+.live[data-state="retrying"],
+.live[data-state="exhausted"],
+.live[data-state="terminal"] { color: var(--warn); }
 
 label { display: block; margin-bottom: 0.5rem; }
 textarea, input {

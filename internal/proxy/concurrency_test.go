@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
 	"github.com/ConfigButler/krm-foyer/internal/metrics"
 )
@@ -20,7 +21,7 @@ type bySession struct{}
 
 const sessionHeader = "Test-Session"
 
-func (bySession) Token(r *http.Request) (Credential, *interruption.Interruption) {
+func (bySession) Token(r *http.Request) (gate.Credential, *interruption.Interruption) {
 	return credentials{token: userToken, session: r.Header.Get(sessionHeader)}.Token(r)
 }
 
@@ -110,7 +111,7 @@ func (f foyer) eventuallyLetThrough(t *testing.T, session string) {
 func TestConcurrentRequestsPerSession(t *testing.T) {
 	api := holdingAPIServer(t)
 	m := metrics.New()
-	f := newFoyerWith(t, api, bySession{}, frontOptions{config: func(c *Config) {
+	f := newFoyerWith(t, api, bySession{}, frontOptions{config: func(c *testConfig) {
 		c.MaxSessionConcurrentRequests, c.Metrics = 2, m
 	}})
 	first, leave := context.WithCancel(t.Context())
@@ -141,7 +142,7 @@ func TestConcurrentRequestsPerSession(t *testing.T) {
 func TestConcurrentRequestsPerReplica(t *testing.T) {
 	api := holdingAPIServer(t)
 	m := metrics.New()
-	f := newFoyerWith(t, api, bySession{}, frontOptions{config: func(c *Config) {
+	f := newFoyerWith(t, api, bySession{}, frontOptions{config: func(c *testConfig) {
 		c.MaxConcurrentRequests, c.Metrics = 2, m
 	}})
 	open, leave := context.WithCancel(t.Context())
@@ -167,8 +168,8 @@ func TestConcurrentRequestsPerReplica(t *testing.T) {
 func TestEverySlotIsReleased(t *testing.T) {
 	for name, tc := range map[string]struct {
 		upstream http.HandlerFunc
-		config   func(*Config)
-		creds    Credentials
+		config   func(*testConfig)
+		creds    gate.Credentials
 		end      func(t *testing.T, f foyer)
 	}{
 		"the answer completes": {
@@ -187,14 +188,14 @@ func TestEverySlotIsReleased(t *testing.T) {
 		"the session ends": {
 			upstream: holdingHandler,
 			creds:    endedSession{},
-			config:   func(c *Config) { c.SessionCheckInterval = checkEvery },
+			config:   func(c *testConfig) { c.SessionCheckInterval = checkEvery },
 			end: func(t *testing.T, f foyer) {
 				readsAborted(t, f.openAs(t.Context(), t, "a", watchTarget).Body)
 			},
 		},
 		"the response duration is up": {
 			upstream: holdingHandler,
-			config:   func(c *Config) { c.MaxResponseDuration = 50 * time.Millisecond },
+			config:   func(c *testConfig) { c.MaxResponseDuration = 50 * time.Millisecond },
 			end: func(t *testing.T, f foyer) {
 				readsAborted(t, f.openAs(t.Context(), t, "a", watchTarget).Body)
 			},
@@ -232,7 +233,7 @@ func TestEverySlotIsReleased(t *testing.T) {
 			if creds == nil {
 				creds = bySession{}
 			}
-			f := newFoyerWith(t, api, creds, frontOptions{config: func(c *Config) {
+			f := newFoyerWith(t, api, creds, frontOptions{config: func(c *testConfig) {
 				c.MaxSessionConcurrentRequests, c.Metrics = 1, m
 				if tc.config != nil {
 					tc.config(c)
@@ -263,7 +264,7 @@ func holdingHandler(w http.ResponseWriter, r *http.Request) {
 // endedSession is a session that has ended by the first check.
 type endedSession struct{}
 
-func (endedSession) Token(r *http.Request) (Credential, *interruption.Interruption) {
+func (endedSession) Token(r *http.Request) (gate.Credential, *interruption.Interruption) {
 	return credentials{token: userToken, session: "a", live: func(context.Context) bool { return false }}.Token(r)
 }
 

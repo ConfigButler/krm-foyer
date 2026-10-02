@@ -25,6 +25,8 @@ type Metrics struct {
 	boundUsage    *prometheus.HistogramVec
 	boundReached  *prometheus.CounterVec
 	inFlight      prometheus.Gauge
+	streamsOpen   prometheus.Gauge
+	upstream      prometheus.Gauge
 }
 
 // The bounds, as the bound label of the krm_foyer_bound_* metrics names them.
@@ -37,6 +39,10 @@ const (
 	BoundSessionRequestRate  = "session_request_rate"
 	BoundSessionRequestBurst = "session_request_burst"
 	BoundResponseBytes       = "response_bytes"
+	// BoundSessionStreams and BoundStreams are how many streams one session, and
+	// this replica, may have open: counted apart from requests through /k8s.
+	BoundSessionStreams = "session_streams"
+	BoundStreams        = "streams"
 )
 
 // The causes of krm_foyer_responses_cut_short_total: why krm-foyer cut a response
@@ -76,6 +82,14 @@ func New() *Metrics {
 			Name: "krm_foyer_requests_in_flight",
 			Help: "Requests through /k8s open now, watches included.",
 		}),
+		streamsOpen: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "krm_foyer_streams_open",
+			Help: "Streams through /stream open now.",
+		}),
+		upstream: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "krm_foyer_upstream_watches_open",
+			Help: "Watches the streams hold open at the API server now. Each stream holds at most one.",
+		}),
 	}
 	m.registry.MustRegister(
 		collectors.NewGoCollector(),
@@ -86,6 +100,8 @@ func New() *Metrics {
 		m.boundUsage,
 		m.boundReached,
 		m.inFlight,
+		m.streamsOpen,
+		m.upstream,
 	)
 	// Every cause is there from the start, so a dashboard shows a zero rather than
 	// no data.
@@ -150,4 +166,23 @@ func (m *Metrics) InFlight() (done func()) {
 	}
 	m.inFlight.Inc()
 	return m.inFlight.Dec
+}
+
+// StreamOpen counts a stream through /stream open; done counts it out again.
+func (m *Metrics) StreamOpen() (done func()) {
+	if m == nil {
+		return func() {}
+	}
+	m.streamsOpen.Inc()
+	return m.streamsOpen.Dec
+}
+
+// UpstreamWatch counts a watch a stream holds open at the API server; done counts it
+// out again.
+func (m *Metrics) UpstreamWatch() (done func()) {
+	if m == nil {
+		return func() {}
+	}
+	m.upstream.Inc()
+	return m.upstream.Dec
 }

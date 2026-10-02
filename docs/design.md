@@ -57,8 +57,11 @@ the API half.
 The code keeps that split. `internal/session` keeps sessions and states its refusals in
 its own terms (no session, not from this origin, no CSRF proof), with no HTTP answers.
 `internal/auth` serves the login routes and is the credential interface: it is the one
-place a session error becomes an answer. `internal/proxy` takes a token or an answer
-from that interface and knows nothing of sessions. `internal/interruption` writes what
+place a session error becomes an answer. `internal/gate` asks that interface for a token
+or an answer, holds every request to the [bounds](bounds.md), and cuts an open response
+short when its session ends; `/k8s` and `/stream` share it. `internal/proxy` takes a
+request the gate let through, with its token, and knows nothing of sessions.
+`internal/interruption` writes what
 krm-foyer answers instead of the API server, as a `Status` or a page. `cmd/krm-foyer`
 reads the configuration, one section per package, and wires them together.
 
@@ -88,7 +91,7 @@ come from krm-stream, not from a reimplementation here.
 | `/k8s/api/...` | Proxy core Kubernetes APIs after stripping `/k8s` |
 | `/k8s/apis/...` | Proxy grouped APIs, including CRDs and aggregated APIs |
 | `/k8s/api`, `/k8s/apis`, `/k8s/version`, `/k8s/openapi/...` | Proxy discovery and schema endpoints |
-| `/stream` | Serve krm-stream, for whatever the user may watch |
+| `/stream/v1` | A [krm-stream](https://github.com/ConfigButler/krm-stream/blob/main/spec/v1.md) resource stream (`GET`, the scope in the query), with the watch opened as the user: whatever RBAC lets the user watch, and nothing krm-foyer lists. See [streams and editing](#streams-and-editing) |
 | `/auth/whoami` | Who Kubernetes takes the user to be, from a SelfSubjectReview, plus the session's issuer and expiry. Never tokens |
 | `/_foyer/access` | A page showing what the user may do, from Kubernetes' own reviews. See [what may I do](#what-may-i-do) |
 
@@ -186,7 +189,8 @@ answer, it says so in a form the requester can read:
 | Path under `/k8s` that is not an [API route](#api-contract) | 404 | `Status`, reason `NotFound` | A page saying so | No |
 | Missing CSRF proof or cross-origin request | 403 | `Status` with reason `CSRFProofRequired` or `CrossOriginRequest`, never RBAC's `Forbidden` | A page saying so | No |
 | Unsupported protocol or subresource | 501 | `Status` naming what is unsupported | A page saying so | No |
-| A [bound](bounds.md) reached | 429 for the request rate and for concurrent requests; 502 for a response known to exceed its size bound before it starts | `Status` naming the bound, with `Retry-After` for the request rate | A page saying so | No for a 429; yes for a 502 |
+| A `/stream/v1` request that is not a `GET` | 405 | `Status`, reason `MethodNotAllowed` | The same `Status`: only a `GET` is answered with a page | No |
+| A [bound](bounds.md) reached | 429 for the request rate, for concurrent requests and for streams open; 502 for a response known to exceed its size bound before it starts | `Status` naming the bound, with `Retry-After` for the request rate | A page saying so | No for a 429; yes for a 502 |
 | API server unreachable | 502 | `Status` | A page saying so | Perhaps: a connection can fail after the request was sent |
 
 This table is the complete list of answers krm-foyer gives instead of the API server's.
@@ -434,16 +438,50 @@ not undo writes Kubernetes already accepted.
 
 ## Streams and editing
 
-krm-foyer supplies krm-stream's principal resolution, authorization and backend
-selection. What a user may watch is what RBAC lets them watch. Which resources use a
-shared watch is configuration for efficiency, not for access. Native watches through
-`/k8s` stay available beside it, bounded like every other request; krm-stream is the
-path for live views ([why both](bounds.md#native-watches)). Start with
-user-authenticated watches. Optional shared watches use a
-narrowly scoped service account, Kubernetes-resolved identities and per-subscriber
-SubjectAccessReview checks. Bound reauthorization and session expiry; logout closes that
-session's streams without disrupting others. Measure authorization load as well as watch
-savings. Disable stream buffering and propagate cancellation through the proxy.
+krm-foyer hosts krm-stream's gateway on `/stream/v1` and supplies what the gateway asks
+its host for: who the caller is, an authorization decision, a backend, and the
+resources it may stream. **What a user may watch is what RBAC lets them watch.** Every
+stream opens its watch with the user's own token, built for that stream alone with
+nothing from the environment: no kubeconfig, no in-cluster service account, no proxy.
+So krm-foyer's authorizer allows every scope, and the API server decides, as for `/k8s`.
+krm-stream asks its host for a list of resources; krm-foyer keeps none, and admits the
+one resource asked for. The gateway still checks the request itself, and ends any
+scope it will not serve with a terminal `SCOPE_INVALID`: an API-server address or a
+credential in the query, a malformed name, or a target other than the one cluster.
+
+A stream passes the same [gate](#architecture-and-ownership) as `/k8s`: no session is
+the 401 interruption, and the [bounds](bounds.md) and the session check hold it like any
+other response. Once the stream has started, krm-foyer's own refusals and Kubernetes'
+answers arrive as krm-stream's events, because a browser's `EventSource` cannot read the
+body of an error status:
+
+| The API server answers the watch, at opening or on the open watch, with | The browser receives |
+| --- | --- |
+| 403 | `FORBIDDEN`, terminal, with Kubernetes' own message |
+| 401 | `UNAUTHENTICATED`, terminal |
+| 404 | `SCOPE_INVALID`, terminal: the resource is not served |
+| 400 or 422 | `SCOPE_INVALID`, terminal, with Kubernetes' message |
+| 410 Gone on the open watch | `RESYNC_REQUIRED`, and a fresh snapshot at once |
+| A redirect | `INTERNAL`, terminal: it is not followed, as `/k8s` follows none, so the token goes nowhere else |
+| Anything else, no answer, or an end before the snapshot is complete or hardly after it | Nothing yet: the watch is opened again after a wait that doubles from one second to 30, and at least as long as a `Retry-After`. A stream healthy for longer than 30 seconds starts counting again |
+
+What went wrong inside never reaches the browser, and is logged by its kind
+(`status_503`, `connection`, `tls`...), never by its text: the API server, or whatever
+answered instead, writes that text, and it could hold anything, the token among it.
+`/k8s` logs the same way. krm-stream v0.4.0 does
+not map these itself, so krm-foyer does, until it does
+([feedback](investigations/krm-stream-feedback.md)). Every built-in projection may be
+requested: none hides anything from a user who can read the whole object through `/k8s`
+(see below).
+
+Which resources use a shared watch is configuration for efficiency, not for access.
+Native watches through `/k8s` stay available beside it, bounded like every other
+request; krm-stream is the path for live views ([why both](bounds.md#native-watches)).
+Optional shared watches, later, use a narrowly scoped service account,
+Kubernetes-resolved identities and per-subscriber SubjectAccessReview checks. Bound
+reauthorization and session expiry; logout closes that session's streams without
+disrupting others. Measure authorization load as well as watch savings. Disable stream
+buffering and propagate cancellation through the proxy.
 
 A stream projection is a view transformation. It cannot protect confidential fields if the
 same user can GET the full resource through `/k8s`. Restrict raw routes or separate the

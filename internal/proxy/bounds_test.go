@@ -35,7 +35,7 @@ func TestResponseDurationIsBounded(t *testing.T) {
 			api, sent, cancelled := streamingAPIServer(t, upstream)
 			m := metrics.New()
 			s := &session{}
-			f := newFoyerWith(t, api, s.credentials(), frontOptions{config: func(c *Config) {
+			f := newFoyerWith(t, api, s.credentials(), frontOptions{config: func(c *testConfig) {
 				c.MaxResponseDuration, c.SessionCheckInterval, c.Metrics = limit, time.Hour, m
 			}})
 			start := time.Now()
@@ -65,7 +65,7 @@ func TestAResponseWithinItsDurationIsNotCut(t *testing.T) {
 		_, _ = io.WriteString(w, `{"kind":"ConfigMapList"}`)
 	})
 	m := metrics.New()
-	f := newFoyerWith(t, api, credentials{token: userToken}, frontOptions{config: func(c *Config) { c.Metrics = m }})
+	f := newFoyerWith(t, api, credentials{token: userToken}, frontOptions{config: func(c *testConfig) { c.Metrics = m }})
 	if a := f.get(t, "/k8s/api/v1/configmaps"); a.StatusCode != http.StatusOK || a.Body != `{"kind":"ConfigMapList"}` {
 		t.Fatalf("%d %q", a.StatusCode, a.Body)
 	}

@@ -10,6 +10,8 @@ tries to get past them, against a real API server and Dex, with krm-foyer's serv
 account as cluster-admin bait. Each other requirement becomes a property of krm-foyer
 when its test exists and passes, and not before. Since step 4, every
 [bound](bounds.md) is reached by a test, and an open response ends with its session.
+Since step 5, the hello example follows its notes live through krm-stream, each watch
+opened as the user, and a rehearsal holds 1800 streams of 200 identities on one replica.
 
 ## Order of work
 
@@ -56,7 +58,7 @@ Each step makes pending specs real and ends with `task verify` green.
    special case: krm-foyer does not tell them apart, and no bound needs it to. A bound on
    page size was left out (2026-10-02): it would not reliably bound what a list costs.
    See [bounds](bounds.md).
-5. **Live notes with krm-stream** (was step 6). Moved ahead of refresh and shared
+5. **Live notes with krm-stream** (done; was step 6). Moved ahead of refresh and shared
    storage (2026-10-02), because live state is the experience krm-foyer is for: `/k8s`
    for reads and changes, krm-stream for what changes while a page is open. krm-foyer
    hosts krm-stream with user-authenticated upstream watches, and the hello example
@@ -144,6 +146,10 @@ Security items need tests that try to get past the boundary.
 - [ ] A NetworkPolicy in the chart that admits only the ingress to krm-foyer's port, and
       only the monitoring system to the metrics port
 - [ ] Helm chart values for both models
+- [ ] Rolling updates that refuse no connection: krm-foyer stops listening as soon as
+      it is told to stop, while its Service may still route to it for a moment, so a
+      rollout refuses connections briefly (seen by the rehearsal, which restarts it). A
+      wait before shutdown, or readiness turned off first, with a test
 - [ ] Routing recipes for one shared domain: a Gateway API `HTTPRoute`, an nginx server
       block and a Vite dev-server proxy
 - [ ] Login gate: `GET /auth/check` for an ingress gating the application's pages, with
@@ -210,8 +216,8 @@ Security items need tests that try to get past the boundary.
       [what may I do](design.md#what-may-i-do)
 - [ ] Shared session storage, so more than one replica works (step 6)
 - [ ] The [session lifecycle](design.md#session-lifecycle) bounds, each with a test:
-      logout seen by every replica at once, logout racing a refresh, the session store
-      unavailable, and krm-stream's streams open across logout and expiry
+      logout seen by every replica at once, logout racing a refresh, and the session
+      store unavailable
 - [x] A native watch open across logout and expiry is aborted and cancelled at the API
       server within the session-check interval (one replica; e2e against the real
       cluster)
@@ -237,16 +243,35 @@ Security items need tests that try to get past the boundary.
 
 ### Streams
 
-- [ ] Host krm-stream, with RBAC deciding what a user may watch; which resources use a
-      shared watch is configuration for efficiency, not access
-- [ ] User-authenticated watches first, with the hello example following its notes live
-      (step 5)
-- [ ] Bounds on browser subscriptions and on upstream watches, counted separately
+- [x] Host krm-stream, with RBAC deciding what a user may watch, and no list of
+      resources in krm-foyer (unit tests; e2e with the audit log as witness, checked by
+      deploying a krm-foyer that opens watches as its service account). Which resources
+      use a shared watch will be configuration for efficiency, not access
+- [x] User-authenticated watches first, with the hello example following its notes live:
+      a change made elsewhere appears without a reload, a change to a note being edited
+      is a conflict the page shows, and a 409 from a change the stream does not show
+      saves nothing until asked again (browser specs, each checked against a broken
+      example)
+- [x] Bounds on browser subscriptions and on upstream watches, counted separately:
+      streams per session and per replica, apart from requests, and the watches they
+      hold at the API server counted on their own (unit tests and e2e, each checked
+      against a build broken on purpose). A bound of their own on upstream watches
+      comes with shared watches
+- [x] Recovery after a disconnect: a watch the API server ends, or ends with 410 Gone,
+      is opened again on the same stream with a fresh snapshot (unit tests); a dropped
+      connection between browser and krm-foyer is recovered by krm-stream's client, with
+      what changed meanwhile and the user's draft kept (browser spec, which a page that
+      does not retry failed)
 - [ ] Shared watches with per-subscriber SubjectAccessReview and bounded rechecks
-- [ ] A stream ends when its session or its token expires, whichever comes first, and
-      logout closes that session's streams
-- [ ] A rehearsal with 200 identities, as a repeatable test, which also sets the
-      per-replica defaults in [bounds](bounds.md)
+- [x] A stream ends when its session or its token expires, whichever comes first, and
+      logout closes that session's streams: aborted, and its watch cancelled at the API
+      server within the session-check interval (one replica; unit tests, and e2e with
+      the audit log as witness, checked by deploying a krm-foyer whose streams the gate
+      could not cancel)
+- [x] A rehearsal with 200 identities, as a repeatable test, which also sets the
+      per-replica defaults in [bounds](bounds.md): 1800 streams on one replica, part of
+      the e2e suite, with what it measured in [bounds](bounds.md#measured-the-rehearsal).
+      Native watches through `/k8s` are not measured yet
 
 ### Seeing what happened
 

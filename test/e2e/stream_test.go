@@ -6,8 +6,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -25,12 +27,18 @@ type stream struct {
 	Marker string
 }
 
-// watch opens a GET through krm-foyer with the user's session and returns once its
-// head has arrived. The browser's recorder reads every body to the end, so a stream
-// goes around it, and records what it read when it ends.
+// watch opens a GET of path through /k8s with the user's session and returns once
+// its head has arrived.
 func (u user) watch(ctx context.Context, path string) *stream {
 	GinkgoHelper()
-	target := fx.foyerURL + "/k8s" + path
+	return u.open(ctx, fx.foyerURL+"/k8s"+path)
+}
+
+// open sends a GET for target with the user's session and returns once its head has
+// arrived. The browser's recorder reads every body to the end, so a stream goes
+// around it, and records what it read when it ends, for the token scan.
+func (u user) open(ctx context.Context, target string) *stream {
+	GinkgoHelper()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	Expect(err).NotTo(HaveOccurred())
 	marker := "krm-foyer-e2e/" + randomID()
@@ -51,6 +59,50 @@ func (s *stream) event() string {
 	s.read.WriteString(line)
 	Expect(err).NotTo(HaveOccurred(), "the stream ended before an event")
 	return line
+}
+
+// krmEvent is one event of a krm-stream, as the browser receives it.
+type krmEvent struct {
+	Type     string `json:"type"`
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+	Terminal bool   `json:"terminal"`
+	Object   struct {
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
+		Spec map[string]any `json:"spec"`
+		Data map[string]any `json:"data"`
+	} `json:"object"`
+}
+
+// krmEvent reads the next event of a krm-stream, past heartbeats and blank lines.
+func (s *stream) krmEvent() krmEvent {
+	GinkgoHelper()
+	for {
+		line, err := s.body.ReadString('\n')
+		s.read.WriteString(line)
+		Expect(err).NotTo(HaveOccurred(), "the stream ended before an event; read %s", s.read.String())
+		if data, ok := strings.CutPrefix(strings.TrimRight(line, "\r\n"), "data: "); ok {
+			var e krmEvent
+			Expect(json.Unmarshal([]byte(data), &e)).To(Succeed(), data)
+			return e
+		}
+	}
+}
+
+// until reads krm-stream events until one of type typ, and returns them all.
+func (s *stream) until(typ string) []krmEvent {
+	GinkgoHelper()
+	var seen []krmEvent
+	for {
+		e := s.krmEvent()
+		seen = append(seen, e)
+		if e.Type == typ {
+			return seen
+		}
+		Expect(e.Terminal).To(BeFalse(), "a terminal event before %q: %+v", typ, e)
+	}
 }
 
 // end waits up to within for the stream to end, and returns when, and how it ended:

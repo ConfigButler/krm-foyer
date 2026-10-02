@@ -190,13 +190,24 @@ metadata:
   name: fixture
 EOF
 apply() { kubectl -n fixture "$@" --dry-run=client -o yaml | kubectl apply -f - >/dev/null; }
-apply create configmap dex --from-file=config.yaml="$here/dex.yaml"
+# The rehearsal's users, after alice and bob: as many as the 200-identity rehearsal
+# (test/e2e/rehearsal_test.go) signs in, each with alice's password hash, "password".
+REHEARSAL_USERS=200
+password_hash="$(sed -n 's/^    hash: "\(.*\)"$/\1/p' "$here/dex.yaml" | head -1)"
+{
+  cat "$here/dex.yaml"
+  for i in $(seq -f '%03g' 1 "$REHEARSAL_USERS"); do
+    printf '  - email: rehearsal-%s@example.com\n    hash: "%s"\n    username: rehearsal-%s\n    userID: rehearsal-%s\n' \
+      "$i" "$password_hash" "$i" "$i"
+  done
+} > "$E2E_DIR/dex-config.yaml"
+apply create configmap dex --from-file=config.yaml="$E2E_DIR/dex-config.yaml"
 apply create secret tls dex-tls --cert "$E2E_DIR/tls/dex.crt" --key "$E2E_DIR/tls/dex.key"
 apply create configmap test-issuer --from-file="$stage"
 apply create secret tls test-issuer-tls --cert "$E2E_DIR/tls/test-issuer.crt" --key "$E2E_DIR/tls/test-issuer.key"
 # A changed configuration or certificate rolls the pods. Dex keeps its signing keys in
 # the cluster (dex.yaml), so a rolled Dex still signs with the keys the API server has.
-config_hash="$(cat "$here/dex.yaml" "$E2E_DIR"/tls/*.crt "$stage"/* | sha256sum | cut -c1-16)"
+config_hash="$(cat "$E2E_DIR/dex-config.yaml" "$E2E_DIR"/tls/*.crt "$stage"/* | sha256sum | cut -c1-16)"
 sed -e "s|DEX_IMAGE|$DEX_IMAGE|" -e "s|NGINX_IMAGE|$NGINX_IMAGE|" \
   -e "s|DEX_SERVICE_IP|$DEX_SERVICE_IP|" -e "s|ISSUER_SERVICE_IP|$ISSUER_SERVICE_IP|" \
   -e "s|CONFIG_HASH|$config_hash|" "$here/issuers.yaml" | kubectl apply -f - >/dev/null
@@ -214,5 +225,6 @@ SERVER_CONTAINER=$SERVER_CONTAINER
 API_SERVER=https://$server_ip:6443
 DEX_ISSUER=https://$DEX_HOST:5556
 TEST_ISSUER=$ISSUER_URL
+REHEARSAL_USERS=$REHEARSAL_USERS
 EOF
 echo "fixture ready: KUBECONFIG=$E2E_DIR/kubeconfig"

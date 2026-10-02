@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
 )
 
@@ -101,7 +102,7 @@ func TestOpenResponseEndsWithItsSession(t *testing.T) {
 				api, sent, cancelled := streamingAPIServer(t, upstream)
 				s := &session{}
 				f := newFoyerWith(t, api, s.credentials(), frontOptions{
-					http2: front, config: func(c *Config) { c.SessionCheckInterval = checkEvery },
+					http2: front, config: func(c *testConfig) { c.SessionCheckInterval = checkEvery },
 				})
 				body := f.open(t, "/k8s/api/v1/configmaps?watch=1")
 				<-sent
@@ -141,7 +142,7 @@ func TestALiveSessionsResponseIsNotCut(t *testing.T) {
 		}
 	})
 	s := &session{}
-	f := newFoyerWith(t, api, s.credentials(), frontOptions{config: func(c *Config) { c.SessionCheckInterval = checkEvery }})
+	f := newFoyerWith(t, api, s.credentials(), frontOptions{config: func(c *testConfig) { c.SessionCheckInterval = checkEvery }})
 	got, err := io.ReadAll(f.open(t, "/k8s/api/v1/namespaces/a/pods/b/log?follow=true"))
 	if err != nil || strings.Count(string(got), "line\n") != 10 {
 		t.Fatalf("read %q, %v; want ten lines and a clean end", got, err)
@@ -159,7 +160,7 @@ func TestSessionEndingBeforeTheAnswer(t *testing.T) {
 	})
 	s := &session{}
 	s.ended.Store(true)
-	f := newFoyerWith(t, api, s.credentials(), frontOptions{config: func(c *Config) { c.SessionCheckInterval = checkEvery }})
+	f := newFoyerWith(t, api, s.credentials(), frontOptions{config: func(c *testConfig) { c.SessionCheckInterval = checkEvery }})
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, f.url+"/k8s/api/v1/configmaps?watch=1", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +181,7 @@ func TestAHangingSessionCheckCountsAsEnded(t *testing.T) {
 		<-ctx.Done()
 		return true // too late to count
 	}}
-	f := newFoyerWith(t, api, hanging, frontOptions{config: func(c *Config) { c.SessionCheckInterval = checkEvery }})
+	f := newFoyerWith(t, api, hanging, frontOptions{config: func(c *testConfig) { c.SessionCheckInterval = checkEvery }})
 	body := f.open(t, "/k8s/api/v1/configmaps?watch=1")
 	<-sent
 	readsAborted(t, body)
@@ -208,7 +209,7 @@ func TestAStalledBrowserIsCutShortToo(t *testing.T) {
 			returned := make(chan struct{})
 			f := newFoyerWith(t, api, s.credentials(), frontOptions{
 				http2:  front,
-				config: func(c *Config) { c.SessionCheckInterval = checkEvery },
+				config: func(c *testConfig) { c.SessionCheckInterval = checkEvery },
 				wrap: func(next http.Handler) http.Handler {
 					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						defer close(returned)
@@ -240,15 +241,15 @@ func asError(v any) error {
 // still be used.
 type noLive struct{}
 
-func (noLive) Token(*http.Request) (Credential, *interruption.Interruption) {
-	return Credential{Token: userToken}, nil
+func (noLive) Token(*http.Request) (gate.Credential, *interruption.Interruption) {
+	return gate.Credential{Token: userToken}, nil
 }
 
 // A credential that cannot say whether its session is live counts as one that has
 // ended: fail closed.
 func TestACredentialWithoutLiveIsCutShort(t *testing.T) {
 	api, sent, cancelled := streamingAPIServer(t, false)
-	f := newFoyerWith(t, api, noLive{}, frontOptions{config: func(c *Config) { c.SessionCheckInterval = checkEvery }})
+	f := newFoyerWith(t, api, noLive{}, frontOptions{config: func(c *testConfig) { c.SessionCheckInterval = checkEvery }})
 	body := f.open(t, "/k8s/api/v1/configmaps?watch=1")
 	<-sent
 	readsAborted(t, body)
@@ -260,12 +261,15 @@ func TestACredentialWithoutLiveIsCutShort(t *testing.T) {
 // request may have reached Kubernetes, so no interruption may answer for it, and
 // writing nothing would send an empty 200.
 func TestUpstreamErrorAfterACutAborts(t *testing.T) {
-	p, err := New(Config{Server: &url.URL{Scheme: "https", Host: "kubernetes.example.test"}, Credentials: noLive{}})
+	p, err := newProxy(testConfig{
+		Config:     Config{Server: &url.URL{Scheme: "https", Host: "kubernetes.example.test"}},
+		gateConfig: gateConfig{Credentials: noLive{}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cut := context.WithCancelCause(t.Context())
-	cut(cutSessionEnded)
+	cut(gate.CauseSessionEnded)
 	r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/k8s/api/v1/configmaps?watch=1", nil)
 	w := httptest.NewRecorder()
 	defer func() {

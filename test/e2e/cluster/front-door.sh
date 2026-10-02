@@ -22,6 +22,15 @@ export KUBECONFIG="$E2E_DIR/kubeconfig"
 echo "== the hello example's resources"
 kubectl apply -f "$hello/manifests.yaml" >/dev/null
 kubectl wait --for=condition=Established crd/notes.hello.krm-foyer.example --timeout=60s >/dev/null
+# The rehearsal's users (start-cluster.sh) may read the notes, as bob may, so a person
+# can sign in to the example as any of them.
+rehearsal_users="$(sed -n 's/^REHEARSAL_USERS=//p' "$E2E_DIR/env")"
+users=()
+for i in $(seq -f '%03g' 1 "${rehearsal_users:-0}"); do users+=("--user=oidc:rehearsal-$i@example.com"); done
+if [ "${#users[@]}" -gt 0 ]; then
+  kubectl -n hello create rolebinding rehearsal-reads-notes --role=note-reader "${users[@]}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
 # Created only when missing, so a rerun keeps what people wrote.
 if ! kubectl create -f "$hello/notes.yaml" >/dev/null 2>"$E2E_DIR/notes.err" \
   && grep -v AlreadyExists "$E2E_DIR/notes.err" | grep -q .; then

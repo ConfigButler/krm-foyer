@@ -110,8 +110,9 @@ bugs are here, where they are cheap to find:
   slot back.
 - **The request rate** ([internal/proxy](../internal/proxy)), against a clock the test
   moves: past a session's burst, a 429 with `Retry-After` (the wait rounded up to whole
-  seconds, in both forms) that never reaches the API server. Its property is stated from
-  outside the bucket and checked over random request times: in any stretch of time a
+  seconds, in both forms) that never reaches the API server. Its property
+  ([internal/gate](../internal/gate)) is stated from outside the bucket and checked over
+  random request times: in any stretch of time a
   session gets at most its burst plus the rate times the stretch let through, and a
   session that never sends faster than the rate is never refused.
 - **The response-byte bound** ([internal/proxy](../internal/proxy)) counts decoded bytes,
@@ -121,6 +122,33 @@ bugs are here, where they are cheap to find:
   bound and cancelled at the API server. The property is checked from the browser's
   side over random sizes, chunkings and encodings: a response that ends cleanly is
   complete and within the bound, and none ever delivers more.
+- **Streams** ([internal/stream](../internal/stream)) run krm-stream's gateway against an
+  `httptest` API server that answers a streaming list. A stream opens its watch with
+  its own session's token and nothing the browser sent but its `User-Agent`, twenty
+  streams of two sessions open at once included; without a session it is krm-foyer's
+  401 and reaches nothing; a method other than `GET` is krm-foyer's 405. The upstream is
+  pinned and verified. Scopes the gateway will not serve (an API-server address, a
+  token, another target, a malformed name) end with a terminal refusal before anything
+  is sent. Kubernetes' 403, 401 and 404 keep their meaning, with no address inside the
+  cluster in what the browser reads, and an API server that cannot answer is retried
+  with a wait that doubles. A stream whose session ends is aborted and its watch
+  cancelled, even where no write deadline can be set. A redirect from the API server is
+  not followed, to another https server or to plain http, so the token goes nowhere
+  else. A 401 or 403 on an open watch ends the stream as it does at opening; a failure
+  on an open watch, or one that ends before its snapshot, waits before the watch is
+  opened again; and what the API server wrote when it failed, the token it echoed
+  among it, reaches neither the browser nor the log. Streams count against limits of
+  their own, not the request limits, but draw on the same request rate; the streams
+  open and the watches they hold at the API server are counted, and counted out again
+  when a stream ends. A watch the API server ends, or ends with 410 Gone, is opened
+  again on the same stream, as the user, with a fresh snapshot of what changed in
+  between, and without the wait or the warning of a failure. Each was seen to fail against a
+  build broken on purpose; the one mutation no test sees is the message of a retryable
+  error, which krm-stream v0.4.0 never sends.
+- **Upstream text in the log** ([internal/proxy](../internal/proxy),
+  [internal/upstream](../internal/upstream)): an API server that echoes the token in a
+  malformed response, a `Content-Type` or a `Location` never gets it into krm-foyer's
+  log, which names failures by kind from a fixed set.
 - **Login** ([internal/auth](../internal/auth)) runs against a fake issuer in the test
   that behaves like a strict one (PKCE enforced, codes single use) unless told to
   misbehave: a token for another audience or issuer, expired, signed by a stranger, with
@@ -180,15 +208,47 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   never refuses failed. A list the API server compresses to a few hundred bytes, but
   that decodes to 200 KiB, never passes the brief instance's 128 KiB bound as a complete
   answer, which a build without the byte bound failed.
+- **Streams** (in the `foyer` label): bob streams the notes RBAC lets him read, gets the
+  snapshot and then a change made while he watches, and the audit log names bob, and
+  nobody else, for every request of that stream. alice, with no grant, gets a terminal
+  `FORBIDDEN` with Kubernetes' own message, and the audit log shows the API server
+  refused alice herself. Without a session there is a 401 and no request at all. A
+  build that opened watches with its service account, cluster-admin in the fixture,
+  failed the first two. A stream open when its session logs out, or expires on the brief
+  instance, is aborted within the session-check interval, and the audit log shows the
+  API server completed its watch within a minute, though the gateway names no
+  `timeoutSeconds`; opened again, it gets the 401. A build whose gateway ran on a
+  context the gate could not cancel failed both. On the brief instance, a session with
+  two streams open, its limit, may still open two native watches, and its third stream
+  is krm-foyer's 429 and never reaches the API server; the build before stream limits
+  failed it.
+- **The rehearsal** (labels `foyer` and `rehearsal`) holds 1800 streams of 200 signed-in
+  identities on one replica, and fails unless one change reaches all of them, every
+  stream is aborted within the session-check interval of its logout, and streams,
+  watches at the API server and goroutines all return to where they were. What it
+  measured is in [bounds](bounds.md#measured-the-rehearsal). Dex has its 200 users from
+  `start-cluster.sh`, which `task demo` uses too.
 - **The hello example** (label `browser`) is the claim that krm-foyer is usable, not
   only correct. Chromium ([chromedp/headless-shell](https://hub.docker.com/r/chromedp/headless-shell),
   pinned by digest, driven from Go with chromedp) runs in the network namespace of the
   container the suite runs in, so `*.localhost` reaches the same port-forwards a
   person's browser reaches through VS Code. It trusts
-  exactly the front door's and Dex's certificates, by their public keys. Its specs were
-  each seen to fail against a broken build: the browser not trusting Dex, the example
-  re-reading and saving again on a 409, the helper leaving out the CSRF header, and the
-  helper not reading a new CSRF token after the user signed in again in another tab.
+  exactly the front door's and Dex's certificates, by their public keys. The example
+  follows its notes through `/stream`: a change made with `kubectl` appears in the page
+  without a reload; one made to a note alice is typing in is shown as a conflict, with
+  her text kept; and a change the stream does not show (the last-applied-configuration
+  annotation, which every projection removes) gets a 409 on save, after which the page
+  catches up and saves only when asked again. When the connection drops (the spec kills
+  the front door's port-forward, so every connection through it breaks, and the session
+  lives on), the page shows it is reconnecting; once the way is back it has a change
+  made meanwhile, and alice's unsaved text is still hers. Signing out in another tab
+  ends the live view with the page saying so. Its specs were each seen to fail against a broken build:
+  the browser not trusting Dex, the example not reconnecting after a dropped connection,
+  the example saving again on its own after a 409 or
+  saving without its `resourceVersion`, a change from elsewhere replacing what alice
+  typed, the page ignoring the end of its stream, the helper leaving out the CSRF header,
+  and the helper not reading a new CSRF token after the user signed in again in another
+  tab.
 
 ## The e2e fixture
 

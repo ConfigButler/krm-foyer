@@ -81,12 +81,12 @@ separate:
    packages. There is no npm package until someone needs one outside a krm-foyer origin.
 3. **[`examples/hello/`](../examples/hello)** (exists): one HTML file, one script and a
    stylesheet, with no bundler and no backend of its own. It signs in, lists, creates and
-   edits Notes (a small custom resource) through `/k8s`, and shows Kubernetes' 403 and 409
-   answers as they are. A Gateway API front door (Traefik) routes `/` to a file server
+   edits Notes (a small custom resource) through `/k8s`, follows them live through
+   `/stream` with krm-stream's browser library (one file, vendored), and shows
+   Kubernetes' 403 and 409 answers as they are. A Gateway API front door (Traefik) routes `/` to a file server
    for it and krm-foyer's prefixes to krm-foyer, on one origin, and `kubectl
    port-forward` brings it to the browser. `task demo` starts it in a disposable cluster,
-   and the e2e suite's browser specs drive it in Chromium. It reloads on request; following
-   changes live through `/stream` comes with streams.
+   and the e2e suite's browser specs drive it in Chromium.
 
 The start page and the auth pages came first, because the OIDC work needed them anyway.
 The routing recipes come with the ingress work.

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
 )
 
@@ -19,7 +20,7 @@ var navigation = http.Header{"Sec-Fetch-Dest": {"document"}, "Sec-Fetch-Mode": {
 type interruptionCase struct {
 	name     string
 	target   string
-	creds    Credentials
+	creds    gate.Credentials
 	upstream http.HandlerFunc
 	header   http.Header
 	// occupy holds one request of the session open first, with a concurrency limit
@@ -77,7 +78,7 @@ func (tc interruptionCase) foyer(t *testing.T) foyer {
 	}
 	o := frontOptions{}
 	if tc.occupy {
-		o.config = func(c *Config) { c.MaxSessionConcurrentRequests = 1 }
+		o.config = func(c *testConfig) { c.MaxSessionConcurrentRequests = 1 }
 	}
 	f := newFoyerWith(t, api, creds, o)
 	if tc.occupy {
