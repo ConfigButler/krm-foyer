@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/ConfigButler/krm-foyer/internal/auth"
+	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/metrics"
 	"github.com/ConfigButler/krm-foyer/internal/proxy"
 	"github.com/ConfigButler/krm-foyer/internal/server"
@@ -58,13 +59,14 @@ type config struct {
 	login *loginConfig
 }
 
-// loginConfig is sign-in and the API proxy. They come together, because the proxy's
-// only credential is a session and a session only comes from login, but each package
-// keeps its own section. What handler wires (the session store, the sessions, the
-// credentials and the logger) is left out here.
+// loginConfig is sign-in and the API half. They come together, because the API
+// half's only credential is a session and a session only comes from login, but each
+// package keeps its own section. What handler wires (the session store, the
+// sessions, the credentials, the gate, the logger and the metrics) is left out here.
 type loginConfig struct {
 	auth       auth.Config
 	sessions   session.Config
+	gate       gate.Config
 	kubernetes proxy.Config
 }
 
@@ -96,17 +98,17 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	fs.StringVar(&apiServerCA, "kubernetes-ca-file", "", "the CA certificates (PEM) that sign the API server's certificate")
 	fs.DurationVar(&idle, "session-idle-timeout", time.Hour, "end a session unused for this long")
 	fs.DurationVar(&absolute, "session-absolute-timeout", 8*time.Hour, "end any session this long after login")
-	fs.DurationVar(&checkEvery, "session-check-interval", proxy.DefaultSessionCheckInterval,
+	fs.DurationVar(&checkEvery, "session-check-interval", gate.DefaultSessionCheckInterval,
 		"how often an open response asks whether its session is still live; it is cut short when not")
-	fs.DurationVar(&maxDuration, "max-response-duration", proxy.DefaultMaxResponseDuration,
+	fs.DurationVar(&maxDuration, "max-response-duration", gate.DefaultMaxResponseDuration,
 		"how long a response, a watch above all, may stay open; it is cut short then. Below -session-idle-timeout")
-	fs.IntVar(&perSession, "max-session-concurrent-requests", proxy.DefaultMaxSessionConcurrentRequests,
+	fs.IntVar(&perSession, "max-session-concurrent-requests", gate.DefaultMaxSessionConcurrentRequests,
 		"how many requests, watches included, one session may have in flight; more get 429")
-	fs.IntVar(&inAll, "max-concurrent-requests", proxy.DefaultMaxConcurrentRequests,
+	fs.IntVar(&inAll, "max-concurrent-requests", gate.DefaultMaxConcurrentRequests,
 		"how many requests, watches included, this replica may have in flight; more get 429")
-	fs.Float64Var(&perSecond, "session-request-rate", proxy.DefaultSessionRequestRate,
+	fs.Float64Var(&perSecond, "session-request-rate", gate.DefaultSessionRequestRate,
 		"how many requests a second one session may send, once its burst is spent; more get 429 with Retry-After")
-	fs.IntVar(&burst, "session-request-burst", proxy.DefaultSessionRequestBurst,
+	fs.IntVar(&burst, "session-request-burst", gate.DefaultSessionRequestBurst,
 		"how many requests one session may send at once")
 	fs.Int64Var(&maxBytes, "max-response-bytes", proxy.DefaultMaxResponseBytes,
 		"the most decoded bytes a response may have; past it, 502 if known in advance, otherwise it is cut short")
@@ -173,26 +175,28 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	// Sessions. A mutation must come from the public URL's origin.
 	login.sessions = session.Config{Origin: publicURL, IdleTimeout: idle, AbsoluteTimeout: absolute}
 
-	// The API proxy.
+	// The bounds every request through the API half is held to.
 	if checkEvery <= 0 {
 		return config{}, fmt.Errorf("-session-check-interval must be positive, got %v", checkEvery)
 	}
-	login.kubernetes.SessionCheckInterval = checkEvery
+	login.gate.SessionCheckInterval = checkEvery
 	// A reconnect counts as use and an open response does not, so a tab that only
 	// watches stays signed in only if its watches end, and reconnect, within the
 	// idle timeout.
 	if maxDuration <= 0 || maxDuration >= idle {
 		return config{}, fmt.Errorf("-max-response-duration must be positive and below -session-idle-timeout (%v), got %v", idle, maxDuration)
 	}
-	login.kubernetes.MaxResponseDuration = maxDuration
+	login.gate.MaxResponseDuration = maxDuration
 	if perSession <= 0 || inAll <= 0 {
 		return config{}, fmt.Errorf("-max-session-concurrent-requests and -max-concurrent-requests must be positive, got %d and %d", perSession, inAll)
 	}
-	login.kubernetes.MaxSessionConcurrentRequests, login.kubernetes.MaxConcurrentRequests = perSession, inAll
+	login.gate.MaxSessionConcurrentRequests, login.gate.MaxConcurrentRequests = perSession, inAll
 	if perSecond <= 0 || burst <= 0 {
 		return config{}, fmt.Errorf("-session-request-rate and -session-request-burst must be positive, got %v and %d", perSecond, burst)
 	}
-	login.kubernetes.SessionRequestRate, login.kubernetes.SessionRequestBurst = perSecond, burst
+	login.gate.SessionRequestRate, login.gate.SessionRequestBurst = perSecond, burst
+
+	// The API proxy.
 	if maxBytes <= 0 {
 		return config{}, fmt.Errorf("-max-response-bytes must be positive, got %d", maxBytes)
 	}
@@ -238,9 +242,14 @@ func handler(cfg config, logger *slog.Logger, m *metrics.Metrics) (http.Handler,
 	if err != nil {
 		return nil, nil, err
 	}
-	// Login is the proxy's only credential source: there is no other way to give
+	// Login is the API half's only credential source: there is no other way to give
 	// krm-foyer a token, and no service-account fallback.
-	l.kubernetes.Credentials, l.kubernetes.Logger, l.kubernetes.Metrics = login, logger, m
+	l.gate.Credentials, l.gate.Logger, l.gate.Metrics = login, logger, m
+	g, err := gate.New(l.gate)
+	if err != nil {
+		return nil, nil, err
+	}
+	l.kubernetes.Gate = g
 	api, err := proxy.New(l.kubernetes)
 	if err != nil {
 		return nil, nil, err

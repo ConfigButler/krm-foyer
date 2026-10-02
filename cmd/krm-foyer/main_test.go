@@ -49,9 +49,9 @@ func TestParseConfigWithLogin(t *testing.T) {
 	if l == nil || l.auth.ClientSecret != "s3cret" || l.kubernetes.Server.Host != "kubernetes.default.svc" ||
 		strings.Join(l.auth.Scopes, " ") != "openid email groups" || l.sessions.Origin != "https://foyer.example.test" ||
 		l.sessions.IdleTimeout != time.Hour || l.sessions.AbsoluteTimeout != 8*time.Hour ||
-		l.kubernetes.SessionCheckInterval != 5*time.Second || l.kubernetes.MaxResponseDuration != 30*time.Minute ||
-		l.kubernetes.MaxSessionConcurrentRequests != 64 || l.kubernetes.MaxConcurrentRequests != 2000 ||
-		l.kubernetes.SessionRequestRate != 20 || l.kubernetes.SessionRequestBurst != 100 ||
+		l.gate.SessionCheckInterval != 5*time.Second || l.gate.MaxResponseDuration != 30*time.Minute ||
+		l.gate.MaxSessionConcurrentRequests != 64 || l.gate.MaxConcurrentRequests != 2000 ||
+		l.gate.SessionRequestRate != 20 || l.gate.SessionRequestBurst != 100 ||
 		l.kubernetes.MaxResponseBytes != 32<<20 {
 		t.Fatalf("%+v", l)
 	}

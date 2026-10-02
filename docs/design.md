@@ -57,8 +57,11 @@ the API half.
 The code keeps that split. `internal/session` keeps sessions and states its refusals in
 its own terms (no session, not from this origin, no CSRF proof), with no HTTP answers.
 `internal/auth` serves the login routes and is the credential interface: it is the one
-place a session error becomes an answer. `internal/proxy` takes a token or an answer
-from that interface and knows nothing of sessions. `internal/interruption` writes what
+place a session error becomes an answer. `internal/gate` asks that interface for a token
+or an answer, holds every request to the [bounds](bounds.md), and cuts an open response
+short when its session ends; `/k8s` and `/stream` share it. `internal/proxy` takes a
+request the gate let through, with its token, and knows nothing of sessions.
+`internal/interruption` writes what
 krm-foyer answers instead of the API server, as a `Status` or a page. `cmd/krm-foyer`
 reads the configuration, one section per package, and wires them together.
 

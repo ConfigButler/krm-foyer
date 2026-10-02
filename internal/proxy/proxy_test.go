@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
 )
 
@@ -34,7 +35,7 @@ type credentials struct {
 	session string
 }
 
-func (c credentials) Token(*http.Request) (Credential, *interruption.Interruption) {
+func (c credentials) Token(*http.Request) (gate.Credential, *interruption.Interruption) {
 	live := c.live
 	if live == nil {
 		live = func(context.Context) bool { return true }
@@ -43,7 +44,7 @@ func (c credentials) Token(*http.Request) (Credential, *interruption.Interruptio
 	if session == "" {
 		session = "s1"
 	}
-	return Credential{Token: c.token, Live: live, Session: session}, c.refused
+	return gate.Credential{Token: c.token, Live: live, Session: session}, c.refused
 }
 
 // apiServer stands in for the API server and records what reached it.
@@ -106,7 +107,7 @@ type foyer struct {
 
 // newFoyer serves a proxy to api with the given credentials, on a real listener so
 // that request targets arrive as bytes on the wire.
-func newFoyer(t *testing.T, api *apiServer, creds Credentials) foyer {
+func newFoyer(t *testing.T, api *apiServer, creds gate.Credentials) foyer {
 	t.Helper()
 	return newFoyerWith(t, api, creds, frontOptions{})
 }
@@ -114,14 +115,14 @@ func newFoyer(t *testing.T, api *apiServer, creds Credentials) foyer {
 // frontOptions change how newFoyerWith serves the proxy.
 type frontOptions struct {
 	// config adjusts the proxy's configuration.
-	config func(*Config)
+	config func(*testConfig)
 	// http2 serves browsers over TLS with HTTP/2, as krm-foyer does in production.
 	http2 bool
 	// wrap wraps the proxy's handler, to see when it returns.
 	wrap func(http.Handler) http.Handler
 }
 
-func newFoyerWith(t *testing.T, api *apiServer, creds Credentials, o frontOptions) foyer {
+func newFoyerWith(t *testing.T, api *apiServer, creds gate.Credentials, o frontOptions) foyer {
 	t.Helper()
 	server, err := url.Parse(api.URL)
 	if err != nil {
@@ -130,14 +131,14 @@ func newFoyerWith(t *testing.T, api *apiServer, creds Credentials, o frontOption
 	roots := x509.NewCertPool()
 	roots.AddCert(api.Certificate())
 	logs := &lockedWriter{}
-	cfg := Config{
-		Server: server, RootCAs: roots, Credentials: creds,
-		Logger: slog.New(slog.NewJSONHandler(logs, nil)),
+	cfg := testConfig{
+		Config:     Config{Server: server, RootCAs: roots},
+		gateConfig: gateConfig{Credentials: creds, Logger: slog.New(slog.NewJSONHandler(logs, nil))},
 	}
 	if o.config != nil {
 		o.config(&cfg)
 	}
-	p, err := New(cfg)
+	p, err := newProxy(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +156,27 @@ func newFoyerWith(t *testing.T, api *apiServer, creds Credentials, o frontOption
 	front.StartTLS()
 	t.Cleanup(front.Close)
 	return foyer{url: front.URL, logs: logs, client: front.Client().Transport}
+}
+
+// gateConfig is the gate's configuration, under a name of its own so that testConfig
+// can embed it beside Config.
+type gateConfig = gate.Config
+
+// testConfig is a proxy's configuration and its gate's, so that a test sets either
+// by name.
+type testConfig struct {
+	Config
+	gateConfig
+}
+
+// newProxy returns a proxy behind a gate of its own.
+func newProxy(cfg testConfig) (*Proxy, error) {
+	g, err := gate.New(cfg.gateConfig)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Gate = g
+	return New(cfg.Config)
 }
 
 // lockedWriter keeps what the proxy logs, for a test to read while the proxy may
@@ -350,7 +372,7 @@ var (
 
 func TestNoCredentialNeverReachesTheAPIServer(t *testing.T) {
 	for name, tc := range map[string]struct {
-		creds Credentials
+		creds gate.Credentials
 		code  int
 	}{
 		"not signed in":           {credentials{refused: interruption.NotSignedIn()}, http.StatusUnauthorized},
@@ -763,7 +785,7 @@ func TestUpstreamIsPinnedAndVerified(t *testing.T) {
 	// Go never proxies loopback addresses, so setting HTTPS_PROXY here would prove
 	// nothing; look at the transport instead.
 	server, _ := url.Parse(api.URL)
-	pinned, err := New(Config{Server: server, Credentials: credentials{token: userToken}})
+	pinned, err := newProxy(testConfig{Config: Config{Server: server}, gateConfig: gateConfig{Credentials: credentials{token: userToken}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +793,7 @@ func TestUpstreamIsPinnedAndVerified(t *testing.T) {
 		t.Errorf("transport is not pinned and verified: %#v", pinned.transport)
 	}
 
-	p, err := New(Config{Server: server, RootCAs: x509.NewCertPool(), Credentials: credentials{token: userToken}})
+	p, err := newProxy(testConfig{Config: Config{Server: server, RootCAs: x509.NewCertPool()}, gateConfig: gateConfig{Credentials: credentials{token: userToken}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -789,21 +811,24 @@ func TestUpstreamIsPinnedAndVerified(t *testing.T) {
 	}
 }
 
-// The proxy only talks to an https API server it was given.
+// The proxy only talks to an https API server it was given, behind a gate.
 func TestNewRejectsBadConfig(t *testing.T) {
-	creds := credentials{token: userToken}
+	g, err := gate.New(gate.Config{Credentials: credentials{token: userToken}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, raw := range []string{"http://api.example", "https://", "https://api.example/prefix",
 		"https://api.example?x=1", "https://u:p@api.example"} {
 		u, _ := url.Parse(raw)
-		if _, err := New(Config{Server: u, Credentials: creds}); err == nil {
+		if _, err := New(Config{Server: u, Gate: g}); err == nil {
 			t.Errorf("New accepted server %q", raw)
 		}
 	}
 	u, _ := url.Parse("https://api.example")
 	if _, err := New(Config{Server: u}); err == nil {
-		t.Error("New accepted no credential source")
+		t.Error("New accepted no gate")
 	}
-	if _, err := New(Config{Credentials: creds}); err == nil {
+	if _, err := New(Config{Gate: g}); err == nil {
 		t.Error("New accepted no server")
 	}
 }

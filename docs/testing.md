@@ -110,8 +110,9 @@ bugs are here, where they are cheap to find:
   slot back.
 - **The request rate** ([internal/proxy](../internal/proxy)), against a clock the test
   moves: past a session's burst, a 429 with `Retry-After` (the wait rounded up to whole
-  seconds, in both forms) that never reaches the API server. Its property is stated from
-  outside the bucket and checked over random request times: in any stretch of time a
+  seconds, in both forms) that never reaches the API server. Its property
+  ([internal/gate](../internal/gate)) is stated from outside the bucket and checked over
+  random request times: in any stretch of time a
   session gets at most its burst plus the rate times the stretch let through, and a
   session that never sends faster than the rate is never refused.
 - **The response-byte bound** ([internal/proxy](../internal/proxy)) counts decoded bytes,
