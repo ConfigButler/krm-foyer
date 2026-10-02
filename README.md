@@ -37,9 +37,10 @@ import `.e2e/ca.crt` into your browser or accept the warnings. `task e2e-down` r
 all. A fixture made by an older version of the scripts is refused with a message saying
 so; run `task e2e-down` once, then `task demo` again.
 
-The example is one HTML file and one script with no backend of its own: everything it
-does goes through `/k8s` as the signed-in user, and the 403 and 409 it shows are
-Kubernetes' own answers.
+The example is one HTML file and one script with no backend of its own: it follows the
+notes live through `/stream` and changes them through `/k8s`, both as the signed-in user,
+and the 403 and 409 it shows are Kubernetes' own answers. Open it in two tabs to see a
+change in one appear in the other, and a conflict when both edit the same note.
 
 ## Principles
 

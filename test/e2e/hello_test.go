@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,7 +43,7 @@ var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 	BeforeAll(func(ctx SpecContext) {
 		tab = startBrowser(ctx)
 		ns = fx.namespace()
-		fx.grant(ns, aliceK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch", "create", "update")
+		fx.grant(ns, aliceK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch", "create", "patch")
 		fx.grant(ns, bobK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch")
 	}, NodeTimeout(2*time.Minute))
 
@@ -85,44 +86,83 @@ var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 		)
 		expectStatus(tab, "ok", "Created groceries.")
 		Expect(noteText("groceries")).To(Equal("milk"))
+		// The new note reaches the list through the stream, like anyone else's.
+		expectEditor(tab, "groceries", "milk")
 
 		run(tab,
-			chromedp.SetValue(`li[data-name="groceries"] textarea`, "milk, eggs"),
+			typeInto(`li[data-name="groceries"] textarea`, "milk, eggs"),
 			chromedp.Click(`li[data-name="groceries"] .save`),
 		)
 		expectStatus(tab, "ok", "Saved groceries.")
 		Expect(noteText("groceries")).To(Equal("milk, eggs"))
 	})
 
-	It("shows a 409 when the note changed since it was loaded, and overwrites nothing", func() {
+	It("shows a change made elsewhere as it happens, without reloading", func() {
 		fx.kubectl("-n", ns, "patch", "notes.hello.krm-foyer.example", "groceries",
 			"--type=merge", "-p", `{"spec":{"text":"bread"}}`)
+		expectEditor(tab, "groceries", "bread")
+	})
+
+	// krm-stream's store merges what arrives into what the user is typing: a change to
+	// the same text is a conflict the page shows, and nothing is overwritten either way
+	// until the user decides.
+	It("shows a change to a note alice is editing as a conflict, and lets her take it", func() {
+		run(tab, typeInto(`li[data-name="groceries"] textarea`, "bread, unsaved"))
+		fx.kubectl("-n", ns, "patch", "notes.hello.krm-foyer.example", "groceries",
+			"--type=merge", "-p", `{"spec":{"text":"bread, butter"}}`)
+
+		var conflict, draft string
 		run(tab,
-			chromedp.SetValue(`li[data-name="groceries"] textarea`, "milk, eggs, flour"),
+			chromedp.WaitVisible(`li[data-name="groceries"] .conflict`),
+			chromedp.Text(`li[data-name="groceries"] .conflict`, &conflict),
+			chromedp.Value(`li[data-name="groceries"] textarea`, &draft),
+		)
+		Expect(conflict).To(ContainSubstring("bread, butter"))
+		Expect(draft).To(Equal("bread, unsaved"), "a change from elsewhere replaced what alice typed")
+		Expect(noteText("groceries")).To(Equal("bread, butter"))
+
+		run(tab,
+			chromedp.Click(`li[data-name="groceries"] .take-theirs`),
+			chromedp.WaitNotVisible(`li[data-name="groceries"] .conflict`),
+		)
+		expectEditor(tab, "groceries", "bread, butter")
+	})
+
+	// A change to what the stream does not show (the last-applied-configuration
+	// annotation, which every projection removes) moves the resourceVersion without an
+	// event, so the page holds an older one. Kubernetes answers the save with 409; the
+	// page keeps alice's text, saves nothing behind her back, and catches up.
+	It("shows a 409 when the note changed out of sight, and saves only when asked again", func() {
+		fx.kubectl("-n", ns, "annotate", "notes.hello.krm-foyer.example", "groceries", "--overwrite",
+			`kubectl.kubernetes.io/last-applied-configuration={"note":"changed out of sight"}`)
+		run(tab,
+			typeInto(`li[data-name="groceries"] textarea`, "milk, eggs, flour"),
 			chromedp.Click(`li[data-name="groceries"] .save`),
 		)
 		expectStatus(tab, "conflict", "failed with 409")
-		Expect(noteText("groceries")).To(Equal("bread"))
+		expectStatus(tab, "conflict", "save again")
+		var draft string
+		run(tab, chromedp.Value(`li[data-name="groceries"] textarea`, &draft))
+		Expect(draft).To(Equal("milk, eggs, flour"))
+		Expect(noteText("groceries")).To(Equal("bread, butter"))
 
-		By("reloading, which shows the other change")
-		run(tab, chromedp.Click("#reload", chromedp.ByID))
-		expectStatus(tab, "ok", "1 notes")
-		var text string
-		run(tab, chromedp.Value(`li[data-name="groceries"] textarea`, &text))
-		Expect(text).To(Equal("bread"))
+		run(tab, chromedp.Click(`li[data-name="groceries"] .save`))
+		expectStatus(tab, "ok", "Saved groceries.")
+		Expect(noteText("groceries")).To(Equal("milk, eggs, flour"))
 	})
 
 	// Creating a note adds it to the list, and leaves every other editor as it was:
 	// text typed and not saved yet is the user's, not the page's to throw away.
 	It("keeps an unsaved edit when alice creates another note", func() {
 		run(tab,
-			chromedp.SetValue(`li[data-name="groceries"] textarea`, "bread, unsaved"),
+			typeInto(`li[data-name="groceries"] textarea`, "flour, unsaved"),
 			chromedp.SetValue("#new-name", "chores", chromedp.ByID),
 			chromedp.SetValue("#new-text", "sweep", chromedp.ByID),
 			chromedp.Click("#create", chromedp.ByID),
 		)
 		expectStatus(tab, "ok", "Created chores.")
 		Expect(noteText("chores")).To(Equal("sweep"))
+		expectEditor(tab, "chores", "sweep")
 
 		var draft string
 		var names []string
@@ -130,9 +170,9 @@ var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 			chromedp.Value(`li[data-name="groceries"] textarea`, &draft),
 			chromedp.Evaluate(`[...document.querySelectorAll('#notes li')].map((li) => li.dataset.name)`, &names),
 		)
-		Expect(draft).To(Equal("bread, unsaved"))
-		Expect(names).To(Equal([]string{"chores", "groceries"}), "in order of name, as a reload shows them")
-		Expect(noteText("groceries")).To(Equal("bread"))
+		Expect(draft).To(Equal("flour, unsaved"))
+		Expect(names).To(Equal([]string{"chores", "groceries"}), "in order of name")
+		Expect(noteText("groceries")).To(Equal("milk, eggs, flour"))
 	})
 
 	// Signing in again starts a new session with a new CSRF token, and a page loaded before
@@ -149,7 +189,7 @@ var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 
 		signInAgain()
 		run(tab,
-			chromedp.SetValue(`li[data-name="groceries"] textarea`, "bread, butter"),
+			typeInto(`li[data-name="groceries"] textarea`, "bread, butter"),
 			chromedp.Click(`li[data-name="groceries"] .save`),
 		)
 		expectStatus(tab, "ok", "Saved groceries.")
@@ -177,14 +217,30 @@ var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 		run(tab, chromedp.WaitVisible("#signed-in", chromedp.ByID), chromedp.Text("#who", &who, chromedp.ByID))
 		Expect(who).To(Equal(bob))
 		expectStatus(tab, "ok", "2 notes")
+		expectEditor(tab, "groceries", "bread, butter")
 
 		run(tab,
-			chromedp.SetValue(`li[data-name="groceries"] textarea`, "bob was here"),
+			typeInto(`li[data-name="groceries"] textarea`, "bob was here"),
 			chromedp.Click(`li[data-name="groceries"] .save`),
 		)
 		// The message is the API server's own, naming bob: RBAC refused, not krm-foyer.
-		expectStatus(tab, "refused", `User "oidc:bob@example.com" cannot update resource "notes"`)
+		expectStatus(tab, "refused", `User "oidc:bob@example.com" cannot patch resource "notes"`)
 		Expect(noteText("groceries")).To(Equal("bread, butter"))
+	})
+
+	// The stream ends with the session: krm-foyer cuts it short, krm-stream's client
+	// opens it again, gets the 401, and stops; the page says so.
+	It("ends bob's live view when he signs out in another tab", func() {
+		other, closeOther := chromedp.NewContext(tab)
+		DeferCleanup(closeOther)
+		Expect(chromedp.Run(other)).To(Succeed())
+		run(other,
+			chromedp.Navigate(fx.foyerURL+"/?namespace="+ns),
+			chromedp.WaitVisible("#logout", chromedp.ByID),
+			chromedp.Click("#logout", chromedp.ByID),
+		)
+		expectStatus(tab, "signed-out", "signed out")
+		run(tab, chromedp.WaitVisible("#sign-in", chromedp.ByID))
 	})
 })
 
@@ -263,6 +319,28 @@ func signInAtDex(tab context.Context, user string) {
 		chromedp.SetValue("#password", password, chromedp.ByID),
 		chromedp.Click("#submit-login", chromedp.ByID),
 	)
+}
+
+// typeInto puts text into the field at sel as typing does: the value, then an input
+// event, which the page listens for.
+func typeInto(sel, text string) chromedp.Action {
+	return chromedp.Tasks{
+		chromedp.SetValue(sel, text),
+		chromedp.Evaluate(`document.querySelector(`+strconv.Quote(sel)+`).dispatchEvent(new Event('input', {bubbles: true}))`, nil),
+	}
+}
+
+// expectEditor waits for the editor of note name to show text.
+func expectEditor(tab context.Context, name, text string) {
+	GinkgoHelper()
+	sel := `li[data-name="` + name + `"] textarea`
+	var got string
+	Eventually(func(g Gomega) {
+		ctx, cancel := context.WithTimeout(tab, 5*time.Second)
+		defer cancel()
+		g.Expect(chromedp.Run(ctx, chromedp.WaitVisible(sel), chromedp.Value(sel, &got))).To(Succeed())
+		g.Expect(got).To(Equal(text))
+	}).WithTimeout(20 * time.Second).WithPolling(250 * time.Millisecond).Should(Succeed())
 }
 
 // expectStatus waits for the example's status line to report outcome with text in it.

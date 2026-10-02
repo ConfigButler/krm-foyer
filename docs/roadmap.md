@@ -241,8 +241,11 @@ Security items need tests that try to get past the boundary.
       resources in krm-foyer (unit tests; e2e with the audit log as witness, checked by
       deploying a krm-foyer that opens watches as its service account). Which resources
       use a shared watch will be configuration for efficiency, not access
-- [ ] User-authenticated watches first, with the hello example following its notes live
-      (step 5)
+- [x] User-authenticated watches first, with the hello example following its notes live:
+      a change made elsewhere appears without a reload, a change to a note being edited
+      is a conflict the page shows, and a 409 from a change the stream does not show
+      saves nothing until asked again (browser specs, each checked against a broken
+      example)
 - [x] Bounds on browser subscriptions and on upstream watches, counted separately:
       streams per session and per replica, apart from requests, and the watches they
       hold at the API server counted on their own (unit tests and e2e, each checked

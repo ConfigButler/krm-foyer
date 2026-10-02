@@ -1,20 +1,36 @@
-// The hello example: list, create and edit Notes, a Kubernetes custom resource, from the
-// browser. Every request goes to /k8s on this origin, where krm-foyer sends it on to the
-// API server as the signed-in user. There is no backend of its own, and no token here:
-// the browser holds only a session cookie that this script cannot read.
+// The hello example: Notes, a Kubernetes custom resource, followed live and edited from
+// the browser. Changes go to /k8s on this origin, where krm-foyer sends them on to the
+// API server as the signed-in user; what the notes are now comes from krm-foyer's
+// /stream, a krm-stream resource stream watched as that same user. There is no backend
+// of its own, and no token here: the browser holds only a session cookie that this
+// script cannot read.
 //
 // It shows Kubernetes' answers as they are. A 403 is RBAC saying no, a 409 means the note
-// changed since it was loaded, and nothing is retried behind the user's back.
+// changed since this page last heard of it, and nothing is retried behind the user's back.
 
 import { session, login, logout, k8s } from '/_foyer/foyer.js';
+// krm-stream's browser library, one file vendored from its npm package (task
+// vendor-krm-stream). It keeps what the server sent apart from what the user typed.
+import { LiveResourceStore, connectManagedResourceStream, resourceStreamURL } from './krm-stream.js';
 
 const namespace = new URLSearchParams(location.search).get('namespace') || 'hello';
-const notes = `/apis/hello.krm-foyer.example/v1/namespaces/${encodeURIComponent(namespace)}/notes`;
+const group = 'hello.krm-foyer.example';
+const notes = `/apis/${group}/v1/namespaces/${encodeURIComponent(namespace)}/notes`;
+const text = ['spec', 'text'];
 
 const $ = (id) => document.getElementById(id);
 
+// The store holds every note twice: as Kubernetes last sent it, and as the user is
+// editing it. A change that arrives is merged into what the user typed; where both
+// changed the same text, it records a conflict instead of choosing.
+const store = new LiveResourceStore();
+// The editor of each note, by uid. Editors are made once and kept, so a change that
+// arrives never throws away a cursor, a selection or text not saved yet.
+const editors = new Map();
+let connection = null;
+
 // busy keeps button disabled while work runs, so a second click cannot send the same
-// change twice: the second POST would fail with 409 and hide the first one's success.
+// change twice.
 async function busy(button, work) {
   button.disabled = true;
   try {
@@ -29,14 +45,14 @@ const explain = {
   'signed-out': 'You are signed out. Sign in again to go on.',
   // RBAC's refusals have reason Forbidden; krm-foyer's own (a missing CSRF proof) do not.
   refused: 'Refused.',
-  conflict: 'Someone changed this since you loaded it. Reload to see their version, then make your change again.',
+  conflict: 'Kubernetes has a newer version of this note than this page had, and nothing was saved.',
   invalid: 'Kubernetes did not accept the note.',
-  missing: 'It is not there (any more). Reload to see what is.',
+  missing: 'It is not there (any more).',
   error: 'Something went wrong.',
 };
 
-function say(text, outcome) {
-  $('status').textContent = text;
+function say(message, outcome) {
+  $('status').textContent = message;
   $('status').dataset.outcome = outcome;
 }
 
@@ -46,54 +62,157 @@ function report(doing, answer) {
   const said = answer.message ? ` It said: “${answer.message}”` : '';
   say(`${doing} failed with ${answer.status}. ${explain[answer.outcome]}${said}`, answer.outcome);
   if (answer.outcome === 'signed-out') {
-    $('signed-in').hidden = true;
-    $('signed-in-as').hidden = true;
-    $('signed-out').hidden = false;
+    signedOut();
   }
 }
 
-async function reload() {
-  const answer = await k8s(notes);
-  if (answer.outcome !== 'ok') {
-    report('Listing notes', answer);
-    return;
-  }
-  const items = answer.object.items.sort((a, b) => a.metadata.name.localeCompare(b.metadata.name));
-  $('notes').replaceChildren(...items.map(noteItem));
-  say(`${items.length} notes, as of now. Reload to see changes others made.`, 'ok');
+function signedOut() {
+  connection?.close();
+  $('signed-in').hidden = true;
+  $('signed-in-as').hidden = true;
+  $('signed-out').hidden = false;
 }
 
-// noteItem builds one note's editor. Text from the cluster only ever goes into
-// textContent and value, never into HTML: other users write these notes.
-function noteItem(note) {
+// What the stream's connection is doing, in a word or two.
+function showConnection(state) {
+  const words = {
+    connecting: 'Connecting…',
+    syncing: 'Catching up…',
+    live: 'Live',
+    retrying: `Reconnecting in ${Math.ceil((state.retryInMs || 0) / 1000)}s…`,
+    terminal: 'Stopped',
+    exhausted: 'Disconnected: reload the page to try again',
+    closed: '',
+  };
+  $('live').textContent = words[state.status] ?? state.status;
+  $('live').dataset.state = state.status;
+}
+
+// connect follows the notes of the namespace into the store, and resolves once the
+// first snapshot is complete. Opened again, it takes a fresh snapshot, and every
+// unsaved edit stays where it is.
+function connect() {
+  connection?.close();
+  return new Promise((synced) => {
+    connection = connectManagedResourceStream(
+      resourceStreamURL('/stream/v1', { group, version: 'v1', resource: 'notes', namespace }),
+      store,
+      {
+        onSynced: synced,
+        onStateChange: showConnection,
+        onError: (code, message, terminal) => {
+          if (!terminal) {
+            return; // the connection recovers on its own
+          }
+          if (code === 'UNAUTHENTICATED') {
+            say(explain['signed-out'], 'signed-out');
+            signedOut();
+            return;
+          }
+          say(`The live view stopped: ${message}`, code === 'FORBIDDEN' ? 'refused' : 'error');
+        },
+      },
+    );
+  });
+}
+
+// render brings the editors in line with the store: one per note, in order of name.
+// Text from the cluster only ever goes into textContent and value, never into HTML:
+// other users write these notes.
+function render() {
+  const ids = new Set(store.ids());
+  for (const [id, editor] of editors) {
+    if (!ids.has(id)) {
+      editor.li.remove();
+      editors.delete(id);
+    }
+  }
+  const items = [...ids].map((id) => editorFor(id));
+  items.sort((a, b) => a.name.localeCompare(b.name));
+  items.forEach((editor, i) => {
+    if ($('notes').children[i] !== editor.li) {
+      $('notes').insertBefore(editor.li, $('notes').children[i] || null);
+    }
+    const draft = store.draft(editor.id).spec.text;
+    // Only a change the user did not make moves the text: what they typed is the draft.
+    if (editor.text.value !== draft) {
+      editor.text.value = draft;
+    }
+    const conflict = store.conflicts(editor.id).find((c) => c.path.join('/') === text.join('/'));
+    editor.conflict.hidden = !conflict;
+    if (conflict) {
+      editor.theirs.textContent = conflict.theirs;
+    }
+  });
+}
+
+function editorFor(id) {
+  if (editors.has(id)) {
+    return editors.get(id);
+  }
+  const name = store.server(id).metadata.name;
   const li = document.createElement('li');
-  li.dataset.name = note.metadata.name;
-  const name = document.createElement('label');
-  name.textContent = note.metadata.name;
-  const text = document.createElement('textarea');
-  text.value = note.spec.text;
-  text.maxLength = 280;
-  text.rows = 2;
-  name.append(text);
+  li.dataset.name = name;
+  const label = document.createElement('label');
+  label.textContent = name;
+  const area = document.createElement('textarea');
+  area.maxLength = 280;
+  area.rows = 2;
+  area.addEventListener('input', () => store.setValue(id, text, area.value));
+  label.append(area);
+
+  // Shown when someone else changed the text this user is editing.
+  const conflict = document.createElement('p');
+  conflict.className = 'conflict';
+  conflict.hidden = true;
+  const theirs = document.createElement('q');
+  const takeTheirs = document.createElement('button');
+  takeTheirs.type = 'button';
+  takeTheirs.className = 'take-theirs';
+  takeTheirs.textContent = 'Take theirs';
+  takeTheirs.addEventListener('click', () => store.takeTheirs(id, text));
+  conflict.append('Someone else changed this to ', theirs, '. Save to replace it with yours, or ', takeTheirs, '.');
+
   const save = document.createElement('button');
   save.type = 'button';
   save.className = 'save';
   save.textContent = 'Save';
-  save.addEventListener('click', () => busy(save, async () => {
-    // A PUT of the object as it was loaded, metadata.resourceVersion included: if anyone
-    // changed the note since, Kubernetes answers 409 instead of overwriting their change.
-    const changed = structuredClone(note);
-    changed.spec.text = text.value;
-    const answer = await k8s(`${notes}/${encodeURIComponent(note.metadata.name)}`, { method: 'PUT', body: changed });
-    if (answer.outcome !== 'ok') {
-      report(`Saving ${note.metadata.name}`, answer);
-      return;
-    }
-    note = answer.object;
-    say(`Saved ${note.metadata.name}.`, 'ok');
-  }));
-  li.append(name, save);
-  return li;
+  save.addEventListener('click', () => busy(save, () => saveNote(id, name, area.value)));
+  li.append(label, conflict, save);
+  const editor = { id, name, li, text: area, conflict, theirs };
+  editors.set(id, editor);
+  return editor;
+}
+
+// saveNote sends the user's change as a merge patch, with the uid and resourceVersion
+// of the note as this page last heard of it: if anyone changed it since, Kubernetes
+// answers 409 instead of overwriting their change.
+async function saveNote(id, name, value) {
+  store.setValue(id, text, value);
+  // Captured together, before any await: the patch is the user's edit and nothing else.
+  const intent = store.captureSave(id);
+  if (!intent) {
+    say(`Nothing to save in ${name}.`, 'ok');
+    return;
+  }
+  const answer = await k8s(`${notes}/${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    contentType: 'application/merge-patch+json',
+    body: { ...intent.patch, metadata: { uid: intent.uid, resourceVersion: intent.resourceVersion } },
+  });
+  if (answer.outcome === 'ok') {
+    // Nothing to adopt: the saved note comes back through the stream, like any change.
+    say(`Saved ${name}.`, 'ok');
+    return;
+  }
+  report(`Saving ${name}`, answer);
+  if (answer.outcome === 'conflict') {
+    // The stream showed no change, so it was one the stream does not show. A fresh
+    // snapshot brings the version Kubernetes has now; the user's text stays.
+    say(`${$('status').textContent} Catching up…`, 'conflict');
+    await connect();
+    say(`Saving ${name} failed with 409. ${explain.conflict} The page has caught up, and your text is still here: save again to replace what Kubernetes has.`, 'conflict');
+  }
 }
 
 function create(event) {
@@ -106,7 +225,7 @@ async function createNote() {
   const answer = await k8s(notes, {
     method: 'POST',
     body: {
-      apiVersion: 'hello.krm-foyer.example/v1',
+      apiVersion: `${group}/v1`,
       kind: 'Note',
       metadata: { name },
       spec: { text: $('new-text').value },
@@ -117,11 +236,7 @@ async function createNote() {
     return;
   }
   $('new-note').reset();
-  // Added in place, in order of name: reloading would rebuild every editor, and throw
-  // away text the user typed into another note and has not saved.
-  const note = answer.object;
-  const next = [...$('notes').children].find((li) => li.dataset.name.localeCompare(note.metadata.name) > 0);
-  $('notes').insertBefore(noteItem(note), next || null);
+  // Nothing to add: the new note arrives through the stream, as anyone's would.
   say(`Created ${name}.`, 'ok');
 }
 
@@ -130,7 +245,6 @@ async function start() {
   $('raw').href = `/k8s${notes}`;
   $('sign-in').addEventListener('click', () => login());
   $('logout').addEventListener('click', () => logout());
-  $('reload').addEventListener('click', reload);
   $('new-note').addEventListener('submit', create);
 
   const s = await session();
@@ -141,7 +255,9 @@ async function start() {
   $('who').textContent = s.email;
   $('signed-in-as').hidden = false;
   $('signed-in').hidden = false;
-  await reload();
+  store.subscribe(render);
+  await connect();
+  say(`${store.ids().length} notes, live: a change made elsewhere shows here as it happens.`, 'ok');
 }
 
 start().catch((err) => say(`krm-foyer could not be reached: ${err.message}`, 'error'));

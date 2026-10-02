@@ -216,10 +216,18 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   pinned by digest, driven from Go with chromedp) runs in the network namespace of the
   container the suite runs in, so `*.localhost` reaches the same port-forwards a
   person's browser reaches through VS Code. It trusts
-  exactly the front door's and Dex's certificates, by their public keys. Its specs were
-  each seen to fail against a broken build: the browser not trusting Dex, the example
-  re-reading and saving again on a 409, the helper leaving out the CSRF header, and the
-  helper not reading a new CSRF token after the user signed in again in another tab.
+  exactly the front door's and Dex's certificates, by their public keys. The example
+  follows its notes through `/stream`: a change made with `kubectl` appears in the page
+  without a reload; one made to a note alice is typing in is shown as a conflict, with
+  her text kept; and a change the stream does not show (the last-applied-configuration
+  annotation, which every projection removes) gets a 409 on save, after which the page
+  catches up and saves only when asked again. Signing out in another tab ends the live
+  view with the page saying so. Its specs were each seen to fail against a broken build:
+  the browser not trusting Dex, the example saving again on its own after a 409 or
+  saving without its `resourceVersion`, a change from elsewhere replacing what alice
+  typed, the page ignoring the end of its stream, the helper leaving out the CSRF header,
+  and the helper not reading a new CSRF token after the user signed in again in another
+  tab.
 
 ## The e2e fixture
 

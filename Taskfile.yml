@@ -5,6 +5,10 @@ version: "3"
 
 vars:
   IMAGE: '{{.IMAGE | default "ghcr.io/configbutler/krm-foyer"}}'
+  # The krm-stream browser bundle the hello example vendors, and npm's integrity for
+  # its package. Bump both together, then `task vendor-krm-stream`.
+  KRM_STREAM_VERSION: 0.4.0
+  KRM_STREAM_INTEGRITY: sha512-5IeE/DQkOuYXBkCv4zafkPxzCOS3kV+4uEaBCY3U9nB6IPf3j8ttKFmRRHVzu5q3Pwa2aEJvP+mJQs4EI4ZSjA==
   VERSION:
     sh: git describe --tags --always --dirty 2>/dev/null || echo dev
 
@@ -20,6 +24,7 @@ tasks:
     cmds:
       # Sequential on purpose: the first failure is the one you want to read.
       - task: tidy-check
+      - task: vendor-check
       - task: lint
       - task: test
       - task: image-smoke
@@ -39,6 +44,19 @@ tasks:
       - go test -run '^$' -fuzz '^FuzzLocalPath$' -fuzztime 10s ./internal/auth/
       # The browser helper, /_foyer/foyer.js, with Node's own test runner: no npm, no build.
       - node --test 'internal/pages/*.test.js'
+
+  vendor-krm-stream:
+    desc: "Vendor krm-stream's browser bundle into the hello example, from npm, checked against npm's integrity."
+    cmds:
+      - test/vendor-krm-stream.sh {{.KRM_STREAM_VERSION}} {{.KRM_STREAM_INTEGRITY}} examples/hello/web/krm-stream.js
+
+  vendor-check:
+    desc: "Check that the hello example's krm-stream bundle is the published one, byte for byte."
+    cmds:
+      - |
+        tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+        test/vendor-krm-stream.sh {{.KRM_STREAM_VERSION}} {{.KRM_STREAM_INTEGRITY}} "$tmp/krm-stream.js"
+        cmp "$tmp/krm-stream.js" examples/hello/web/krm-stream.js
 
   test-e2e:
     desc: "End-to-end suite against a real API server, a real Dex and krm-foyer in the cluster. Brings the fixture up if needed."
