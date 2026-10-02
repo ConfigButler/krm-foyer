@@ -130,21 +130,22 @@ bugs are here, where they are cheap to find:
   pinned and verified. Scopes the gateway will not serve (an API-server address, a
   token, another target, a malformed name) end with a terminal refusal before anything
   is sent. Kubernetes' 403, 401 and 404 keep their meaning, with no address inside the
-  cluster in what the browser reads, and an API server that cannot answer is retried
-  with a wait that doubles. A stream whose session ends is aborted and its watch
+  cluster in what the browser reads. A stream whose session ends is aborted and its watch
   cancelled, even where no write deadline can be set. A redirect from the API server is
   not followed, to another https server or to plain http, so the token goes nowhere
-  else. A 401 or 403 on an open watch ends the stream as it does at opening; a failure
-  on an open watch, or one that ends before its snapshot, waits before the watch is
-  opened again; and what the API server wrote when it failed, the token it echoed
-  among it, reaches neither the browser nor the log. Streams count against limits of
+  else. A 401 or 403 on an open watch ends the stream as it does at opening. A failure
+  that may pass (a 503 or 429 at opening, a 500 or 429 on an open watch, a watch that
+  ends before its snapshot or hardly after it, a 410 right after it) ends the stream with
+  a non-terminal `UPSTREAM_UNAVAILABLE` and the API server's hint, after one attempt: the
+  browser's client retries, through the gate. What the API server wrote when it failed,
+  the token it echoed among it, reaches neither the browser nor the log, and an ended
+  stream leaves no goroutine behind while the API server is still sending. Streams count against limits of
   their own, not the request limits, but draw on the same request rate; the streams
   open and the watches they hold at the API server are counted, and counted out again
   when a stream ends. A watch the API server ends, or ends with 410 Gone, is opened
   again on the same stream, as the user, with a fresh snapshot of what changed in
   between, and without the wait or the warning of a failure. Each was seen to fail against a
-  build broken on purpose; the one mutation no test sees is the message of a retryable
-  error, which krm-stream v0.4.0 never sends.
+  build broken on purpose.
 - **Upstream text in the log** ([internal/proxy](../internal/proxy),
   [internal/upstream](../internal/upstream)): an API server that echoes the token in a
   malformed response, a `Content-Type` or a `Location` never gets it into krm-foyer's

@@ -182,7 +182,7 @@ func newFoyer(t *testing.T, api *apiServer, creds gate.Credentials, adjust func(
 	server, _ := url.Parse(api.URL)
 	roots := x509.NewCertPool()
 	roots.AddCert(api.Certificate())
-	cfg := Config{Server: server, RootCAs: roots, RetryDelay: 50 * time.Millisecond}
+	cfg := Config{Server: server, RootCAs: roots, MinWatchLife: 50 * time.Millisecond}
 	if adjust != nil {
 		adjust(&cfg, &gcfg)
 	}
@@ -206,6 +206,7 @@ type event struct {
 	Code       string          `json:"code"`
 	Message    string          `json:"message"`
 	Terminal   bool            `json:"terminal"`
+	RetryAfter *int            `json:"retryAfterMs"`
 	Projection string          `json:"projection"`
 	Object     json.RawMessage `json:"object"`
 }
@@ -522,34 +523,6 @@ func TestKubernetesRefusalsKeepTheirMeaning(t *testing.T) {
 	}
 }
 
-// An API server that cannot serve the watch right now is asked again, with a wait
-// that grows, and the browser is never told to give up: no terminal event, and no
-// INTERNAL with what went wrong inside.
-func TestAnUnavailableAPIServerIsRetriedWithBackoff(t *testing.T) {
-	api := newAPIServer(t, status(http.StatusServiceUnavailable, "ServiceUnavailable", "etcd is down at 10.0.0.7"))
-	f := newFoyer(t, api, credentials{token: userToken}, nil) // first wait 50ms
-	ctx, cancel := context.WithTimeout(t.Context(), 1200*time.Millisecond)
-	defer cancel()
-	s := f.open(ctx, t, notes, nil)
-	for {
-		e, err := s.next()
-		if err != nil {
-			break
-		}
-		if e.Terminal || e.Code == "INTERNAL" {
-			t.Fatalf("%+v; an unavailable API server is not a reason to give up", e)
-		}
-	}
-	// 50ms doubling: attempts at about 0, 50, 150, 350 and 750ms. Without a wait
-	// there would be hundreds.
-	if n := len(api.received()); n < 3 || n > 7 {
-		t.Errorf("%d attempts in 1.2s, want about 5", n)
-	}
-	if strings.Contains(s.raw.String(), "10.0.0.7") {
-		t.Errorf("what the API server said inside reached the browser: %s", s.raw.String())
-	}
-}
-
 // A stream open when its session ends is cut short within the session-check
 // interval: aborted, never ended cleanly, and its watch cancelled at the API server.
 func TestAStreamEndsWithItsSession(t *testing.T) {
@@ -841,41 +814,6 @@ func TestARefusalOnAnOpenWatchEndsTheStream(t *testing.T) {
 	}
 }
 
-// A watch that fails while open, or ends before its snapshot is complete, is opened
-// again only after a wait that grows, as a watch that cannot be opened is. A 410 Gone
-// is not a failure: it is opened again at once, and its stream recovers (see
-// TestAStreamRecoversWhenItsWatchEnds).
-func TestAFailingOpenWatchIsRetriedWithBackoff(t *testing.T) {
-	for name, respond := range map[string]http.HandlerFunc{
-		"500 on the open watch": watchThen(watchError(http.StatusInternalServerError, "InternalError", "etcd is down")),
-		"429 on the open watch": watchThen(watchError(http.StatusTooManyRequests, "TooManyRequests", "slow down")),
-		"ended before its snapshot": func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			api := newAPIServer(t, respond)
-			f := newFoyer(t, api, credentials{token: userToken}, nil) // first wait 50ms
-			ctx, cancel := context.WithTimeout(t.Context(), 1200*time.Millisecond)
-			defer cancel()
-			s := f.open(ctx, t, notes, nil)
-			for {
-				e, err := s.next()
-				if err != nil {
-					break
-				}
-				if e.Terminal {
-					t.Fatalf("%+v; a failure that may pass is not a reason to give up", e)
-				}
-			}
-			// 50ms doubling: about five attempts in 1.2s. Without a wait, hundreds.
-			if n := len(api.received()); n < 3 || n > 7 {
-				t.Errorf("%d attempts in 1.2s, want about 5", n)
-			}
-		})
-	}
-}
-
 // What the API server says when it fails is never logged as it is: it is not
 // krm-foyer's text, and it could hold anything, the token it was sent among it.
 func TestFailuresAreLoggedWithoutTheirText(t *testing.T) {
@@ -940,5 +878,70 @@ func TestAnEndedStreamLeavesNoGoroutines(t *testing.T) {
 				runtime.NumGoroutine(), before, buf[:runtime.Stack(buf, true)])
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A failure that may pass is left to the browser's client to retry: the stream sends a
+// non-terminal UPSTREAM_UNAVAILABLE, with the API server's Retry-After as its hint,
+// and closes after that one attempt. Each retry is then a request of its own, through
+// the gate and its request rate. A watch that ends before its snapshot, or hardly
+// after it, is such a failure too, not a reason to open it again at once.
+func TestARetryableFailureIsLeftToTheBrowser(t *testing.T) {
+	// The hint in the Status alone: with a Retry-After header, client-go waits and
+	// asks again itself, up to ten times, before the stream hears of it.
+	retryAfter := func(code int, reason string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": reason,
+				"message": "slow down", "code": code, "details": map[string]any{"retryAfterSeconds": 3},
+			})
+		}
+	}
+	for name, tc := range map[string]struct {
+		respond http.HandlerFunc
+		hint    int
+	}{
+		"503 at opening":        {respond: status(http.StatusServiceUnavailable, "ServiceUnavailable", "etcd is down at 10.0.0.7")},
+		"429 at opening":        {respond: retryAfter(http.StatusTooManyRequests, "TooManyRequests"), hint: 3000},
+		"500 on the open watch": {respond: watchThen(watchError(http.StatusInternalServerError, "InternalError", "etcd is down"))},
+		"429 on the open watch": {respond: watchThen(watchError(http.StatusTooManyRequests, "TooManyRequests", "slow down"))},
+		"ended before its snapshot": {respond: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+		}},
+		"ended right after its snapshot": {respond: func(w http.ResponseWriter, _ *http.Request) { snapshotOf(w, 10, "x") }},
+		"410 right after its snapshot": {respond: func(w http.ResponseWriter, r *http.Request) {
+			snapshotOf(w, 10, "x")
+			watchError(http.StatusGone, "Expired", "too old resource version")(w)
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := newAPIServer(t, tc.respond)
+			f := newFoyer(t, api, credentials{token: userToken}, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			s := f.open(ctx, t, notes, nil)
+			var last event
+			for {
+				e, err := s.next()
+				if err != nil {
+					break
+				}
+				last = e
+			}
+			if last.Type != "error" || last.Code != "UPSTREAM_UNAVAILABLE" || last.Terminal {
+				t.Errorf("the stream ended with %+v; want a non-terminal UPSTREAM_UNAVAILABLE", last)
+			}
+			if tc.hint != 0 && (last.RetryAfter == nil || *last.RetryAfter != tc.hint) {
+				t.Errorf("retryAfterMs %v, want the API server's %d", last.RetryAfter, tc.hint)
+			}
+			if n := len(api.received()); n != 1 {
+				t.Errorf("%d attempts on one connection; the browser's client retries, not the stream", n)
+			}
+			if strings.Contains(s.raw.String(), "10.0.0.7") {
+				t.Errorf("what the API server said reached the browser: %s", s.raw.String())
+			}
+		})
 	}
 }
