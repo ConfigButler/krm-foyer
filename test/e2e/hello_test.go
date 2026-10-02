@@ -30,9 +30,9 @@ const headlessShell = "chromedp/headless-shell:151.0.7922.109@sha256:2d349b544a1
 // resource, and shows Kubernetes' 403 and 409 answers, and its script never holds a
 // credential.
 //
-// The browser shares the front door's network namespace, so foyer.localhost and
-// dex.localhost resolve to loopback exactly as on a person's machine, and reach the same
-// published ports.
+// The browser shares this container's network namespace, so foyer.localhost and
+// dex.localhost resolve to loopback and reach the port-forwards (port-forward.sh), exactly
+// as a person's browser does through VS Code's forwarding.
 var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 	var (
 		tab context.Context
@@ -165,25 +165,29 @@ var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 	})
 })
 
-// startBrowser starts Chromium in the front door's network namespace and returns a tab
+// startBrowser starts Chromium in this container's network namespace and returns a tab
 // in it. Both are gone when the spec tree is done.
 func startBrowser(ctx context.Context) context.Context {
 	// Trust exactly the certificates of the front door and Dex, by their public keys:
 	// the fixture's CA is not in the browser's store.
 	trusted := []string{
 		spki(filepath.Join(fx.dir, "foyer", "tls.crt")),
-		spki(filepath.Join(fx.dir, "config", "dex.crt")),
+		spki(filepath.Join(fx.dir, "tls", "dex.crt")),
 	}
+	// This container: the devcontainer, or the CI job's container. Docker names it by
+	// its hostname unless told otherwise.
+	self, err := os.Hostname()
+	Expect(err).NotTo(HaveOccurred())
 	name := "krm-foyer-e2e-browser-" + randomID()
 	out, err := exec.CommandContext(ctx, "docker", "run", "-d", "--rm", "--name", name,
-		"--network", "container:"+fx.frontDoor, headlessShell,
+		"--network", "container:"+self, headlessShell,
 		"--user-data-dir=/tmp/profile",
 		"--ignore-certificate-errors-spki-list="+strings.Join(trusted, ","),
 	).CombinedOutput()
 	Expect(err).NotTo(HaveOccurred(), "%s", out)
 	DeferCleanup(func(ctx SpecContext) { _ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run() })
 
-	devtools := "http://" + fx.frontDoorIP + ":9222"
+	devtools := "http://127.0.0.1:9222"
 	Eventually(func() error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, devtools+"/json/version", nil)
 		Expect(err).NotTo(HaveOccurred())

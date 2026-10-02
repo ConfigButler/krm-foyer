@@ -1,0 +1,199 @@
+# The fixture's two issuers, in the cluster. start-cluster.sh fills in the images, the
+# fixed Service addresses and the configuration hash, and creates the ConfigMaps and
+# Secrets referred to here.
+#
+# The API server trusts both (authentication-config.yaml) and is not a pod: it finds
+# them through the node's /etc/hosts, where k3d --host-alias maps each name to its
+# Service's fixed ClusterIP. The same alias goes into CoreDNS, so pods such as
+# krm-foyer use the same names and addresses. A browser reaches Dex through
+# kubectl port-forward on localhost:5556 (port-forward.sh), so the issuer URL
+# https://dex.localhost:5556 is the same everywhere.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fixture
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dex
+  namespace: fixture
+---
+# Dex keeps its state, signing keys included, in custom resources it defines itself on
+# first start. These are the grants its kubernetes storage needs, and nothing more.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fixture-dex
+rules:
+  - apiGroups: [dex.coreos.com]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fixture-dex
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fixture-dex
+subjects:
+  - kind: ServiceAccount
+    name: dex
+    namespace: fixture
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: fixture
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dex
+  template:
+    metadata:
+      labels:
+        app: dex
+      annotations:
+        krm-foyer.test/config-hash: CONFIG_HASH
+    spec:
+      serviceAccountName: dex
+      securityContext:
+        runAsNonRoot: true
+        # The image's dex user; numeric, so the kubelet can check it is not root.
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dex
+          image: DEX_IMAGE
+          args: [dex, serve, /etc/dex/config/config.yaml]
+          ports:
+            - name: https
+              containerPort: 5556
+          readinessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dex/config
+              readOnly: true
+            - name: tls
+              mountPath: /etc/dex/tls
+              readOnly: true
+            # Dex renders its configuration into a temporary file at start.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: dex
+        - name: tmp
+          emptyDir: {}
+        - name: tls
+          secret:
+            secretName: dex-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+  namespace: fixture
+spec:
+  # Fixed, because the API server finds Dex through an /etc/hosts entry made when the
+  # cluster is created.
+  clusterIP: DEX_SERVICE_IP
+  selector:
+    app: dex
+  ports:
+    - name: https
+      port: 5556
+      targetPort: https
+---
+# The test issuer: nginx serving a discovery document and a JWKS. The suite holds the
+# signing key, so it can mint tokens with claims Dex never issues.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-issuer
+  namespace: fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-issuer
+  template:
+    metadata:
+      labels:
+        app: test-issuer
+      annotations:
+        krm-foyer.test/config-hash: CONFIG_HASH
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: NGINX_IMAGE
+          command: [nginx, -c, /etc/test-issuer/files/nginx.conf, -g, "daemon off;"]
+          ports:
+            - name: https
+              containerPort: 8443
+          readinessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: files
+              mountPath: /etc/test-issuer/files
+              readOnly: true
+            - name: tls
+              mountPath: /etc/test-issuer/tls
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: files
+          configMap:
+            name: test-issuer
+        - name: tls
+          secret:
+            secretName: test-issuer-tls
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-issuer
+  namespace: fixture
+spec:
+  clusterIP: ISSUER_SERVICE_IP
+  selector:
+    app: test-issuer
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https

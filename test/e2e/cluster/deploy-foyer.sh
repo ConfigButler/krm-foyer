@@ -31,7 +31,7 @@ docker tag "$IMAGE" "$tag"
 k3d image import --cluster "$CLUSTER_NAME" "$tag" >/dev/null
 
 echo "== certificate for $FOYER_HOST"
-# Outside config/, which Dex and the API server mount: a new krm-foyer certificate must
+# Outside apiserver/, which the API server mounts: a new krm-foyer certificate must
 # not restart them.
 mkdir -p "$E2E_DIR/foyer"
 if [ ! -f "$E2E_DIR/foyer/tls.crt" ] \

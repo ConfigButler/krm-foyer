@@ -144,8 +144,9 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   impersonate bob, so a forwarded header would turn its 403 into a 200.
 - **The hello example** (label `browser`) is the claim that krm-foyer is usable, not
   only correct. Chromium ([chromedp/headless-shell](https://hub.docker.com/r/chromedp/headless-shell),
-  pinned by digest, driven from Go with chromedp) runs in the front door's network
-  namespace, so `*.localhost` means to it what it means on a person's machine. It trusts
+  pinned by digest, driven from Go with chromedp) runs in the network namespace of the
+  container the suite runs in, so `*.localhost` reaches the same port-forwards a
+  person's browser reaches through VS Code. It trusts
   exactly the front door's and Dex's certificates, by their public keys. Its specs were
   each seen to fail against a broken build: the browser not trusting Dex, the example
   re-reading and saving again on a 409, the helper leaving out the CSRF header, and the
@@ -155,30 +156,51 @@ and Gomega, like gitops-reverser's suite. It has two parts:
 
 ```mermaid
 flowchart LR
-    T[Test runner] -->|password grant| D[Dex<br/>dex.localhost:5556]
-    T -->|bearer token, directly| K[k3s API server]
-    T -->|walks Dex's login form| D
-    T -->|session cookie, NodePort| F[krm-foyer pod<br/>foyer.localhost:8443]
-    B[Chromium, or a browser<br/>on this machine] -->|127.0.0.1:8443, :5556| FD[Front door<br/>nginx]
-    FD -->|/auth/, /k8s, /_foyer/| F
-    FD -->|TLS passthrough| D
+    subgraph C[This container: devcontainer or CI job]
+      T[Test runner]
+      B[Chromium, or your browser<br/>through VS Code]
+      PF[kubectl port-forward<br/>127.0.0.1:8443, :5556]
+    end
+    subgraph K3S[k3d cluster]
+      K[k3s API server]
+      D[Dex<br/>dex.localhost:5556]
+      I[Test issuer<br/>issuer.krm-foyer.test:8443]
+      FD[Front door<br/>nginx]
+      F[krm-foyer<br/>foyer.localhost:8443]
+      A[(audit.log)]
+    end
+    B --> PF
+    T -->|password grant, login form| PF
+    PF --> D
+    PF --> FD
     T -->|DevTools| B
+    T -->|bearer token, directly| K
+    T -->|session cookie, NodePort| F
+    FD -->|/auth/, /k8s, /_foyer/| F
     F -->|user's token| K
     F -->|discovery and code exchange| D
     K -->|discovery and keys| D
-    K -->|discovery and keys| I[Test issuer<br/>issuer.krm-foyer.test:8443]
-    K --> A[(audit.log)]
+    K -->|discovery and keys| I
+    K --> A
     T -->|docker exec| A
 ```
 
-[start-cluster.sh](../test/e2e/cluster/start-cluster.sh) creates a Docker network,
-starts Dex and a test issuer at fixed addresses on it, and creates a single-node k3d
-cluster on the same network. The API server trusts both issuers through an
+Everything runs in the cluster, as in gitops-reverser's e2e; what a browser needs comes
+out through `kubectl port-forward`.
+
+[start-cluster.sh](../test/e2e/cluster/start-cluster.sh) creates a Docker network and a
+single-node k3d cluster on it, then deploys the two issuers into the cluster
+([issuers.yaml](../test/e2e/cluster/issuers.yaml)). The API server trusts both through an
 [AuthenticationConfiguration](../test/e2e/cluster/authentication-config.yaml), under the
 same rules, and records requests with an [audit policy](../test/e2e/cluster/audit-policy.yaml).
-The devcontainer joins the network, and a CI runner is the Docker host, so both reach it
-the same way. k3d always publishes the API server's port; it is bound to loopback, and
-the script fails if anything in the fixture is published on another interface.
+The API server is not a pod and cannot use cluster DNS: k3d's `--host-alias` puts each
+issuer's name in the node's `/etc/hosts`, pointing at its Service's fixed ClusterIP, and
+in CoreDNS for pods, so every caller uses the same issuer URL. Dex keeps its state in
+custom resources, its signing keys included: with memory storage, a restarted Dex signs
+with new keys, and the API server refused every token for 221 seconds before it fetched
+them. The devcontainer joins the network, and a CI runner is the Docker host, so both reach
+the API server the same way. k3d always publishes the API server's port; it is bound to
+loopback, and the script fails if anything is published on another interface.
 
 [deploy-foyer.sh](../test/e2e/cluster/deploy-foyer.sh) deploys krm-foyer from
 [foyer.yaml](../test/e2e/cluster/foyer.yaml). The image `task image` built is imported
@@ -186,21 +208,22 @@ with `k3d image import` under a tag derived from its ID, so the Deployment rolls
 when the binary changes. krm-foyer serves TLS for `foyer.localhost` with a
 certificate from the fixture CA, trusts Dex through the same CA, and reaches the API
 server at `kubernetes.default.svc`. The suite reaches it through a NodePort on the node's
-address on the Docker network. Its service account is cluster-admin and its token is
-mounted, as bait; the suite checks both before it starts.
+address on the Docker network: the `foyer` specs test krm-foyer, not the front door. Its
+service account is cluster-admin and its token is mounted, as bait; the suite checks both
+before it starts.
 
 [front-door.sh](../test/e2e/cluster/front-door.sh) applies the hello example's
-[resources](../examples/hello/manifests.yaml) and starts the front door: nginx on the
-fixture's network that serves `examples/hello/web` at `/`, sends `/auth/`, `/k8s`,
-`/stream` and `/_foyer/` to krm-foyer, and passes Dex's port through
-([config](../test/e2e/cluster/front-door-nginx.conf)). It publishes 8443 and 5556 on
-loopback, which is where browsers resolve `foyer.localhost` and `dex.localhost`, so the
-public URL `https://foyer.localhost:8443` and the issuer work from a browser on this
-machine with no hosts-file entry. In a VS Code devcontainer, where Docker may run on
-another machine than the browser, a relay also listens on the devcontainer's own loopback
-and VS Code forwards both ports, keeping their numbers. Inside the fixture, aliases send the same names to Dex
-and the node. The `foyer` specs reach krm-foyer through the NodePort, not the front door:
-they test krm-foyer, not nginx.
+[resources](../examples/hello/manifests.yaml) and deploys the front door
+([front-door.yaml](../test/e2e/cluster/front-door.yaml)): nginx that serves
+`examples/hello/web` at `/` and sends `/auth/`, `/k8s`, `/stream` and `/_foyer/` to
+krm-foyer's Service ([config](../test/e2e/cluster/front-door-nginx.conf)). Then
+[port-forward.sh](../test/e2e/cluster/port-forward.sh) forwards the front door to
+`127.0.0.1:8443` and Dex to `127.0.0.1:5556` in this container, detached, and checks both
+by their public names. Browsers resolve `foyer.localhost` and `dex.localhost` to loopback,
+and VS Code forwards both ports to the machine the browser runs on, keeping their numbers
+(`devcontainer.json`), so `https://foyer.localhost:8443` works with no hosts-file entry,
+wherever Docker runs. A port-forward follows one pod: when Dex or the front door rolls,
+run `test/e2e/cluster/port-forward.sh` (or `task e2e-deploy`) again.
 
 The test issuer is nginx serving a discovery document and a JWKS. The suite holds its
 signing key (`.e2e/issuer-signing.key`), so it can mint tokens with claims Dex never
@@ -213,7 +236,7 @@ accepts, and `other-app`, whose tokens it must reject.
 
 ```bash
 task e2e-up     # start or reuse the fixture (about 25 seconds the first time)
-task e2e-deploy # build the image, deploy krm-foyer, and start the front door
+task e2e-deploy # build the image, deploy krm-foyer and the front door, and port-forward
 task demo       # e2e-up and e2e-deploy, then how to sign in from your browser
 task test-e2e   # run the suite; brings the fixture up and deploys krm-foyer first
 task e2e-down   # remove the cluster, Dex, the network and the certificates

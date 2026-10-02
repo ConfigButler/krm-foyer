@@ -79,8 +79,9 @@ separate:
 3. **[`examples/hello/`](../examples/hello)** (exists): one HTML file, one script and a
    stylesheet, with no bundler and no backend of its own. It signs in, lists, creates and
    edits Notes (a small custom resource) through `/k8s`, and shows Kubernetes' 403 and 409
-   answers as they are. An nginx front door serves it at `/` and sends krm-foyer's
-   prefixes to krm-foyer, on one origin. `task demo` starts it in a disposable cluster,
+   answers as they are. An nginx front door in the cluster serves it at `/` and sends
+   krm-foyer's prefixes to krm-foyer, on one origin, and `kubectl port-forward` brings
+   it to the browser. `task demo` starts it in a disposable cluster,
    and the e2e suite's browser specs drive it in Chromium. It reloads on request; following
    changes live through `/stream` comes with streams.
 
