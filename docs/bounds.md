@@ -284,7 +284,9 @@ apart again:
   should not be refused because live views are open. Past a limit, a stream is a 429
   `TooManyStreams` interruption, and krm-stream's browser client tries again later.
 - **Opening a stream is a request** for the request rate: one budget per session for
-  `/k8s` and `/stream`, so a page that reconnects in a loop meets the rate bound.
+  `/k8s` and `/stream`, so a page that reconnects in a loop meets the rate bound. A
+  stream that fails in a way that may pass closes, and krm-stream's browser client opens
+  it again after a wait, so its retries are requests too, and meet the same bound.
 - **The response duration and the session check** hold a stream as they hold every
   response: it is cut short at 30 minutes, and krm-stream's client opens it again with a
   fresh snapshot, which renews the session's idle timeout; and it is cut short within

@@ -94,10 +94,12 @@ function connectResourceStream(url, store, opts = {}) {
       credentials: opts.credentials ?? "same-origin"
     });
     if (!res.ok || !res.body) {
-      const code = res.status === 401 ? "UNAUTHENTICATED" : res.status === 403 ? "FORBIDDEN" : "INTERNAL";
+      const code = res.status === 401 ? "UNAUTHENTICATED" : res.status === 403 ? "FORBIDDEN" : res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504 ? "UPSTREAM_UNAVAILABLE" : "INTERNAL";
       const terminal = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429;
-      await res.body?.cancel();
-      opts.onError?.(code, `stream: HTTP ${res.status}`, terminal);
+      const message = await statusMessage(res, controller.signal) ?? `stream: HTTP ${res.status}`;
+      if (controller.signal.aborted)
+        return;
+      opts.onError?.(code, message, terminal, retryAfter(res.headers.get("Retry-After")));
       return;
     }
     if (controller.signal.aborted) {
@@ -143,6 +145,68 @@ function connectResourceStream(url, store, opts = {}) {
     closed: closed.catch(() => {
     }).finally(() => opts.signal?.removeEventListener("abort", abort))
   };
+}
+var maxStatusBytes = 16 * 1024;
+var statusBudgetMs = 2e3;
+async function statusMessage(res, signal, budgetMs = statusBudgetMs) {
+  if (!res.body)
+    return void 0;
+  if (signal.aborted || !/^application\/json\b/i.test(res.headers.get("Content-Type") ?? "")) {
+    await res.body.cancel().catch(() => {
+    });
+    return void 0;
+  }
+  const reader = res.body.getReader();
+  let gaveUp = false;
+  const giveUp = () => {
+    gaveUp = true;
+    void reader.cancel().catch(() => {
+    });
+  };
+  const timer = setTimeout(giveUp, budgetMs);
+  signal.addEventListener("abort", giveUp, { once: true });
+  const chunks = [];
+  let size = 0;
+  try {
+    for (; ; ) {
+      const { done, value } = await reader.read();
+      if (gaveUp)
+        return void 0;
+      if (done)
+        break;
+      size += value.byteLength;
+      if (size > maxStatusBytes)
+        return void 0;
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const status = JSON.parse(new TextDecoder().decode(bytes));
+    if (typeof status !== "object" || status === null)
+      return void 0;
+    const { kind, message } = status;
+    return kind === "Status" && typeof message === "string" && message !== "" ? message : void 0;
+  } catch {
+    return void 0;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", giveUp);
+    await reader.cancel().catch(() => {
+    });
+  }
+}
+function retryAfter(header, now = Date.now()) {
+  if (header === null)
+    return void 0;
+  const value = header.trim();
+  if (/^\d+$/.test(value))
+    return Number(value) * 1e3;
+  const at2 = Date.parse(value);
+  return Number.isNaN(at2) ? void 0 : Math.max(0, at2 - now);
 }
 function connectWithEventSource(url, store, opts = {}) {
   if (opts.signal?.aborted)
@@ -193,7 +257,8 @@ function feed(store, sequence, ev, opts) {
     return true;
   }
   if (ev.type === "error") {
-    opts.onError?.(ev.code ?? "INTERNAL", ev.message ?? "", ev.terminal ?? false);
+    const hint = typeof ev.retryAfterMs === "number" && ev.retryAfterMs >= 0 ? ev.retryAfterMs : void 0;
+    opts.onError?.(ev.code ?? "INTERNAL", ev.message ?? "", ev.terminal ?? false, hint);
     return ev.terminal === true;
   }
   const change = applyStreamEvent(store, ev);
@@ -216,6 +281,7 @@ function connectManagedResourceStream(url, store, opts = {}) {
   const subscribers = /* @__PURE__ */ new Set();
   let state = Object.freeze({ status: "connecting", retries: 0 });
   let terminal = false;
+  let hintMs;
   let healthTimer;
   const clearHealthTimer = () => {
     clearTimeout(healthTimer);
@@ -240,6 +306,7 @@ function connectManagedResourceStream(url, store, opts = {}) {
         publish("connecting");
         if (controller.signal.aborted)
           break;
+        hintMs = void 0;
         const stream = connectResourceStream(url, store, {
           ...opts,
           signal: controller.signal,
@@ -259,6 +326,7 @@ function connectManagedResourceStream(url, store, opts = {}) {
             opts.onChange?.(change);
           },
           onSynced: () => {
+            hintMs = void 0;
             if (state.status !== "live") {
               healthTimer = setTimeout(() => {
                 healthTimer = void 0;
@@ -271,11 +339,13 @@ function connectManagedResourceStream(url, store, opts = {}) {
             publish("live");
             opts.onSynced?.();
           },
-          onError: (code, message, isTerminal) => {
+          onError: (code, message, isTerminal, retryAfterMs) => {
             if (isTerminal)
               clearHealthTimer();
             terminal ||= isTerminal;
-            opts.onError?.(code, message, isTerminal);
+            if (!isTerminal && retryAfterMs !== void 0)
+              hintMs = retryAfterMs;
+            opts.onError?.(code, message, isTerminal, retryAfterMs);
           }
         });
         await stream.closed;
@@ -291,7 +361,8 @@ function connectManagedResourceStream(url, store, opts = {}) {
           return;
         }
         const ceiling = Math.min(cap, delay * 2 ** Math.min(state.retries, 30));
-        const wait = Math.floor(ceiling * (0.5 + Math.random() * 0.5));
+        const jittered = Math.floor(ceiling * (0.5 + Math.random() * 0.5));
+        const wait = Math.min(cap, Math.max(jittered, hintMs ?? 0));
         state = { ...state, retries: state.retries + 1 };
         publish("retrying", wait);
         await new Promise((resolve) => {
@@ -1037,7 +1108,7 @@ function resourceStreamURL(base, scope) {
 }
 
 // dist/version.js
-var VERSION = "0.4.0";
+var VERSION = "0.5.0";
 var PROTOCOL_VERSION = 1;
 export {
   DEFAULT_EDITABLE_REGIONS,

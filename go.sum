@@ -1,7 +1,7 @@
-github.com/ConfigButler/krm-stream/gateway v0.4.0 h1:FS+Qnzt+BStJqMdOttXocqOioVK7Woj5wBu2zRfrux0=
-github.com/ConfigButler/krm-stream/gateway v0.4.0/go.mod h1:sVRhasWxXotQQHsyY4mKvvT0npkupDjrvg/i3Elq5+E=
-github.com/ConfigButler/krm-stream/gateway/kube v0.4.0 h1:z8u0LGxai22G8P8l4rVPhDtj2kEd1BrfSEiX0RCCwxU=
-github.com/ConfigButler/krm-stream/gateway/kube v0.4.0/go.mod h1:el803o09/lDxpf4hNSJN1wjs78WdY3qgbb5ZEKu2BWw=
+github.com/ConfigButler/krm-stream/gateway v0.5.0 h1:fvu6IM1AKfpjVR/oWOKcKVoUo0K0gkdwjMkZdLrBQoI=
+github.com/ConfigButler/krm-stream/gateway v0.5.0/go.mod h1:sVRhasWxXotQQHsyY4mKvvT0npkupDjrvg/i3Elq5+E=
+github.com/ConfigButler/krm-stream/gateway/kube v0.5.0 h1:alQVrzR3nA7AdUtWKjJEklmVGy2+SdjHBbuR+IkEfyA=
+github.com/ConfigButler/krm-stream/gateway/kube v0.5.0/go.mod h1:rUTOTlHP3lnzZban0RF7/0WM4wGjwhS5dzqaX/zs6AA=
 github.com/Masterminds/semver/v3 v3.4.0 h1:Zog+i5UMtVoCU8oKka5P7i9q9HgrJeGzI9SA1Xbatp0=
 github.com/Masterminds/semver/v3 v3.4.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
