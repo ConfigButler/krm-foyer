@@ -251,6 +251,11 @@ Security items need tests that try to get past the boundary.
       hold at the API server counted on their own (unit tests and e2e, each checked
       against a build broken on purpose). A bound of their own on upstream watches
       comes with shared watches
+- [x] Recovery after a disconnect: a watch the API server ends, or ends with 410 Gone,
+      is opened again on the same stream with a fresh snapshot (unit tests); a dropped
+      connection between browser and krm-foyer is recovered by krm-stream's client, with
+      what changed meanwhile and the user's draft kept (browser spec, which a page that
+      does not retry failed)
 - [ ] Shared watches with per-subscriber SubjectAccessReview and bounded rechecks
 - [x] A stream ends when its session or its token expires, whichever comes first, and
       logout closes that session's streams: aborted, and its watch cancelled at the API

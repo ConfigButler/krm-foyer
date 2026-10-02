@@ -100,27 +100,37 @@ func newAPIServer(t *testing.T, respond http.HandlerFunc) *apiServer {
 
 // snapshot answers a streaming list of two notes, then holds the watch open.
 func snapshot(w http.ResponseWriter, r *http.Request) {
+	snapshotOf(w, 10, "note first")
+	<-r.Context().Done()
+}
+
+// snapshotOf writes a streaming list of the notes first and second, first with the
+// text first, at resourceVersions from rv, and the bookmark that ends it.
+func snapshotOf(w http.ResponseWriter, rv int, first string) {
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	for i, name := range []string{"first", "second"} {
+		text := "note " + name
+		if name == "first" {
+			text = first
+		}
 		_ = enc.Encode(map[string]any{"type": "ADDED", "object": map[string]any{
 			"apiVersion": "hello.krm-foyer.example/v1", "kind": "Note",
 			"metadata": map[string]any{
 				"name": name, "namespace": "hello", "uid": "uid-" + name,
-				"resourceVersion": fmt.Sprint(10 + i),
+				"resourceVersion": fmt.Sprint(rv + i),
 			},
-			"spec": map[string]any{"text": "note " + name},
+			"spec": map[string]any{"text": text},
 		}})
 	}
 	_ = enc.Encode(map[string]any{"type": "BOOKMARK", "object": map[string]any{
 		"apiVersion": "hello.krm-foyer.example/v1", "kind": "Note",
 		"metadata": map[string]any{
-			"resourceVersion": "12",
+			"resourceVersion": fmt.Sprint(rv + 2),
 			"annotations":     map[string]any{"k8s.io/initial-events-end": "true"},
 		},
 	}})
 	_ = http.NewResponseController(w).Flush()
-	<-r.Context().Done()
 }
 
 // status answers with a Kubernetes Status.
@@ -633,5 +643,77 @@ func TestStreamsAndTheirWatchesAreCounted(t *testing.T) {
 	}
 	if n := gauge(t, m, "krm_foyer_requests_in_flight"); n != "0" {
 		t.Errorf("a stream counted as %s requests in flight", n)
+	}
+}
+
+// texts returns the text of each note in events, by name, as the last event said.
+func texts(t *testing.T, events []event) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, e := range events {
+		if e.Type != "added" && e.Type != "modified" {
+			continue
+		}
+		var o struct {
+			Metadata struct{ Name string } `json:"metadata"`
+			Spec     struct{ Text string } `json:"spec"`
+		}
+		if err := json.Unmarshal(e.Object, &o); err != nil {
+			t.Fatal(err)
+		}
+		out[o.Metadata.Name] = o.Spec.Text
+	}
+	return out
+}
+
+// A watch the API server ends, as it does after its timeout, or ends with 410 Gone,
+// is opened again on the same stream: the browser is told continuity was lost, gets a
+// fresh snapshot with what changed in between, and the stream goes on, as the user.
+func TestAStreamRecoversWhenItsWatchEnds(t *testing.T) {
+	for name, end := range map[string]func(http.ResponseWriter){
+		"ended": func(http.ResponseWriter) {},
+		"410 Gone": func(w http.ResponseWriter) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"type": "ERROR", "object": map[string]any{
+				"kind": "Status", "apiVersion": "v1", "status": "Failure",
+				"reason": "Expired", "code": 410, "message": "too old resource version: 10 (300)",
+			}})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var watches atomic.Int32
+			api := newAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if watches.Add(1) == 1 {
+					snapshotOf(w, 10, "before")
+					end(w)
+					return
+				}
+				snapshotOf(w, 20, "changed in between")
+				<-r.Context().Done()
+			})
+			f := newFoyer(t, api, credentials{token: userToken}, nil)
+			s := f.open(t.Context(), t, notes, nil)
+			first := s.until(t, "synced")
+			second := s.until(t, "synced")
+			if got := types(first); got != "reset,added,added,synced" {
+				t.Errorf("first cycle %s", got)
+			}
+			if got := types(second); got != "error,reset,added,added,synced" ||
+				second[0].Code != "RESYNC_REQUIRED" || second[0].Terminal {
+				t.Errorf("second cycle %s, %+v; want a RESYNC_REQUIRED, then a fresh snapshot", got, second[0])
+			}
+			if got := texts(t, second)["first"]; got != "changed in between" {
+				t.Errorf("after recovery, first reads %q", got)
+			}
+			for _, r := range api.received() {
+				if r.Header.Get("Authorization") != "Bearer "+userToken {
+					t.Errorf("a watch was opened again as %q", r.Header.Get("Authorization"))
+				}
+			}
+			// A routine end is not a failure: no wait before the watch is opened again,
+			// and nothing logged as one.
+			if logs := f.logs.String(); strings.Contains(logs, "could not serve") {
+				t.Errorf("a routine end of a watch was logged as a failure: %s", logs)
+			}
+		})
 	}
 }

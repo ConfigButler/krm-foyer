@@ -135,7 +135,9 @@ bugs are here, where they are cheap to find:
   cancelled, even where no write deadline can be set. Streams count against limits of
   their own, not the request limits, but draw on the same request rate; the streams
   open and the watches they hold at the API server are counted, and counted out again
-  when a stream ends. Each was seen to fail against a
+  when a stream ends. A watch the API server ends, or ends with 410 Gone, is opened
+  again on the same stream, as the user, with a fresh snapshot of what changed in
+  between, and without the wait or the warning of a failure. Each was seen to fail against a
   build broken on purpose; the one mutation no test sees is the message of a retryable
   error, which krm-stream v0.4.0 never sends.
 - **Login** ([internal/auth](../internal/auth)) runs against a fake issuer in the test
@@ -221,9 +223,13 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   without a reload; one made to a note alice is typing in is shown as a conflict, with
   her text kept; and a change the stream does not show (the last-applied-configuration
   annotation, which every projection removes) gets a 409 on save, after which the page
-  catches up and saves only when asked again. Signing out in another tab ends the live
-  view with the page saying so. Its specs were each seen to fail against a broken build:
-  the browser not trusting Dex, the example saving again on its own after a 409 or
+  catches up and saves only when asked again. When the connection drops (the spec kills
+  the front door's port-forward, so every connection through it breaks, and the session
+  lives on), the page shows it is reconnecting; once the way is back it has a change
+  made meanwhile, and alice's unsaved text is still hers. Signing out in another tab
+  ends the live view with the page saying so. Its specs were each seen to fail against a broken build:
+  the browser not trusting Dex, the example not reconnecting after a dropped connection,
+  the example saving again on its own after a 409 or
   saving without its `resourceVersion`, a change from elsewhere replacing what alice
   typed, the page ignoring the end of its stream, the helper leaving out the CSRF header,
   and the helper not reading a new CSRF token after the user signed in again in another

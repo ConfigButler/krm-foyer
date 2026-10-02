@@ -175,6 +175,36 @@ var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 		Expect(noteText("groceries")).To(Equal("milk, eggs, flour"))
 	})
 
+	// The connection between the browser and krm-foyer drops, the way a network does:
+	// the front door's port-forward is killed, so every connection through it breaks.
+	// The session lives on in krm-foyer. krm-stream's client tries again, and once the
+	// way is back the page has what changed meanwhile, and alice's draft is still hers.
+	It("recovers when the connection drops, with what changed meanwhile and alice's draft", func(ctx SpecContext) {
+		run(tab, typeInto(`li[data-name="groceries"] textarea`, "flour, still unsaved"))
+
+		restored := false
+		restore := func(ctx context.Context) {
+			out, err := exec.CommandContext(ctx, "cluster/port-forward.sh").CombinedOutput()
+			Expect(err).NotTo(HaveOccurred(), "%s", out)
+			restored = true
+		}
+		// Whatever happens below, the next specs need the way back.
+		DeferCleanup(func(ctx SpecContext) {
+			if !restored {
+				restore(ctx)
+			}
+		})
+		Expect(exec.CommandContext(ctx, "pkill", "-f", "^kubectl port-forward .*svc/traefik ").Run()).To(Succeed())
+		expectLive(tab, "retrying")
+		fx.kubectl("-n", ns, "patch", "notes.hello.krm-foyer.example", "chores",
+			"--type=merge", "-p", `{"spec":{"text":"changed while alice was offline"}}`)
+
+		restore(ctx)
+		expectLive(tab, "live")
+		expectEditor(tab, "chores", "changed while alice was offline")
+		expectEditor(tab, "groceries", "flour, still unsaved")
+	}, SpecTimeout(2*time.Minute))
+
 	// Signing in again starts a new session with a new CSRF token, and a page loaded before
 	// still holds the old one. Its changes and its logout must still work.
 	It("keeps saving and signs out after alice signs in again in another tab", func() {
@@ -328,6 +358,19 @@ func typeInto(sel, text string) chromedp.Action {
 		chromedp.SetValue(sel, text),
 		chromedp.Evaluate(`document.querySelector(`+strconv.Quote(sel)+`).dispatchEvent(new Event('input', {bubbles: true}))`, nil),
 	}
+}
+
+// expectLive waits for the page's connection to be in state, as krm-stream's client
+// names it: live, retrying, terminal...
+func expectLive(tab context.Context, state string) {
+	GinkgoHelper()
+	var got string
+	Eventually(func(g Gomega) {
+		ctx, cancel := context.WithTimeout(tab, 5*time.Second)
+		defer cancel()
+		g.Expect(chromedp.Run(ctx, chromedp.AttributeValue("#live", "data-state", &got, nil, chromedp.ByID))).To(Succeed())
+		g.Expect(got).To(Equal(state))
+	}).WithTimeout(30 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 }
 
 // expectEditor waits for the editor of note name to show text.
