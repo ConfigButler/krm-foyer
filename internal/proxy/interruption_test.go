@@ -87,13 +87,16 @@ func TestInterruptionsHaveAPageForNavigations(t *testing.T) {
 			if code.StatusCode != tc.status {
 				t.Fatalf("for code: %d, want %d", code.StatusCode, tc.status)
 			}
-			readStatus(t, code)
+			reason := readStatus(t, code).Reason
 
 			page := tc.send(t, navigation)
 			if page.StatusCode != tc.status {
 				t.Fatalf("for a navigation: %d, want %d, the same as for code", page.StatusCode, tc.status)
 			}
 			assertPage(t, page)
+			if got := page.Header.Values(interruption.Header); len(got) != 1 || got[0] != reason {
+				t.Errorf("page %s = %q, want %q, the same as for code", interruption.Header, got, reason)
+			}
 			for _, want := range tc.page {
 				if !strings.Contains(page.Body, want) {
 					t.Errorf("the page does not say %q:\n%s", want, page.Body)

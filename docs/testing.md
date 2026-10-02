@@ -166,7 +166,7 @@ flowchart LR
       D[Dex<br/>dex.localhost:5556]
       I[Test issuer<br/>issuer.krm-foyer.test:8443]
       FD[Front door<br/>Traefik: Gateway, HTTPRoutes]
-      W[hello-web<br/>nginx, files only]
+      W[hello-web<br/>nginx, files only, TLS]
       F[krm-foyer<br/>foyer.localhost:8443]
       A[(audit.log)]
     end
@@ -222,11 +222,13 @@ it). The chart brings the Gateway API CRDs.
 
 [front-door.sh](../test/e2e/cluster/front-door.sh) applies the hello example's
 [resources](../examples/hello/manifests.yaml), deploys a file server for its pages
-([hello-web.yaml](../test/e2e/cluster/hello-web.yaml): nginx, files only), and applies
-[gateway.yaml](../test/e2e/cluster/gateway.yaml): a Gateway for `foyer.localhost`, an
-`HTTPRoute` sending `/` to the file server, one sending `/auth`, `/k8s`, `/stream` and
-`/_foyer` to krm-foyer, and a `BackendTLSPolicy` under which Traefik verifies
-krm-foyer's certificate (with a wrong hostname in it, every request fails). Then
+([hello-web.yaml](../test/e2e/cluster/hello-web.yaml): nginx, files only, over TLS), and
+applies [gateway.yaml](../test/e2e/cluster/gateway.yaml): a Gateway for `foyer.localhost`,
+an `HTTPRoute` sending `/` to the file server without the `Cookie` header, one sending
+`/auth`, `/k8s`, `/stream` and `/_foyer` to krm-foyer, and a `BackendTLSPolicy` for each
+backend under which Traefik verifies its certificate (with a wrong hostname in it, every
+request fails). The file server answers 400 to any request that still carries a cookie,
+so every signed-in browser spec fails if the route stops removing it. Then
 [port-forward.sh](../test/e2e/cluster/port-forward.sh) forwards Traefik to
 `127.0.0.1:8443` and Dex to `127.0.0.1:5556` in this container, detached, and checks both
 by their public names. Browsers resolve `foyer.localhost` and `dex.localhost` to loopback,

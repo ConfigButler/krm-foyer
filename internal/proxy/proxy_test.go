@@ -185,6 +185,9 @@ func readStatus(t *testing.T, resp answer) status {
 	if s.Kind != "Status" || s.APIVersion != "v1" || s.Status != "Failure" || s.Code != resp.StatusCode {
 		t.Fatalf("interruption is not a Status for %d: %+v", resp.StatusCode, s)
 	}
+	if got := resp.Header.Values(interruption.Header); len(got) != 1 || got[0] != s.Reason {
+		t.Fatalf("interruption %s = %q, want %q", interruption.Header, got, s.Reason)
+	}
 	return s
 }
 
@@ -416,6 +419,29 @@ func TestDropsUpstreamHeaders(t *testing.T) {
 		}
 	}
 	assertSecurityHeaders(t, resp)
+}
+
+// An upstream cannot pass its answer off as krm-foyer's: the helper resends a change
+// only when krm-foyer refused it, and knows that by the interruption header. An
+// aggregated API answering exactly like a CSRF refusal still gets its answer through,
+// as its own.
+func TestUpstreamCannotClaimAnInterruption(t *testing.T) {
+	body := `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"CSRFProofRequired","code":403}`
+	api := newAPIServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header()[interruption.Header] = []string{"CSRFProofRequired"}
+		w.Header()["krm-foyer-interruption"] = []string{"CSRFProofRequired"}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, body)
+	})
+	f := newFoyer(t, api, credentials{token: userToken})
+	resp := f.request(t, http.MethodPost, "/k8s/apis/aggregated.example.com/v1/things", strings.NewReader("{}"), nil)
+	if resp.StatusCode != http.StatusForbidden || resp.Body != body {
+		t.Fatalf("%d %q, want the API server's answer", resp.StatusCode, resp.Body)
+	}
+	if got := resp.Header.Values(interruption.Header); len(got) != 0 {
+		t.Errorf("the API server's %s reached the browser: %q", interruption.Header, got)
+	}
 }
 
 func assertSecurityHeaders(t *testing.T, resp answer) {

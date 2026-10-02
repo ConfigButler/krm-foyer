@@ -73,6 +73,9 @@ server_cert() {
 }
 server_cert dex "$DEX_HOST"
 server_cert test-issuer "$ISSUER_HOST"
+# The hello example's file server (front-door.sh): the Gateway verifies it by its
+# Service name.
+server_cert hello-web hello-web.fixture.svc
 # Kept across runs: a new key is a new JWKS, which the API server only picks up minutes
 # later.
 [ -f "$E2E_DIR/issuer-signing.key" ] \

@@ -51,6 +51,8 @@ answered. Things to keep when you copy this:
   user.
 - **Send the object back with the `resourceVersion` you read.** Then a change made in
   the meantime is a 409 instead of being overwritten.
+- **Leave editors the user did not touch alone.** A created note is added to the list in
+  place; rebuilding the list would throw away text typed elsewhere and not saved.
 - **Serve the page with a strict Content-Security-Policy** that allows scripts from your
   own origin only, as the fixture's file server does
   ([hello-web-nginx.conf](../../test/e2e/cluster/hello-web-nginx.conf)).

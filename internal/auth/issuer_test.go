@@ -54,6 +54,8 @@ type fakeIssuer struct {
 	echo func(w http.ResponseWriter, request string)
 	// failDiscovery answers this many discovery requests with 503.
 	failDiscovery int
+	// failKeys answers every key-set request with a 500 whose body is failKeys.
+	failKeys string
 }
 
 type grant struct {
@@ -100,6 +102,10 @@ func (f *fakeIssuer) discovery(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (f *fakeIssuer) keys(w http.ResponseWriter, _ *http.Request) {
+	if f.failKeys != "" {
+		http.Error(w, f.failKeys, http.StatusInternalServerError)
+		return
+	}
 	writeTestJSON(w, map[string]any{"keys": []map[string]string{{
 		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "k1",
 		"n": base64.RawURLEncoding.EncodeToString(f.key.N.Bytes()),

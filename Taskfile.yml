@@ -26,7 +26,7 @@ tasks:
       - task: test-e2e
 
   test:
-    desc: "Go tests with the race detector, and a short fuzz run."
+    desc: "Go tests with the race detector, a short fuzz run, and the browser helper's tests."
     cmds:
       # -race stays on: a proxy that fans streams out to many browsers is where a
       # data race turns into one user seeing another's data.
@@ -37,6 +37,8 @@ tasks:
       - go test -run '^$' -fuzz '^FuzzCheckResponse$' -fuzztime 10s ./internal/proxy/
       - go test -run '^$' -fuzz '^FuzzCheckMutation$' -fuzztime 10s ./internal/session/
       - go test -run '^$' -fuzz '^FuzzLocalPath$' -fuzztime 10s ./internal/auth/
+      # The browser helper, /_foyer/foyer.js, with Node's own test runner: no npm, no build.
+      - node --test 'internal/pages/*.test.js'
 
   test-e2e:
     desc: "End-to-end suite against a real API server, a real Dex and krm-foyer in the cluster. Brings the fixture up if needed."

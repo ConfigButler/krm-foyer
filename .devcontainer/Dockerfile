@@ -13,7 +13,11 @@
 # Base pinned by digest: the same image krm-stream and the Dockerfile at the repo root build on.
 FROM golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195 AS ci
 
-ENV DEBIAN_FRONTEND=noninteractive
+# NODE_MAJOR -> the current Node LTS line, for the browser helper's tests (`node --test`,
+#   no npm packages). Set here rather than in the tool block below because the apt step
+#   that installs it comes first.
+ENV DEBIAN_FRONTEND=noninteractive \
+    NODE_MAJOR=24
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # shellcheck is here for actionlint, which shells out to it for every `run:` block and
@@ -31,8 +35,13 @@ RUN apt-get update \
     && chmod a+r /etc/apt/keyrings/docker.asc \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
        > /etc/apt/sources.list.d/docker.list \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && chmod a+r /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+       > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
-    && apt-get -y install --no-install-recommends gh docker-ce-cli docker-buildx-plugin \
+    && apt-get -y install --no-install-recommends gh docker-ce-cli docker-buildx-plugin nodejs \
     && apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
 
 # Tool versions, in one place. CI runs inside this stage, so a bump here is a bump
@@ -107,25 +116,15 @@ USER root
 ENV DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# NODE_MAJOR -> the current Node LTS line. Not needed to build krm-foyer (the service has
-#   no JavaScript build, see docs/frontend.md); it is here for the Codex CLI. The browser
-#   tests run Chromium in a container, driven from Go, so they need no Node either.
+# Node comes from the ci stage (NODE_MAJOR there); the Codex CLI below needs it too.
 ENV DLV_VERSION=v1.27.2 \
     GOPLS_VERSION=v0.23.0 \
     GOIMPORTS_VERSION=v0.50.0 \
     STATICCHECK_VERSION=v0.8.1 \
-    NODE_MAJOR=24 \
     CODEX_VERSION=0.154.0
 
 RUN apt-get update \
     && apt-get -y install --no-install-recommends bash-completion \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && chmod a+r /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
-       > /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update \
-    && apt-get -y install --no-install-recommends nodejs \
     && apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
 
 # Codex CLI. npm's prefix is /usr, in the container's writable layer, so it has to be baked

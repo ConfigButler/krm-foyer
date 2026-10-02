@@ -14,6 +14,11 @@ import (
 	"github.com/ConfigButler/krm-foyer/internal/pages"
 )
 
+// Header names the reason on every interruption, in both forms. The proxy passes no
+// upstream header but its allowlist, so the API server, or an aggregated API, cannot
+// send it: code that sees it knows krm-foyer answered, whatever the body says.
+const Header = "Krm-Foyer-Interruption"
+
 // An Interruption is an answer krm-foyer gives instead of the API server's. Every
 // kind is a row of the interruptions table in docs/design.md, and nothing else may
 // stand between a user and the API server's answer.
@@ -100,6 +105,7 @@ func (i *Interruption) Write(w http.ResponseWriter) {
 	}
 	h := w.Header()
 	SetHeaders(h)
+	h.Set(Header, i.Reason)
 	h.Set("Content-Type", "application/json")
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(i.Status)
@@ -143,5 +149,6 @@ func (i *Interruption) page(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	w.Header().Set(Header, i.Reason)
 	pages.Render(w, i.Status, "interruption.html", data)
 }

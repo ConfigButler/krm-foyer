@@ -31,7 +31,9 @@ spec:
                 operator: In
                 values: [fixture, krm-foyer]
 ---
-# The application: static files, everything krm-foyer does not claim.
+# The application: static files, everything krm-foyer does not claim. The browser sends
+# the session cookie here too (it is Path=/), and a file server has no use for it, so it
+# never leaves the Gateway on this route.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -42,9 +44,13 @@ spec:
     - name: front-door
   hostnames: [foyer.localhost]
   rules:
-    - backendRefs:
+    - filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [Cookie]
+      backendRefs:
         - name: hello-web
-          port: 8080
+          port: 443
 ---
 # krm-foyer's prefixes. PathPrefix matches whole path segments: /k8s and /k8s/api, never
 # /k8sfoo.
@@ -86,3 +92,22 @@ spec:
       - group: ""
         kind: ConfigMap
         name: krm-foyer-issuer-ca
+---
+# Traefik to the file server is TLS too, verified. Its answers are scripts that run as
+# the signed-in user, so this hop needs the same protection as the one to krm-foyer.
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: hello-web
+  namespace: fixture
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: hello-web
+  validation:
+    hostname: hello-web.fixture.svc
+    caCertificateRefs:
+      - group: ""
+        kind: ConfigMap
+        name: hello-web-ca

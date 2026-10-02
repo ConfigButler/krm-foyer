@@ -71,11 +71,14 @@ separate:
    last puts the CSRF header on every change and reports each answer as an outcome
    (`ok`, `signed-out`, `refused`, `missing`, `conflict`, `invalid`, `error`) with the
    `Status` message, without retrying anything Kubernetes answered. Its one resend is of
-   a change krm-foyer refused for a stale CSRF token, which never reached Kubernetes.
+   a change krm-foyer refused for a stale CSRF token, which never reached Kubernetes. It
+   knows that refusal by the `Krm-Foyer-Interruption` header, never by the body, which an
+   aggregated API could copy (see [interruptions](design.md#interruptions)).
    `requireSession()` sends a signed-out page to login, for deployments whose ingress
    cannot run the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages).
-   Every application needs these, and they are easy to get subtly wrong. There is no npm
-   package until someone needs one outside a krm-foyer origin.
+   Every application needs these, and they are easy to get subtly wrong. Its tests run
+   under `node --test` ([foyer.test.js](../internal/pages/foyer.test.js)), with no npm
+   packages. There is no npm package until someone needs one outside a krm-foyer origin.
 3. **[`examples/hello/`](../examples/hello)** (exists): one HTML file, one script and a
    stylesheet, with no bundler and no backend of its own. It signs in, lists, creates and
    edits Notes (a small custom resource) through `/k8s`, and shows Kubernetes' 403 and 409
@@ -93,3 +96,7 @@ The routing recipes come with the ingress work.
 - Two adopters write the same page themselves. That is a sign it belongs in the service.
 - The helper grows past the session and the proof every request needs. Then it belongs
   in its own package, or in krm-stream.
+
+Looked at (2026-10-02): no published Kubernetes client fits as the helper's transport, so
+the helper stays its own, small and without dependencies. The libraries checked, and
+what each is good for, are in [alternatives](alternatives.md#instead-of-the-browser-helper).

@@ -59,19 +59,17 @@ async function proof() {
 
 // change sends a request that changes state, with the session's CSRF proof. The proof
 // goes stale when the user signs in again in another tab. krm-foyer then refuses the
-// request before it reaches Kubernetes, so it is safe to read the proof anew and send
-// the request once more. That is the only request this helper ever sends twice.
+// request before it reaches Kubernetes, and says so in the Krm-Foyer-Interruption
+// header, which it never passes on from upstream. Only that refusal is resent, once:
+// a body saying the same could be any API's answer to a request that did arrive.
 async function change(url, init) {
   const send = async () => fetch(url, { ...init, headers: { ...init.headers, ...(await proof()) } });
   const res = await send();
-  if (res.status === 403) {
-    const refusal = await res.clone().json().catch(() => null);
-    if (refusal && refusal.reason === 'CSRFProofRequired') {
-      csrf = null;
-      return send();
-    }
+  if (res.headers.get('Krm-Foyer-Interruption') !== 'CSRFProofRequired') {
+    return res;
   }
-  return res;
+  csrf = null;
+  return send();
 }
 
 // What each status means for an application. Anything else that is not 2xx is 'error'.
