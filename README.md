@@ -73,6 +73,7 @@ Kubernetes' own answers.
 | [docs/ingress.md](docs/ingress.md) | Terminating TLS itself or behind an ingress, sharing one domain with other services, and the login gate for an ingress |
 | [docs/frontend.md](docs/frontend.md) | Which pages krm-foyer serves itself, and why it ships no single-page application |
 | [docs/testing.md](docs/testing.md) | How the tests prove krm-foyer invents neither authentication nor authorization, and how to run the e2e fixture |
+| [docs/investigations/choosing-an-issuer.md](docs/investigations/choosing-an-issuer.md) | Which OIDC issuers fit krm-foyer (Dex, Pinniped, Keycloak, authentik, Authelia, OpenUnison), and why the tests use Dex |
 | [docs/heritage.md](docs/heritage.md) | Where it comes from: the Voter demo, what broke on stage, and its sibling projects |
 | [docs/name.md](docs/name.md) | Why it is called krm-foyer |
 
