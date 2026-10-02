@@ -210,8 +210,8 @@ Security items need tests that try to get past the boundary.
       [what may I do](design.md#what-may-i-do)
 - [ ] Shared session storage, so more than one replica works (step 6)
 - [ ] The [session lifecycle](design.md#session-lifecycle) bounds, each with a test:
-      logout seen by every replica at once, logout racing a refresh, the session store
-      unavailable, and krm-stream's streams open across logout and expiry
+      logout seen by every replica at once, logout racing a refresh, and the session
+      store unavailable
 - [x] A native watch open across logout and expiry is aborted and cancelled at the API
       server within the session-check interval (one replica; e2e against the real
       cluster)
@@ -245,8 +245,11 @@ Security items need tests that try to get past the boundary.
       (step 5)
 - [ ] Bounds on browser subscriptions and on upstream watches, counted separately
 - [ ] Shared watches with per-subscriber SubjectAccessReview and bounded rechecks
-- [ ] A stream ends when its session or its token expires, whichever comes first, and
-      logout closes that session's streams
+- [x] A stream ends when its session or its token expires, whichever comes first, and
+      logout closes that session's streams: aborted, and its watch cancelled at the API
+      server within the session-check interval (one replica; unit tests, and e2e with
+      the audit log as witness, checked by deploying a krm-foyer whose streams the gate
+      could not cancel)
 - [ ] A rehearsal with 200 identities, as a repeatable test, which also sets the
       per-replica defaults in [bounds](bounds.md)
 

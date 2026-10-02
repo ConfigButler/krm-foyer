@@ -109,4 +109,71 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 		time.Sleep(2 * time.Second)
 		Expect(fx.audited(s.Marker)).To(BeEmpty())
 	})
+
+	// The "streams open at logout" and "token expiry" rows of the session lifecycle
+	// table (docs/design.md), for krm-stream's streams.
+	Context("end with their session", func() {
+		It("aborts a stream when its session logs out, and cancels its watch at the API server", func(ctx SpecContext) {
+			ns := fx.namespace()
+			fx.grant(ns, aliceK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch")
+			createNotes(ns, "first")
+			alice := signIn(ctx, alice)
+			before := fx.metric(cutForSessionEnded)
+			s := alice.open(ctx, noteStream(ns))
+			s.until("synced")
+
+			out := alice.b.do(ctx, http.MethodPost, "/auth/logout", nil, alice.proof())
+			Expect(out.Code).To(Equal(http.StatusNoContent), "%s", out.Body)
+			loggedOut := time.Now()
+
+			By("within the session-check interval: 5 seconds by default, 10 at worst")
+			at, err := s.end(30 * time.Second)
+			Expect(err).To(HaveOccurred(), "the stream ended cleanly; a stream cut short is aborted")
+			Expect(at.Sub(loggedOut)).To(BeNumerically("<", 12*time.Second))
+			// The gateway names no timeoutSeconds, so the API server would keep the
+			// watch open for 30 minutes or more: only krm-foyer can end it this soon.
+			assertCancelledUpstream(ctx, s.Marker, aliceK8sName)
+			Expect(fx.metric(cutForSessionEnded)).To(Equal(before + 1))
+
+			By("and the stream, opened again, gets the 401 interruption")
+			again := alice.open(ctx, noteStream(ns))
+			Expect(again.resp.StatusCode).To(Equal(http.StatusUnauthorized))
+			Expect(again.resp.Header.Get("Krm-Foyer-Interruption")).To(Equal("Unauthorized"))
+			_, _ = again.end(10 * time.Second)
+		})
+
+		It("aborts a stream when its session expires, and cancels its watch at the API server", func(ctx SpecContext) {
+			ns := fx.namespace()
+			fx.grant(ns, aliceK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch")
+			createNotes(ns, "first")
+			// The brief instance ends a session 45 seconds after login, checks open
+			// responses every second, and cuts one short after 20 seconds.
+			beforeLogin := time.Now()
+			alice := signInBrief(ctx, alice)
+			afterLogin := time.Now()
+			before := fx.briefMetric(cutForSessionEnded)
+
+			By("opening the stream late in the session, so nothing but its end can close it")
+			select {
+			case <-time.After(time.Until(beforeLogin.Add(32 * time.Second))):
+			case <-ctx.Done():
+				Fail("interrupted")
+			}
+			s := alice.open(ctx, noteStream(ns))
+			s.until("synced")
+
+			at, err := s.end(45 * time.Second)
+			Expect(err).To(HaveOccurred(), "the stream ended cleanly; a stream cut short is aborted")
+			Expect(at).To(BeTemporally(">=", beforeLogin.Add(45*time.Second)), "the stream ended before its session")
+			Expect(at).To(BeTemporally("<", afterLogin.Add(45*time.Second+2*time.Second+3*time.Second)),
+				"the stream outlived its session by more than two check intervals")
+			assertCancelledUpstream(ctx, s.Marker, aliceK8sName)
+			Expect(fx.briefMetric(cutForSessionEnded)).To(Equal(before + 1))
+
+			By("and the stream, opened again, gets the 401 interruption")
+			again := alice.open(ctx, noteStream(ns))
+			Expect(again.resp.StatusCode).To(Equal(http.StatusUnauthorized))
+			_, _ = again.end(10 * time.Second)
+		})
+	})
 })

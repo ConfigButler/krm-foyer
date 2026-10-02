@@ -200,7 +200,11 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   `FORBIDDEN` with Kubernetes' own message, and the audit log shows the API server
   refused alice herself. Without a session there is a 401 and no request at all. A
   build that opened watches with its service account, cluster-admin in the fixture,
-  failed the first two.
+  failed the first two. A stream open when its session logs out, or expires on the brief
+  instance, is aborted within the session-check interval, and the audit log shows the
+  API server completed its watch within a minute, though the gateway names no
+  `timeoutSeconds`; opened again, it gets the 401. A build whose gateway ran on a
+  context the gate could not cancel failed both.
 - **The hello example** (label `browser`) is the claim that krm-foyer is usable, not
   only correct. Chromium ([chromedp/headless-shell](https://hub.docker.com/r/chromedp/headless-shell),
   pinned by digest, driven from Go with chromedp) runs in the network namespace of the
