@@ -176,4 +176,32 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 			_, _ = again.end(10 * time.Second)
 		})
 	})
+
+	It("bounds a session's streams apart from its requests", func(ctx SpecContext) {
+		ns := fx.namespace()
+		fx.grant(ns, aliceK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch")
+		fx.grant(ns, aliceK8sName, "configmaps", "get", "list", "watch")
+		createNotes(ns, "first")
+		// The brief instance allows a session two streams and two requests at once.
+		alice := signInBrief(ctx, alice)
+		before := fx.briefMetric("krm_foyer_upstream_watches_open")
+		for range 2 {
+			alice.open(ctx, noteStream(ns)).until("synced")
+		}
+		Expect(fx.briefMetric("krm_foyer_upstream_watches_open")).To(BeNumerically(">=", before+2))
+
+		By("its requests are not counted with its streams")
+		for range 2 {
+			w := alice.watch(ctx, "/api/v1/namespaces/"+ns+"/configmaps?watch=1&timeoutSeconds=60")
+			Expect(w.resp.StatusCode).To(Equal(http.StatusOK))
+		}
+
+		By("a third stream is krm-foyer's 429, and never reaches the API server")
+		third := alice.open(ctx, noteStream(ns))
+		Expect(third.resp.StatusCode).To(Equal(http.StatusTooManyRequests))
+		Expect(third.resp.Header.Get("Krm-Foyer-Interruption")).To(Equal("TooManyStreams"))
+		_, _ = third.end(10 * time.Second)
+		time.Sleep(2 * time.Second) // time for the audit log to show a request, if one was made
+		Expect(fx.audited(third.Marker)).To(BeEmpty())
+	})
 })

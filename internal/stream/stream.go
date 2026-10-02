@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/ConfigButler/krm-stream/gateway"
@@ -101,7 +102,7 @@ func (s *Streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	a := s.gate.Admit(w, r)
+	a := s.gate.AdmitStream(w, r)
 	if a == nil {
 		return
 	}
@@ -198,13 +199,21 @@ func (b *backend) Watch(ctx context.Context, scope gateway.Scope) (gateway.Watch
 		return nil, b.upstream.refusal(ctx, err)
 	}
 	b.upstream.failures = 0
-	return &watcher{upstream: b.upstream, Watcher: w}, nil
+	return &watcher{upstream: b.upstream, Watcher: w, done: b.upstream.streams.gate.Metrics().UpstreamWatch()}, nil
 }
 
-// watcher keeps an open watch's errors from reaching the browser as text.
+// watcher keeps an open watch's errors from reaching the browser as text, and counts
+// it while it is open.
 type watcher struct {
 	upstream *upstream
 	gateway.Watcher
+	done func()
+	stop sync.Once
+}
+
+func (w *watcher) Stop() {
+	w.Watcher.Stop()
+	w.stop.Do(w.done)
 }
 
 func (w *watcher) Next(ctx context.Context) (gateway.WatchEvent, error) {

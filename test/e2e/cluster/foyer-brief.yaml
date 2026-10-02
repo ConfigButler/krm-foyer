@@ -52,6 +52,7 @@ spec:
             - -session-check-interval=1s
             - -max-response-duration=20s
             - -max-session-concurrent-requests=2
+            - -max-session-streams=2
             - -session-request-burst=10
             - -session-request-rate=1
             - -max-response-bytes=131072

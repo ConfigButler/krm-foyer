@@ -51,6 +51,7 @@ func TestParseConfigWithLogin(t *testing.T) {
 		l.sessions.IdleTimeout != time.Hour || l.sessions.AbsoluteTimeout != 8*time.Hour ||
 		l.gate.SessionCheckInterval != 5*time.Second || l.gate.MaxResponseDuration != 30*time.Minute ||
 		l.gate.MaxSessionConcurrentRequests != 64 || l.gate.MaxConcurrentRequests != 2000 ||
+		l.gate.MaxSessionStreams != 32 || l.gate.MaxStreams != 2000 ||
 		l.gate.SessionRequestRate != 20 || l.gate.SessionRequestBurst != 100 ||
 		l.kubernetes.MaxResponseBytes != 32<<20 {
 		t.Fatalf("%+v", l)
@@ -92,6 +93,8 @@ func TestParseConfigRefuses(t *testing.T) {
 		"duration past idle":     {append(loginArgs, "-max-response-duration", "1h"), secret, "below -session-idle-timeout"},
 		"no concurrency":         {append(loginArgs, "-max-concurrent-requests", "0"), secret, "-max-concurrent-requests"},
 		"no session concurrency": {append(loginArgs, "-max-session-concurrent-requests", "-1"), secret, "-max-session-concurrent-requests"},
+		"no session streams":     {append(loginArgs, "-max-session-streams", "0"), secret, "-max-session-streams"},
+		"no streams":             {append(loginArgs, "-max-streams", "-1"), secret, "-max-streams"},
 		"no request rate":        {append(loginArgs, "-session-request-rate", "0"), secret, "-session-request-rate"},
 		"no request burst":       {append(loginArgs, "-session-request-burst", "0"), secret, "-session-request-burst"},
 		"no byte limit":          {append(loginArgs, "-max-response-bytes", "0"), secret, "-max-response-bytes"},

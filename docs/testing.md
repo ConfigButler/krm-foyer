@@ -132,7 +132,10 @@ bugs are here, where they are cheap to find:
   is sent. Kubernetes' 403, 401 and 404 keep their meaning, with no address inside the
   cluster in what the browser reads, and an API server that cannot answer is retried
   with a wait that doubles. A stream whose session ends is aborted and its watch
-  cancelled, even where no write deadline can be set. Each was seen to fail against a
+  cancelled, even where no write deadline can be set. Streams count against limits of
+  their own, not the request limits, but draw on the same request rate; the streams
+  open and the watches they hold at the API server are counted, and counted out again
+  when a stream ends. Each was seen to fail against a
   build broken on purpose; the one mutation no test sees is the message of a retryable
   error, which krm-stream v0.4.0 never sends.
 - **Login** ([internal/auth](../internal/auth)) runs against a fake issuer in the test
@@ -204,7 +207,10 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   instance, is aborted within the session-check interval, and the audit log shows the
   API server completed its watch within a minute, though the gateway names no
   `timeoutSeconds`; opened again, it gets the 401. A build whose gateway ran on a
-  context the gate could not cancel failed both.
+  context the gate could not cancel failed both. On the brief instance, a session with
+  two streams open, its limit, may still open two native watches, and its third stream
+  is krm-foyer's 429 and never reaches the API server; the build before stream limits
+  failed it.
 - **The hello example** (label `browser`) is the claim that krm-foyer is usable, not
   only correct. Chromium ([chromedp/headless-shell](https://hub.docker.com/r/chromedp/headless-shell),
   pinned by digest, driven from Go with chromedp) runs in the network namespace of the

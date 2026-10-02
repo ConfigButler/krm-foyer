@@ -20,6 +20,7 @@ import (
 
 	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
+	"github.com/ConfigButler/krm-foyer/internal/metrics"
 )
 
 const (
@@ -139,29 +140,32 @@ type foyer struct {
 	logs *strings.Builder
 }
 
-// newFoyer serves streams from api behind a gate with creds, configured by adjust.
-func newFoyer(t *testing.T, api *apiServer, creds gate.Credentials, adjust func(*Config)) foyer {
+// newFoyer serves streams from api behind a gate with creds; adjust changes the
+// streams' configuration and the gate's.
+func newFoyer(t *testing.T, api *apiServer, creds gate.Credentials, adjust func(*Config, *gate.Config)) foyer {
 	t.Helper()
 	logs := &strings.Builder{}
 	var mu sync.Mutex
-	g, err := gate.New(gate.Config{
+	gcfg := gate.Config{
 		Credentials: creds, SessionCheckInterval: checkEvery,
 		Logger: slog.New(slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			return logs.Write(p)
 		}), nil)),
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 	server, _ := url.Parse(api.URL)
 	roots := x509.NewCertPool()
 	roots.AddCert(api.Certificate())
-	cfg := Config{Server: server, RootCAs: roots, Gate: g, RetryDelay: 50 * time.Millisecond}
+	cfg := Config{Server: server, RootCAs: roots, RetryDelay: 50 * time.Millisecond}
 	if adjust != nil {
-		adjust(&cfg)
+		adjust(&cfg, &gcfg)
 	}
+	g, err := gate.New(gcfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Gate = g
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -387,7 +391,7 @@ func TestEachStreamCarriesItsOwnToken(t *testing.T) {
 // request served, and no proxy from the environment is ever used.
 func TestTheUpstreamIsPinnedAndVerified(t *testing.T) {
 	api := newAPIServer(t, nil)
-	f := newFoyer(t, api, credentials{token: userToken}, func(c *Config) { c.RootCAs = x509.NewCertPool() })
+	f := newFoyer(t, api, credentials{token: userToken}, func(c *Config, _ *gate.Config) { c.RootCAs = x509.NewCertPool() })
 	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 	defer cancel()
 	s := f.open(ctx, t, notes, nil)
@@ -573,4 +577,61 @@ func TestACutStreamAbortsWithoutTheWriteDeadline(t *testing.T) {
 		}
 	}()
 	s.ServeHTTP(w, r)
+}
+
+// gauge reads one unlabelled gauge from m, as scraped.
+func gauge(t *testing.T, m *metrics.Metrics, name string) string {
+	t.Helper()
+	w := httptest.NewRecorder()
+	m.Handler().ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+	for line := range strings.Lines(w.Body.String()) {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), name+" "); ok {
+			return v
+		}
+	}
+	t.Fatalf("no %s in the scrape", name)
+	return ""
+}
+
+// A stream counts against the stream limits, not the request limits: past a
+// session's limit it is krm-foyer's 429, and nothing reaches the API server.
+func TestStreamsHaveLimitsOfTheirOwn(t *testing.T) {
+	api := newAPIServer(t, nil)
+	f := newFoyer(t, api, credentials{token: userToken}, func(_ *Config, g *gate.Config) {
+		g.MaxSessionStreams, g.MaxSessionConcurrentRequests = 1, 1
+	})
+	f.open(t.Context(), t, notes, nil).until(t, "synced")
+	second := f.open(t.Context(), t, notes, nil)
+	if second.resp.StatusCode != http.StatusTooManyRequests || second.resp.Header.Get(interruption.Header) != "TooManyStreams" {
+		t.Errorf("second stream: %d %s, want krm-foyer's 429 TooManyStreams", second.resp.StatusCode,
+			second.resp.Header.Get(interruption.Header))
+	}
+	if n := len(api.received()); n != 1 {
+		t.Errorf("%d requests reached the API server, want the first stream's alone", n)
+	}
+}
+
+// The streams open, and the watches they hold at the API server, are counted apart:
+// one each while a stream is open, none once it has ended.
+func TestStreamsAndTheirWatchesAreCounted(t *testing.T) {
+	api := newAPIServer(t, nil)
+	m := metrics.New()
+	f := newFoyer(t, api, credentials{token: userToken}, func(_ *Config, g *gate.Config) { g.Metrics = m })
+	ctx, cancel := context.WithCancel(t.Context())
+	f.open(ctx, t, notes, nil).until(t, "synced")
+	if s, w := gauge(t, m, "krm_foyer_streams_open"), gauge(t, m, "krm_foyer_upstream_watches_open"); s != "1" || w != "1" {
+		t.Errorf("while open: %s streams and %s watches, want 1 and 1", s, w)
+	}
+	cancel()
+	deadline := time.Now().Add(within)
+	for gauge(t, m, "krm_foyer_streams_open") != "0" || gauge(t, m, "krm_foyer_upstream_watches_open") != "0" {
+		if time.Now().After(deadline) {
+			t.Fatalf("after the browser left: %s streams and %s watches, want none",
+				gauge(t, m, "krm_foyer_streams_open"), gauge(t, m, "krm_foyer_upstream_watches_open"))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := gauge(t, m, "krm_foyer_requests_in_flight"); n != "0" {
+		t.Errorf("a stream counted as %s requests in flight", n)
+	}
 }

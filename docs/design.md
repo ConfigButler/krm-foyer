@@ -190,7 +190,7 @@ answer, it says so in a form the requester can read:
 | Missing CSRF proof or cross-origin request | 403 | `Status` with reason `CSRFProofRequired` or `CrossOriginRequest`, never RBAC's `Forbidden` | A page saying so | No |
 | Unsupported protocol or subresource | 501 | `Status` naming what is unsupported | A page saying so | No |
 | A `/stream/v1` request that is not a `GET` | 405 | `Status`, reason `MethodNotAllowed` | The same `Status`: only a `GET` is answered with a page | No |
-| A [bound](bounds.md) reached | 429 for the request rate and for concurrent requests; 502 for a response known to exceed its size bound before it starts | `Status` naming the bound, with `Retry-After` for the request rate | A page saying so | No for a 429; yes for a 502 |
+| A [bound](bounds.md) reached | 429 for the request rate, for concurrent requests and for streams open; 502 for a response known to exceed its size bound before it starts | `Status` naming the bound, with `Retry-After` for the request rate | A page saying so | No for a 429; yes for a 502 |
 | API server unreachable | 502 | `Status` | A page saying so | Perhaps: a connection can fail after the request was sent |
 
 This table is the complete list of answers krm-foyer gives instead of the API server's.

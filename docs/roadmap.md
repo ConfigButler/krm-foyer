@@ -243,7 +243,11 @@ Security items need tests that try to get past the boundary.
       use a shared watch will be configuration for efficiency, not access
 - [ ] User-authenticated watches first, with the hello example following its notes live
       (step 5)
-- [ ] Bounds on browser subscriptions and on upstream watches, counted separately
+- [x] Bounds on browser subscriptions and on upstream watches, counted separately:
+      streams per session and per replica, apart from requests, and the watches they
+      hold at the API server counted on their own (unit tests and e2e, each checked
+      against a build broken on purpose). A bound of their own on upstream watches
+      comes with shared watches
 - [ ] Shared watches with per-subscriber SubjectAccessReview and bounded rechecks
 - [x] A stream ends when its session or its token expires, whichever comes first, and
       logout closes that session's streams: aborted, and its watch cancelled at the API

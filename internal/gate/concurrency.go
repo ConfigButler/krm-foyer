@@ -9,10 +9,12 @@ import (
 	"github.com/ConfigButler/krm-foyer/internal/metrics"
 )
 
-// concurrency counts the requests in flight, per session and for this replica, and
-// refuses one past either limit. It counts every request alike, watches included:
-// krm-foyer does not tell watches apart (docs/bounds.md, "Native watches").
+// concurrency counts what is open of one kind, requests or streams, per session and
+// for this replica, and refuses one past either limit. Requests are counted alike,
+// watches included: krm-foyer does not tell watches apart (docs/bounds.md, "Native
+// watches"). Streams are counted on their own.
 type concurrency struct {
+	kind              kind
 	perSession, total int
 	metrics           *metrics.Metrics
 
@@ -21,10 +23,35 @@ type concurrency struct {
 	inFlight int
 }
 
-func newConcurrency(perSession, total int, m *metrics.Metrics) *concurrency {
-	m.BoundLimit(metrics.BoundSessionConcurrentRequests, float64(perSession))
-	m.BoundLimit(metrics.BoundConcurrentRequests, float64(total))
-	return &concurrency{perSession: perSession, total: total, metrics: m, sessions: map[string]int{}}
+// kind is what a concurrency counts, as its bounds, refusals and metrics name it.
+type kind struct {
+	// noun is what is counted, in a refusal's message.
+	noun string
+	// reason is a refusal's reason.
+	reason string
+	// perSession and total are the bounds, as the metrics name them.
+	perSession, total string
+	// open counts one in the metrics; done counts it out.
+	open func(*metrics.Metrics) (done func())
+}
+
+var (
+	requests = kind{
+		noun: "requests in flight", reason: "TooManyConcurrentRequests",
+		perSession: metrics.BoundSessionConcurrentRequests, total: metrics.BoundConcurrentRequests,
+		open: (*metrics.Metrics).InFlight,
+	}
+	streams = kind{
+		noun: "streams open", reason: "TooManyStreams",
+		perSession: metrics.BoundSessionStreams, total: metrics.BoundStreams,
+		open: (*metrics.Metrics).StreamOpen,
+	}
+)
+
+func newConcurrency(k kind, perSession, total int, m *metrics.Metrics) *concurrency {
+	m.BoundLimit(k.perSession, float64(perSession))
+	m.BoundLimit(k.total, float64(total))
+	return &concurrency{kind: k, perSession: perSession, total: total, metrics: m, sessions: map[string]int{}}
 }
 
 // acquire takes a slot for a request of session, or returns the interruption to
@@ -33,18 +60,18 @@ func (c *concurrency) acquire(session string) (release func(), refused *interrup
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.sessions[session] >= c.perSession {
-		return nil, c.refuse(metrics.BoundSessionConcurrentRequests, c.perSession,
-			"this session has "+strconv.Itoa(c.perSession)+" requests in flight, the most krm-foyer allows")
+		return nil, c.refuse(c.kind.perSession, c.perSession,
+			"this session has "+strconv.Itoa(c.perSession)+" "+c.kind.noun+", the most krm-foyer allows")
 	}
 	if c.inFlight >= c.total {
-		return nil, c.refuse(metrics.BoundConcurrentRequests, c.total,
-			"krm-foyer has "+strconv.Itoa(c.total)+" requests in flight, the most it allows")
+		return nil, c.refuse(c.kind.total, c.total,
+			"krm-foyer has "+strconv.Itoa(c.total)+" "+c.kind.noun+", the most it allows")
 	}
 	c.sessions[session]++
 	c.inFlight++
-	c.metrics.BoundUsage(metrics.BoundSessionConcurrentRequests, float64(c.sessions[session])/float64(c.perSession))
-	c.metrics.BoundUsage(metrics.BoundConcurrentRequests, float64(c.inFlight)/float64(c.total))
-	done := c.metrics.InFlight()
+	c.metrics.BoundUsage(c.kind.perSession, float64(c.sessions[session])/float64(c.perSession))
+	c.metrics.BoundUsage(c.kind.total, float64(c.inFlight)/float64(c.total))
+	done := c.kind.open(c.metrics)
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -65,7 +92,7 @@ func (c *concurrency) acquire(session string) (release func(), refused *interrup
 func (c *concurrency) refuse(bound string, limit int, message string) *interruption.Interruption {
 	c.metrics.BoundReached(bound)
 	return &interruption.Interruption{
-		Status: http.StatusTooManyRequests, Reason: "TooManyConcurrentRequests", Message: message,
+		Status: http.StatusTooManyRequests, Reason: c.kind.reason, Message: message,
 		Causes: []interruption.Cause{{Reason: "BoundReached", Field: bound, Message: strconv.Itoa(limit)}},
 	}
 }

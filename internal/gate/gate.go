@@ -62,6 +62,10 @@ type Config struct {
 	// may be in flight at once for one session, and for this replica. Zero means
 	// the defaults below.
 	MaxSessionConcurrentRequests, MaxConcurrentRequests int
+	// MaxSessionStreams and MaxStreams are how many streams may be open at once for
+	// one session, and for this replica, counted apart from requests. Zero means the
+	// defaults below.
+	MaxSessionStreams, MaxStreams int
 	// SessionRequestRate is how many requests a second one session may send, in
 	// bursts of up to SessionRequestBurst. Zero means the defaults below.
 	SessionRequestRate  float64
@@ -82,6 +86,12 @@ const (
 	DefaultMaxConcurrentRequests        = 2000
 )
 
+// The stream limits when none is configured. See docs/bounds.md for why.
+const (
+	DefaultMaxSessionStreams = 32
+	DefaultMaxStreams        = 2000
+)
+
 // DefaultMaxResponseDuration is the response duration when none is configured: the
 // shortest time the API server keeps a watch open that names no timeoutSeconds.
 const DefaultMaxResponseDuration = 30 * time.Minute
@@ -97,6 +107,7 @@ type Gate struct {
 	checkEvery  time.Duration
 	maxDuration time.Duration
 	requests    *concurrency
+	streams     *concurrency
 	rate        *rate
 }
 
@@ -134,6 +145,16 @@ func New(cfg Config) (*Gate, error) {
 	if perSession < 0 || total < 0 {
 		return nil, fmt.Errorf("concurrency limits must be positive, got %d per session and %d in all", perSession, total)
 	}
+	sessionStreams, allStreams := cfg.MaxSessionStreams, cfg.MaxStreams
+	if sessionStreams == 0 {
+		sessionStreams = DefaultMaxSessionStreams
+	}
+	if allStreams == 0 {
+		allStreams = DefaultMaxStreams
+	}
+	if sessionStreams < 0 || allStreams < 0 {
+		return nil, fmt.Errorf("stream limits must be positive, got %d per session and %d in all", sessionStreams, allStreams)
+	}
 	perSecond, burst := cfg.SessionRequestRate, cfg.SessionRequestBurst
 	if perSecond == 0 {
 		perSecond = DefaultSessionRequestRate
@@ -150,7 +171,8 @@ func New(cfg Config) (*Gate, error) {
 		metrics:     cfg.Metrics,
 		checkEvery:  checkEvery,
 		maxDuration: maxDuration,
-		requests:    newConcurrency(perSession, total, cfg.Metrics),
+		requests:    newConcurrency(requests, perSession, total, cfg.Metrics),
+		streams:     newConcurrency(streams, sessionStreams, allStreams, cfg.Metrics),
 		rate:        newRate(perSecond, burst, cfg.Now, cfg.Metrics),
 	}, nil
 }
@@ -190,6 +212,17 @@ type Admission struct {
 // the response to it is guarded, and cut short when its session ends or its
 // duration is up.
 func (g *Gate) Admit(w http.ResponseWriter, r *http.Request) *Admission {
+	return g.admit(w, r, g.requests)
+}
+
+// AdmitStream lets r through as a stream, as Admit does, but counts it against the
+// stream limits instead of the request limits. The request rate is one budget for
+// both.
+func (g *Gate) AdmitStream(w http.ResponseWriter, r *http.Request) *Admission {
+	return g.admit(w, r, g.streams)
+}
+
+func (g *Gate) admit(w http.ResponseWriter, r *http.Request, slots *concurrency) *Admission {
 	cred, refused := g.credentials.Token(r)
 	if refused == nil && cred.Token == "" {
 		// An empty token would make the request anonymous. Never send one.
@@ -203,7 +236,7 @@ func (g *Gate) Admit(w http.ResponseWriter, r *http.Request) *Admission {
 		g.Interrupt(w, r, g.rate.refuse(wait))
 		return nil
 	}
-	release, refused := g.requests.acquire(cred.Session)
+	release, refused := slots.acquire(cred.Session)
 	if refused != nil {
 		g.Interrupt(w, r, refused)
 		return nil

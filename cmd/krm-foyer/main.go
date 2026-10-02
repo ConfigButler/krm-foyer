@@ -82,6 +82,7 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		idle, absolute, checkEvery     time.Duration
 		maxDuration                    time.Duration
 		perSession, inAll, burst       int
+		sessionStreams, allStreams     int
 		perSecond                      float64
 		maxBytes                       int64
 	)
@@ -107,6 +108,10 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		"how many requests, watches included, one session may have in flight; more get 429")
 	fs.IntVar(&inAll, "max-concurrent-requests", gate.DefaultMaxConcurrentRequests,
 		"how many requests, watches included, this replica may have in flight; more get 429")
+	fs.IntVar(&sessionStreams, "max-session-streams", gate.DefaultMaxSessionStreams,
+		"how many streams one session may have open, counted apart from requests; more get 429")
+	fs.IntVar(&allStreams, "max-streams", gate.DefaultMaxStreams,
+		"how many streams this replica may have open, counted apart from requests; more get 429")
 	fs.Float64Var(&perSecond, "session-request-rate", gate.DefaultSessionRequestRate,
 		"how many requests a second one session may send, once its burst is spent; more get 429 with Retry-After")
 	fs.IntVar(&burst, "session-request-burst", gate.DefaultSessionRequestBurst,
@@ -192,6 +197,10 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		return config{}, fmt.Errorf("-max-session-concurrent-requests and -max-concurrent-requests must be positive, got %d and %d", perSession, inAll)
 	}
 	login.gate.MaxSessionConcurrentRequests, login.gate.MaxConcurrentRequests = perSession, inAll
+	if sessionStreams <= 0 || allStreams <= 0 {
+		return config{}, fmt.Errorf("-max-session-streams and -max-streams must be positive, got %d and %d", sessionStreams, allStreams)
+	}
+	login.gate.MaxSessionStreams, login.gate.MaxStreams = sessionStreams, allStreams
 	if perSecond <= 0 || burst <= 0 {
 		return config{}, fmt.Errorf("-session-request-rate and -session-request-burst must be positive, got %v and %d", perSecond, burst)
 	}
