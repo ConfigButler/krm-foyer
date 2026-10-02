@@ -27,6 +27,7 @@ import (
 
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
 	"github.com/ConfigButler/krm-foyer/internal/pages"
+	"github.com/ConfigButler/krm-foyer/internal/proxy"
 	"github.com/ConfigButler/krm-foyer/internal/session"
 )
 
@@ -463,13 +464,21 @@ func (a *Auth) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 // Token is the API half's credential (proxy.Credentials): the ID token of the session
-// r may use, or the interruption to answer r with instead.
-func (a *Auth) Token(r *http.Request) (string, *interruption.Interruption) {
+// r may use, or the interruption to answer r with instead. Its Live asks the store
+// again, by r's cookie, whether that session still exists.
+func (a *Auth) Token(r *http.Request) (proxy.Credential, *interruption.Interruption) {
 	s, err := a.cfg.Sessions.Use(r)
 	if err != nil {
-		return "", a.refusal(err)
+		return proxy.Credential{}, a.refusal(err)
 	}
-	return s.IDToken, nil
+	return proxy.Credential{Token: s.IDToken, Session: session.Handle(r), Live: func(ctx context.Context) bool {
+		err := a.cfg.Sessions.Check(r.WithContext(ctx))
+		if err != nil && !errors.Is(err, session.ErrNoSession) {
+			a.logger.Warn("session store failed during a session check", "err", err)
+		}
+		// An answer that came too late is no answer: fail closed.
+		return err == nil && ctx.Err() == nil
+	}}, nil
 }
 
 // refusal is the answer to a request the session manager did not let through. This

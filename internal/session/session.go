@@ -186,6 +186,33 @@ func (m *Manager) Use(r *http.Request) (Session, error) {
 	return m.touch(r.Context(), key, s)
 }
 
+// Check reports whether the session r belongs to is still live, without recording
+// activity: a response kept open asks it, and staying open is not use. It answers
+// ErrNoSession once the session has ended, and any other error when the store
+// could not say.
+func (m *Manager) Check(r *http.Request) error {
+	_, _, err := m.find(r)
+	return err
+}
+
+// Handle names the session r's one cookie names, for the bounds kept per session:
+// an opaque string, the same for every request of that session and for no other,
+// that is neither the session ID nor the store's key. It is empty unless r carries
+// exactly one well-formed session cookie, which every request a session let through
+// does.
+func Handle(r *http.Request) string {
+	cookies := r.CookiesNamed(CookieName)
+	if len(cookies) != 1 {
+		return ""
+	}
+	key, ok := keyOf(cookies[0].Value)
+	if !ok {
+		return ""
+	}
+	h := sha256.Sum256(append([]byte("krm-foyer session handle\x00"), key[:]...))
+	return base64.RawURLEncoding.EncodeToString(h[:])
+}
+
 // ExpiresAt is when s ends however busy it is.
 func (m *Manager) ExpiresAt(s Session) time.Time { return m.end(s) }
 

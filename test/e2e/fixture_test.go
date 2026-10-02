@@ -50,6 +50,9 @@ type fixture struct {
 	// foyerURL is krm-foyer's public URL, deployed by deploy-foyer.sh, and
 	// foyerAccount the service account it runs as: cluster-admin, as bait.
 	foyerURL, foyerNamespace, foyerAccount string
+	// briefTransport reaches the brief krm-foyer, whose sessions end within a minute,
+	// instead of the main one.
+	briefTransport http.RoundTripper
 
 	// seen is every response krm-foyer sent the suite, and tokens every token the
 	// suite obtained, for the token scan.
@@ -116,20 +119,25 @@ func loadFixture() *fixture {
 	// The names the suite reaches without DNS: Dex through the port-forward on this
 	// container's loopback (port-forward.sh), as a browser does, and krm-foyer directly
 	// through its NodePort on the node: the foyer specs test krm-foyer, not the front door.
-	addrs := map[string]string{
-		issuer.Host: net.JoinHostPort("127.0.0.1", issuer.Port()),
-		foyer.Host:  env["FOYER_ADDR"],
+	// The brief instance (foyer-brief.yaml) answers under the same name, on another
+	// NodePort.
+	transportTo := func(foyerAddr string) *http.Transport {
+		addrs := map[string]string{
+			issuer.Host: net.JoinHostPort("127.0.0.1", issuer.Port()),
+			foyer.Host:  foyerAddr,
+		}
+		dialer := &net.Dialer{Timeout: 5 * time.Second}
+		return &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if mapped, ok := addrs[addr]; ok {
+					addr = mapped
+				}
+				return dialer.DialContext(ctx, network, addr)
+			},
+		}
 	}
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if mapped, ok := addrs[addr]; ok {
-				addr = mapped
-			}
-			return dialer.DialContext(ctx, network, addr)
-		},
-	}
+	transport := transportTo(env["FOYER_ADDR"])
 
 	return &fixture{
 		dir:             dir,
@@ -141,6 +149,7 @@ func loadFixture() *fixture {
 		foyerURL:        env["FOYER_URL"],
 		foyerNamespace:  env["FOYER_NAMESPACE"],
 		foyerAccount:    env["FOYER_SERVICE_ACCOUNT"],
+		briefTransport:  transportTo(env["FOYER_BRIEF_ADDR"]),
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   30 * time.Second,
@@ -306,12 +315,15 @@ func (f *fixture) directAs(ctx context.Context, token, username, path string) an
 
 // auditEvent is the part of a kube-apiserver audit event the suite asserts on.
 type auditEvent struct {
-	AuditID    string `json:"auditID"`
-	Stage      string `json:"stage"`
-	RequestURI string `json:"requestURI"`
-	Verb       string `json:"verb"`
-	UserAgent  string `json:"userAgent"`
-	User       struct {
+	AuditID string `json:"auditID"`
+	Stage   string `json:"stage"`
+	// When the API server received the request, and when it completed it.
+	RequestReceivedTimestamp time.Time `json:"requestReceivedTimestamp"`
+	StageTimestamp           time.Time `json:"stageTimestamp"`
+	RequestURI               string    `json:"requestURI"`
+	Verb                     string    `json:"verb"`
+	UserAgent                string    `json:"userAgent"`
+	User                     struct {
 		Username string   `json:"username"`
 		Groups   []string `json:"groups"`
 	} `json:"user"`

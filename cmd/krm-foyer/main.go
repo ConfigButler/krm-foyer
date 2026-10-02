@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/ConfigButler/krm-foyer/internal/auth"
+	"github.com/ConfigButler/krm-foyer/internal/metrics"
 	"github.com/ConfigButler/krm-foyer/internal/proxy"
 	"github.com/ConfigButler/krm-foyer/internal/server"
 	"github.com/ConfigButler/krm-foyer/internal/session"
@@ -49,6 +50,9 @@ func main() {
 type config struct {
 	listen          string
 	tlsCert, tlsKey string
+	// metricsListen is where /metrics is served, apart from the origin. Empty
+	// serves no metrics.
+	metricsListen string
 	// login is nil when no sign-in is configured: krm-foyer then serves its start
 	// page and probes only.
 	login *loginConfig
@@ -72,11 +76,16 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		publicURL, issuer, clientID    string
 		secretFile, issuerCAFile       string
 		scopes, apiServer, apiServerCA string
-		idle, absolute                 time.Duration
+		idle, absolute, checkEvery     time.Duration
+		maxDuration                    time.Duration
+		perSession, inAll, burst       int
+		perSecond                      float64
+		maxBytes                       int64
 	)
 	fs.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
 	fs.StringVar(&cfg.tlsCert, "tls-cert-file", "", "serve TLS with this certificate (PEM); needs -tls-key-file")
 	fs.StringVar(&cfg.tlsKey, "tls-key-file", "", "the private key for -tls-cert-file (PEM)")
+	fs.StringVar(&cfg.metricsListen, "metrics-listen", ":9090", "address to serve Prometheus metrics on, apart from the origin; empty serves none")
 	fs.StringVar(&publicURL, "public-url", "", "krm-foyer's origin as browsers reach it, such as https://app.example.com")
 	fs.StringVar(&issuer, "oidc-issuer", "", "the OIDC issuer URL the API server trusts")
 	fs.StringVar(&clientID, "oidc-client-id", "", "krm-foyer's client ID at the issuer; the API server must accept ID tokens for it")
@@ -87,6 +96,20 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	fs.StringVar(&apiServerCA, "kubernetes-ca-file", "", "the CA certificates (PEM) that sign the API server's certificate")
 	fs.DurationVar(&idle, "session-idle-timeout", time.Hour, "end a session unused for this long")
 	fs.DurationVar(&absolute, "session-absolute-timeout", 8*time.Hour, "end any session this long after login")
+	fs.DurationVar(&checkEvery, "session-check-interval", proxy.DefaultSessionCheckInterval,
+		"how often an open response asks whether its session is still live; it is cut short when not")
+	fs.DurationVar(&maxDuration, "max-response-duration", proxy.DefaultMaxResponseDuration,
+		"how long a response, a watch above all, may stay open; it is cut short then. Below -session-idle-timeout")
+	fs.IntVar(&perSession, "max-session-concurrent-requests", proxy.DefaultMaxSessionConcurrentRequests,
+		"how many requests, watches included, one session may have in flight; more get 429")
+	fs.IntVar(&inAll, "max-concurrent-requests", proxy.DefaultMaxConcurrentRequests,
+		"how many requests, watches included, this replica may have in flight; more get 429")
+	fs.Float64Var(&perSecond, "session-request-rate", proxy.DefaultSessionRequestRate,
+		"how many requests a second one session may send, once its burst is spent; more get 429 with Retry-After")
+	fs.IntVar(&burst, "session-request-burst", proxy.DefaultSessionRequestBurst,
+		"how many requests one session may send at once")
+	fs.Int64Var(&maxBytes, "max-response-bytes", proxy.DefaultMaxResponseBytes,
+		"the most decoded bytes a response may have; past it, 502 if known in advance, otherwise it is cut short")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -151,6 +174,29 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	login.sessions = session.Config{Origin: publicURL, IdleTimeout: idle, AbsoluteTimeout: absolute}
 
 	// The API proxy.
+	if checkEvery <= 0 {
+		return config{}, fmt.Errorf("-session-check-interval must be positive, got %v", checkEvery)
+	}
+	login.kubernetes.SessionCheckInterval = checkEvery
+	// A reconnect counts as use and an open response does not, so a tab that only
+	// watches stays signed in only if its watches end, and reconnect, within the
+	// idle timeout.
+	if maxDuration <= 0 || maxDuration >= idle {
+		return config{}, fmt.Errorf("-max-response-duration must be positive and below -session-idle-timeout (%v), got %v", idle, maxDuration)
+	}
+	login.kubernetes.MaxResponseDuration = maxDuration
+	if perSession <= 0 || inAll <= 0 {
+		return config{}, fmt.Errorf("-max-session-concurrent-requests and -max-concurrent-requests must be positive, got %d and %d", perSession, inAll)
+	}
+	login.kubernetes.MaxSessionConcurrentRequests, login.kubernetes.MaxConcurrentRequests = perSession, inAll
+	if perSecond <= 0 || burst <= 0 {
+		return config{}, fmt.Errorf("-session-request-rate and -session-request-burst must be positive, got %v and %d", perSecond, burst)
+	}
+	login.kubernetes.SessionRequestRate, login.kubernetes.SessionRequestBurst = perSecond, burst
+	if maxBytes <= 0 {
+		return config{}, fmt.Errorf("-max-response-bytes must be positive, got %d", maxBytes)
+	}
+	login.kubernetes.MaxResponseBytes = maxBytes
 	if login.kubernetes.Server, err = url.Parse(apiServer); err != nil {
 		return config{}, fmt.Errorf("-kubernetes-server: %w", err)
 	}
@@ -175,9 +221,9 @@ func appendCAs(pool *x509.CertPool, file string, readFile func(string) ([]byte, 
 	return nil
 }
 
-// handler builds every route from cfg. With login configured it returns a function
-// that discovers the issuer in the background.
-func handler(cfg config, logger *slog.Logger) (http.Handler, func(context.Context), error) {
+// handler builds every route from cfg, recording into m. With login configured it
+// returns a function that discovers the issuer in the background.
+func handler(cfg config, logger *slog.Logger, m *metrics.Metrics) (http.Handler, func(context.Context), error) {
 	if cfg.login == nil {
 		return server.New(server.Config{Version: version}), func(context.Context) {}, nil
 	}
@@ -194,7 +240,7 @@ func handler(cfg config, logger *slog.Logger) (http.Handler, func(context.Contex
 	}
 	// Login is the proxy's only credential source: there is no other way to give
 	// krm-foyer a token, and no service-account fallback.
-	l.kubernetes.Credentials, l.kubernetes.Logger = login, logger
+	l.kubernetes.Credentials, l.kubernetes.Logger, l.kubernetes.Metrics = login, logger, m
 	api, err := proxy.New(l.kubernetes)
 	if err != nil {
 		return nil, nil, err
@@ -208,11 +254,34 @@ func run(cfg config, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	h, discover, err := handler(cfg, logger)
+	m := metrics.New()
+	h, discover, err := handler(cfg, logger, m)
 	if err != nil {
 		return err
 	}
 	go discover(ctx)
+
+	// Either listener failing stops krm-foyer: running without the metrics it was
+	// configured to serve would hide that they are missing.
+	errs := make(chan error, 2)
+
+	// Metrics have a listener of their own, never the origin, where any page could
+	// read them. Plain HTTP: what they say is counts, and the deployment keeps the
+	// port to the monitoring system (docs/bounds.md, "Metrics").
+	var metricsSrv *http.Server
+	if cfg.metricsListen != "" {
+		metricsSrv = &http.Server{
+			Addr:              cfg.metricsListen,
+			Handler:           metricsHandler(m),
+			ReadHeaderTimeout: 10 * time.Second,
+			ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		}
+		go func() {
+			if err := metricsSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+				errs <- fmt.Errorf("metrics listener: %w", err)
+			}
+		}()
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.listen,
@@ -222,7 +291,6 @@ func run(cfg config, logger *slog.Logger) error {
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
 
-	errs := make(chan error, 1)
 	go func() {
 		logger.Info("krm-foyer listening", "addr", cfg.listen, "version", version,
 			"tls", cfg.tlsCert != "", "login", cfg.login != nil)
@@ -243,6 +311,9 @@ func run(cfg config, logger *slog.Logger) error {
 	// default) before killing the pod, so finish in-flight requests well inside that.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	if metricsSrv != nil {
+		_ = metricsSrv.Shutdown(shutdownCtx)
+	}
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return err
 	}
@@ -251,4 +322,11 @@ func run(cfg config, logger *slog.Logger) error {
 	}
 	logger.Info("krm-foyer shut down cleanly")
 	return nil
+}
+
+// metricsHandler serves /metrics and nothing else.
+func metricsHandler(m *metrics.Metrics) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", m.Handler())
+	return mux
 }

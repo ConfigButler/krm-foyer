@@ -444,6 +444,40 @@ func TestLookupMovesTheIdleDeadline(t *testing.T) {
 	}
 }
 
+// Check says whether a session is live without counting as use: a response kept
+// open does not keep its session alive, so it ends on the idle deadline it had.
+func TestCheckIsNotUse(t *testing.T) {
+	h := newHarness(t)
+	c := h.start(t, h.user())
+	h.clock.Advance(idle / 2)
+	if err := h.m.Check(request(http.MethodGet, c)); err != nil {
+		t.Fatal(err)
+	}
+	h.clock.Advance(idle/2 + time.Second)
+	assertNoSession(t, h.m.Check(request(http.MethodGet, c)))
+}
+
+// Check answers no session once the session has ended, and a store error, never
+// "no session" or "live", when the store cannot say.
+func TestCheck(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)}
+	failing := &failingStore{Store: NewMemory(c.Now)}
+	h := newHarnessWith(t, c, failing)
+	cookie := h.start(t, h.user())
+	assertNoSession(t, h.m.Check(request(http.MethodGet)))
+
+	failing.op = "get"
+	if err := h.m.Check(request(http.MethodGet, cookie)); err == nil || errors.Is(err, ErrNoSession) {
+		t.Fatalf("Check = %v with the store down, want a store error", err)
+	}
+	failing.op = ""
+
+	if err := h.m.End(context.Background(), httptest.NewRecorder(), request(http.MethodPost, cookie)); err != nil {
+		t.Fatal(err)
+	}
+	assertNoSession(t, h.m.Check(request(http.MethodGet, cookie)))
+}
+
 // End deletes the session before it answers and tells the browser to drop the
 // cookie. A copy of the cookie is worthless afterwards.
 func TestEnd(t *testing.T) {

@@ -22,7 +22,7 @@ its source.
   work.** krm-foyer has no Dex-specific code.
 - **Several issuers need token refresh, which krm-foyer does not do yet.** Pinniped and
   OpenUnison issue tokens that last minutes. Today a krm-foyer session ends when its ID
-  token expires. Refresh is [roadmap step 5](../roadmap.md#order-of-work), and krm-foyer
+  token expires. Refresh is [roadmap step 6](../roadmap.md#order-of-work), and krm-foyer
   must support it before those issuers are a comfortable choice.
 
 ## What krm-foyer needs from an issuer
@@ -166,7 +166,7 @@ Its tokens are short-lived, so it needs refresh, as Pinniped does.
 
 None of these is scheduled. They would follow refresh:
 
-- [ ] Refresh and shared session storage ([roadmap step 5](../roadmap.md#order-of-work))
+- [ ] Refresh and shared session storage ([roadmap step 6](../roadmap.md#order-of-work))
 - [ ] An e2e fixture for the issuer, running the login, refresh and logout journeys with
   its default token lifetimes. For Pinniped or OpenUnison, Dex can be the upstream
 - [ ] The disablement bound measured for that issuer: disable the user, then time how long

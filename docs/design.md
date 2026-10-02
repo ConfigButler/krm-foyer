@@ -92,6 +92,9 @@ come from krm-stream, not from a reimplementation here.
 | `/auth/whoami` | Who Kubernetes takes the user to be, from a SelfSubjectReview, plus the session's issuer and expiry. Never tokens |
 | `/_foyer/access` | A page showing what the user may do, from Kubernetes' own reviews. See [what may I do](#what-may-i-do) |
 
+Metrics are served on a listener of their own (`-metrics-listen`), never on the origin;
+see [metrics](bounds.md#metrics).
+
 For example, POSTing to
 `/k8s/apis/workspaces.example.com/v1/namespaces/team-a/workspacerequests` creates a
 resource through Kubernetes (the [vision](vision.md#what-it-takes-from-the-domain) follows
@@ -173,31 +176,37 @@ krm-foyer is meant to be explorable in a browser, not only through a library. Op
 as code would receive it. Wherever krm-foyer itself stands between the user and that
 answer, it says so in a form the requester can read:
 
-| Interruption | Status | For code | For a person browsing |
-| --- | --- | --- | --- |
-| No session | 401 | `Status`, reason `Unauthorized` | A page with a **Sign in** link that returns to this URL |
-| Upstream redirect | 502 | `Status` with the target in `details` | A notice naming the full target, with a link the user can follow when it is an absolute `http` or `https` URL; any other target is shown as text only |
-| Upstream content held back | 502 | `Status` with the content type | A page naming the content type. Later: the response as escaped text, truncated at a bound |
-| Session store unavailable | 503 | `Status` | A page saying so, with no retry loop |
-| Non-canonical path | 400 | `Status` naming the [path rule](#access) | A page saying so |
-| Path under `/k8s` that is not an [API route](#api-contract) | 404 | `Status`, reason `NotFound` | A page saying so |
-| Missing CSRF proof or cross-origin request | 403 | `Status` with reason `CSRFProofRequired` or `CrossOriginRequest`, never RBAC's `Forbidden` | A page saying so |
-| Unsupported protocol or subresource | 501 | `Status` naming what is unsupported | A page saying so |
-| A [bound](#access) reached | 429, or 502 when a response exceeds its size bound | `Status` naming the bound, with `Retry-After` where waiting helps | A page saying so |
-| API server unreachable | 502 | `Status` | A page saying so |
+| Interruption | Status | For code | For a person browsing | Reached Kubernetes |
+| --- | --- | --- | --- | --- |
+| No session | 401 | `Status`, reason `Unauthorized` | A page with a **Sign in** link that returns to this URL | No |
+| Upstream redirect | 502 | `Status` with the target in `details` | A notice naming the full target, with a link the user can follow when it is an absolute `http` or `https` URL; any other target is shown as text only | Yes |
+| Upstream content held back | 502 | `Status` with the content type | A page naming the content type. Later: the response as escaped text, truncated at a bound | Yes |
+| Session store unavailable | 503 | `Status` | A page saying so, with no retry loop | No |
+| Non-canonical path | 400 | `Status` naming the [path rule](#access) | A page saying so | No |
+| Path under `/k8s` that is not an [API route](#api-contract) | 404 | `Status`, reason `NotFound` | A page saying so | No |
+| Missing CSRF proof or cross-origin request | 403 | `Status` with reason `CSRFProofRequired` or `CrossOriginRequest`, never RBAC's `Forbidden` | A page saying so | No |
+| Unsupported protocol or subresource | 501 | `Status` naming what is unsupported | A page saying so | No |
+| A [bound](bounds.md) reached | 429 for the request rate and for concurrent requests; 502 for a response known to exceed its size bound before it starts | `Status` naming the bound, with `Retry-After` for the request rate | A page saying so | No for a 429; yes for a 502 |
+| API server unreachable | 502 | `Status` | A page saying so | Perhaps: a connection can fail after the request was sent |
 
 This table is the complete list of answers krm-foyer gives instead of the API server's.
 Anything not in it is the API server's answer.
 
 Rules:
 
+- **A response under way is never replaced.** When a bound, or the end of the session,
+  cuts short a response that has already started, the response is aborted and the
+  request to the API server cancelled. An aborted response cannot pass for a complete
+  one. See [cutting a response short](bounds.md#cutting-a-response-short).
 - **The status code is the same in both forms.** Only the body differs. A client that
   checks the code sees one behavior.
 - **Every interruption names its reason in a `Krm-Foyer-Interruption` header**, in both
   forms. The proxy passes no upstream header outside its allowlist, so the API server,
   or an aggregated API, cannot send it. A body is no such proof: any API can answer a
-  `Status` with reason `CSRFProofRequired`. The helper resends a change only on this
-  header, because only then did the change not reach Kubernetes.
+  `Status` with reason `CSRFProofRequired`. The header says krm-foyer answered, not that
+  Kubernetes never saw the request: the last column says which reasons guarantee that.
+  The helper resends a change only on `CSRFProofRequired` with this header, because
+  then the change did not reach Kubernetes.
 - **A page is chosen only for a browser navigation:** a `GET` with exactly one
   `Sec-Fetch-Dest: document` field. Browsers set that header, page scripts cannot, and
   non-browser clients do not send it, so `fetch`, the helper and `kubectl`-style clients
@@ -242,9 +251,15 @@ What krm-foyer still does on every request, none of it an access decision:
   the API server, with the user's token as the only `Authorization`. Everything else the
   browser sends is dropped: its own `Authorization`, `Impersonate-*`, `Cookie`,
   forwarding headers and `Accept-Encoding` among them.
-- **Bounds** on page size, response bytes, request rate, watch duration and concurrent
-  streams. They protect krm-foyer and the API server; they do not prevent export. A user
-  allowed to list a namespace can retrieve all of it through repeated pages.
+- **[Bounds](bounds.md)** on the request rate per session, concurrent requests per
+  session and per replica, response duration and response bytes, each configurable with
+  a documented default. Native watches are requests like any other: krm-foyer does not
+  tell them apart, and the bounds do not need it to. They protect krm-foyer and the API server from a runaway page.
+  They are not access rules and do not prevent export: a user allowed to list a
+  namespace can retrieve all of it through repeated pages. Nor do they hold back a
+  determined user, who can open another session; the API server's Priority and Fairness
+  limits each user. There is no bound on page size, because it would not bound anything
+  ([why](bounds.md#left-out-a-bound-on-page-size)).
 - **Never a privileged service account** as a fallback for a user's request.
 
 ### What may I do
@@ -344,9 +359,11 @@ keys sessions by a hash of the ID, so reading the store does not yield usable ID
   it, its absolute timeout since login, and the expiry of its ID token. There is no
   refresh yet, so the token's expiry is a hard end; the cookie's `Max-Age` is the time to
   the earlier of the last two. An expired session is deleted when it is next presented,
-  whatever the store's own expiry does. A refused request does not count as use.
+  whatever the store's own expiry does. A request the session refuses, for missing CSRF
+  proof or another origin, does not count as use; one a [bound](bounds.md) refuses does,
+  since the session had let it through.
 - **The store is in memory**, so this release runs one replica, and a restart signs
-  everyone out. Shared storage, and refresh with it, are the next step on the
+  everyone out. Shared storage, and refresh with it, are a later step on the
   [roadmap](roadmap.md#order-of-work).
 
 An encrypted HttpOnly cookie can also keep tokens unreadable by JavaScript; the reason
@@ -395,8 +412,8 @@ Revocation is as fast as its slowest path. Each row is a requirement with a test
 | Logout | The session is deleted from shared storage before the logout response is sent. No replica caches a session's validity, so every replica refuses the ID on its next request |
 | Logout during a refresh | Logout wins. The refreshed tokens are discarded, never written back into a deleted session |
 | Session store unavailable | Fail closed: API and stream requests get 503. Never a stale local copy, never anonymous, never the service account |
-| Streams open at logout | Closed on every replica within the session-check interval, a configured bound with a documented default |
-| Token expiry or failed refresh | API requests get 401; streams close at the token's expiry or the session's, whichever comes first |
+| Responses and streams open at logout | Cut short on every replica within the [session-check interval](bounds.md#the-session-check) (`-session-check-interval`, 5 seconds by default, twice that at worst when the check itself hangs), and cancelled at the API server |
+| Token expiry or failed refresh | API requests get 401; open responses and streams are cut short within the session-check interval of the token's expiry or the session's, whichever comes first |
 | RBAC change | Kubernetes applies it on the next request. A shared watch applies it within its SubjectAccessReview recheck interval; that is reauthorization, not revocation |
 | Issuer refuses a refresh | The session ends at once: API requests get 401 and its streams close. krm-foyer never retries a refusal into a success or keeps using the old token past its expiry |
 | User disabled at the issuer | Provider-dependent; see below. The only bound krm-foyer itself guarantees is the session's absolute expiry |
@@ -419,7 +436,9 @@ not undo writes Kubernetes already accepted.
 
 krm-foyer supplies krm-stream's principal resolution, authorization and backend
 selection. What a user may watch is what RBAC lets them watch. Which resources use a
-shared watch is configuration for efficiency, not for access. Start with
+shared watch is configuration for efficiency, not for access. Native watches through
+`/k8s` stay available beside it, bounded like every other request; krm-stream is the
+path for live views ([why both](bounds.md#native-watches)). Start with
 user-authenticated watches. Optional shared watches use a
 narrowly scoped service account, Kubernetes-resolved identities and per-subscriber
 SubjectAccessReview checks. Bound reauthorization and session expiry; logout closes that
@@ -472,6 +491,8 @@ versioned image and documented supported protocols.
   beyond RBAC, and why krm-foyer starts without it.
 - [Ingress and TLS](ingress.md): both TLS models, sharing one domain, the login gate,
   and why an ingress never makes the access decision.
+- [Bounds](bounds.md): what krm-foyer limits and why, what it leaves to the API server,
+  and the metrics that show how close real traffic comes to each limit.
 - [Pages](frontend.md): which pages krm-foyer serves itself.
 - [Testing](testing.md): how the suite proves krm-foyer invents neither authentication
   nor authorization.

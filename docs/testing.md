@@ -45,7 +45,7 @@ again after the whole suite. It looks for every token the suite obtained, exactl
 anything shaped like a JWT. The second covers the tokens krm-foyer holds and never showed
 the suite: the ID tokens it got by redeeming codes, and its own service-account token.
 krm-foyer holds no refresh token yet, since it asks for no `offline_access`. When refresh
-arrives (roadmap step 5), its session store moves out of process, and the scan also reads
+arrives (roadmap step 6), its session store moves out of process, and the scan also reads
 it as admin for the opaque refresh tokens no pattern can find.
 
 A session ID has exactly one place it belongs: the `Set-Cookie` header that issues it,
@@ -94,7 +94,33 @@ bugs are here, where they are cheap to find:
   that is recording activity, and a store failure never read as "no session". Expiry
   runs against a store that never expires anything as well, so the session code decides
   on its own. Every way of presenting other than exactly one well-formed cookie is no
-  session.
+  session. Checking whether a session is still live, as an open response does, never
+  counts as use.
+- **Open responses end with their session** ([internal/proxy](../internal/proxy)), over
+  every pair of HTTP/1.1 and HTTP/2 towards the browser and towards the API server: when
+  the session ends, the browser's response is aborted, never ended cleanly, and the
+  request to the API server is cancelled. So is a response whose session ends before
+  the API server answers, one whose session check hangs, and one whose browser has
+  stopped reading; a live session's response is never touched. The same holds for a
+  response open longer than its duration.
+- **Concurrency bounds** ([internal/proxy](../internal/proxy)): a request past a
+  session's or the replica's limit gets a 429 naming the bound and never reaches the
+  API server, and every way a request can end (complete, the browser leaving, the
+  session ending, its duration up, an answer held back, a dropped connection) gives its
+  slot back.
+- **The request rate** ([internal/proxy](../internal/proxy)), against a clock the test
+  moves: past a session's burst, a 429 with `Retry-After` (the wait rounded up to whole
+  seconds, in both forms) that never reaches the API server. Its property is stated from
+  outside the bucket and checked over random request times: in any stretch of time a
+  session gets at most its burst plus the rate times the stretch let through, and a
+  session that never sends faster than the rate is never refused.
+- **The response-byte bound** ([internal/proxy](../internal/proxy)) counts decoded bytes,
+  exactly: *L* − 1 and *L* bytes pass whole, *L* + 1 gets a 502 when its length is
+  known and is cut short after exactly *L* bytes when it is gzip-encoded, over HTTP/1.1
+  and HTTP/2. A gzip stream of zeros that would expand without end is stopped at the
+  bound and cancelled at the API server. The property is checked from the browser's
+  side over random sizes, chunkings and encodings: a response that ends cleanly is
+  complete and within the bound, and none ever delivers more.
 - **Login** ([internal/auth](../internal/auth)) runs against a fake issuer in the test
   that behaves like a strict one (PKCE enforced, codes single use) unless told to
   misbehave: a token for another audience or issuer, expired, signed by a stranger, with
@@ -142,6 +168,18 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   impersonation spec first passed for the wrong reason (alice could not impersonate
   anyone, so a forwarded header was refused anyway); it now grants alice the right to
   impersonate bob, so a forwarded header would turn its 403 into a 200.
+- **Bounds and the session lifecycle** (in the `foyer` label) read krm-foyer's metrics
+  through the API server's service proxy, as admin. A native watch through `/k8s` is
+  aborted when its session logs out and when it expires, and the audit log shows the API
+  server completed it within a minute although it asked for `timeoutSeconds=600`: the
+  cancellation reached the API server. The same is shown for a watch open longer than
+  its duration. Each was seen to fail against a build that did not cut the response. A
+  session's third request while two watches are open gets krm-foyer's own 429 and never
+  reaches the API server, which a build without the per-session check failed. So does a
+  session sending faster than its rate, with `Retry-After`, which a build whose rate
+  never refuses failed. A list the API server compresses to a few hundred bytes, but
+  that decodes to 200 KiB, never passes the brief instance's 128 KiB bound as a complete
+  answer, which a build without the byte bound failed.
 - **The hello example** (label `browser`) is the claim that krm-foyer is usable, not
   only correct. Chromium ([chromedp/headless-shell](https://hub.docker.com/r/chromedp/headless-shell),
   pinned by digest, driven from Go with chromedp) runs in the network namespace of the
@@ -213,6 +251,12 @@ server at `kubernetes.default.svc`. The suite reaches it through a NodePort on t
 address on the Docker network: the `foyer` specs test krm-foyer, not the front door. Its
 service account is cluster-admin and its token is mounted, as bait; the suite checks both
 before it starts.
+
+Beside it runs a second, brief krm-foyer ([foyer-brief.yaml](../test/e2e/cluster/foyer-brief.yaml)):
+the same image, certificate, public URL and Dex client, but sessions that end 45
+seconds after login, a session check every second, responses cut short after 20
+seconds, and per session two requests in flight and ten at once, then one a second. The specs that wait for a session to expire or a bound to be reached use it, on
+a NodePort of its own, so no other spec has to race its session.
 
 The front door is Gateway API, implemented by Traefik: the official chart, at the version
 gitops-reverser's e2e uses. k3s's own Traefik is disabled, so k3s stays minimal, and
