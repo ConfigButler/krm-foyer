@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -270,6 +271,32 @@ func exchangeFailure(err error) []any {
 	}
 }
 
+// idTokenCauses name go-oidc's refusals by a phrase of its error text. The rest of
+// that text quotes the token's claims and the issuer's key-set response, which hold
+// whatever the issuer put there. TestIDTokenErrorIsNotLogged has a case for each, so
+// a go-oidc upgrade that rewords one fails there instead of logging "invalid".
+var idTokenCauses = []struct{ phrase, cause string }{
+	{"fetching keys", "keys-unavailable"},
+	{"issued by a different provider", "issuer-mismatch"},
+	{"expected audience", "audience-mismatch"},
+	{"before the nbf", "not-yet-valid"},
+	{"failed to verify", "signature"},
+}
+
+// idTokenFailure describes an ID token the verifier refused in fields that are safe to
+// log. Like exchangeFailure, it never logs the error itself.
+func idTokenFailure(err error) []any {
+	if errors.As(err, new(*oidc.TokenExpiredError)) {
+		return []any{"cause", "expired"}
+	}
+	for _, c := range idTokenCauses {
+		if strings.Contains(err.Error(), c.phrase) {
+			return []any{"cause", c.cause}
+		}
+	}
+	return []any{"cause", "invalid"}
+}
+
 // single returns the one value of key in q, or false if there is not exactly one.
 func single(q url.Values, key string) (string, bool) {
 	v := q[key]
@@ -360,7 +387,7 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 	}
 	idToken, err := iss.verifier.Verify(ctx, raw)
 	if err != nil {
-		a.logger.Warn("ID token refused", "err", err)
+		a.logger.Warn("ID token refused", idTokenFailure(err)...)
 		a.fail(w, errIDToken, t.returnTo, "")
 		return
 	}

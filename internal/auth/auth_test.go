@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ConfigButler/krm-foyer/internal/interruption"
 	"github.com/ConfigButler/krm-foyer/internal/session"
 )
 
@@ -610,6 +611,40 @@ func TestTokenErrorIsNotLogged(t *testing.T) {
 	}
 }
 
+// An ID token the verifier refuses is logged by cause only. The verifier's errors quote
+// the token's claims and the issuer's key-set response, which hold whatever the issuer
+// put there; here that is the client secret, and the scan after each case looks for it.
+func TestIDTokenErrorIsNotLogged(t *testing.T) {
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		misbehave func(*fakeIssuer)
+		cause     string
+	}{
+		"in the audience":      {tamper(func(c map[string]any) { c["aud"] = clientSecret }), "audience-mismatch"},
+		"in an audience list":  {tamper(func(c map[string]any) { c["aud"] = []string{"other-app", clientSecret} }), "audience-mismatch"},
+		"in the issuer":        {tamper(func(c map[string]any) { c["iss"] = "https://" + clientSecret }), "issuer-mismatch"},
+		"in the key set":       {func(f *fakeIssuer) { f.failKeys = clientSecret }, "keys-unavailable"},
+		"expired":              {tamper(func(c map[string]any) { c["exp"] = time.Now().Add(-time.Minute).Unix() }), "expired"},
+		"not yet valid":        {tamper(func(c map[string]any) { c["nbf"] = time.Now().Add(time.Hour).Unix() }), "not-yet-valid"},
+		"signed by a stranger": {func(f *fakeIssuer) { f.signWith = otherKey }, "signature"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			tc.misbehave(h.issuer)
+			assertLoginError(t, h.browser().login(alice, "/"), http.StatusBadGateway, "id-token-invalid")
+			logs := h.logs.String()
+			for _, field := range []string{`"msg":"ID token refused"`, `"cause":"` + tc.cause + `"`} {
+				if !strings.Contains(logs, field) {
+					t.Errorf("the log has no %s:\n%s", field, logs)
+				}
+			}
+		})
+	}
+}
+
 // An issuer that cannot be reached for the token request is logged as such.
 func TestTokenEndpointUnreachable(t *testing.T) {
 	h := newHarness(t)
@@ -726,6 +761,9 @@ func TestLogout(t *testing.T) {
 		resp := b.do(http.MethodPost, "/auth/logout", header)
 		if resp.code != http.StatusForbidden || !strings.Contains(resp.body, `"kind":"Status"`) {
 			t.Errorf("%s: %d %s", name, resp.code, resp.body)
+		}
+		if got := resp.header.Values(interruption.Header); len(got) != 1 || !hasReason(resp.body, got[0]) {
+			t.Errorf("%s: %s = %q, want the Status's reason", name, interruption.Header, got)
 		}
 		if code, _ := b.session(); code != http.StatusOK {
 			t.Fatalf("%s: a refused logout ended the session", name)

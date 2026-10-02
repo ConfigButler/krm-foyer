@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ConfigButler/krm-foyer/internal/interruption"
 	"github.com/ConfigButler/krm-foyer/internal/proxy"
 	"github.com/ConfigButler/krm-foyer/internal/session"
 )
@@ -87,6 +88,9 @@ func TestThroughTheProxy(t *testing.T) {
 		w := send(tc.method, tc.signedIn, tc.header)
 		if w.Code != tc.code || !hasReason(w.Body.String(), tc.reason) {
 			t.Errorf("%s: %d %s, want %d %s", tc.name, w.Code, w.Body, tc.code, tc.reason)
+		}
+		if got := w.Header().Values(interruption.Header); !slices.Equal(got, []string{tc.reason}) {
+			t.Errorf("%s: %s = %q, want %q", tc.name, interruption.Header, got, tc.reason)
 		}
 	}
 	h.store.down.Store(false)

@@ -112,6 +112,29 @@ var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 		Expect(text).To(Equal("bread"))
 	})
 
+	// Creating a note adds it to the list, and leaves every other editor as it was:
+	// text typed and not saved yet is the user's, not the page's to throw away.
+	It("keeps an unsaved edit when alice creates another note", func() {
+		run(tab,
+			chromedp.SetValue(`li[data-name="groceries"] textarea`, "bread, unsaved"),
+			chromedp.SetValue("#new-name", "chores", chromedp.ByID),
+			chromedp.SetValue("#new-text", "sweep", chromedp.ByID),
+			chromedp.Click("#create", chromedp.ByID),
+		)
+		expectStatus(tab, "ok", "Created chores.")
+		Expect(noteText("chores")).To(Equal("sweep"))
+
+		var draft string
+		var names []string
+		run(tab,
+			chromedp.Value(`li[data-name="groceries"] textarea`, &draft),
+			chromedp.Evaluate(`[...document.querySelectorAll('#notes li')].map((li) => li.dataset.name)`, &names),
+		)
+		Expect(draft).To(Equal("bread, unsaved"))
+		Expect(names).To(Equal([]string{"chores", "groceries"}), "in order of name, as a reload shows them")
+		Expect(noteText("groceries")).To(Equal("bread"))
+	})
+
 	// Signing in again starts a new session with a new CSRF token, and a page loaded before
 	// still holds the old one. Its changes and its logout must still work.
 	It("keeps saving and signs out after alice signs in again in another tab", func() {
@@ -153,7 +176,7 @@ var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 		var who string
 		run(tab, chromedp.WaitVisible("#signed-in", chromedp.ByID), chromedp.Text("#who", &who, chromedp.ByID))
 		Expect(who).To(Equal(bob))
-		expectStatus(tab, "ok", "1 notes")
+		expectStatus(tab, "ok", "2 notes")
 
 		run(tab,
 			chromedp.SetValue(`li[data-name="groceries"] textarea`, "bob was here"),

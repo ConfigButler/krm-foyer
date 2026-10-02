@@ -117,7 +117,11 @@ async function createNote() {
     return;
   }
   $('new-note').reset();
-  await reload();
+  // Added in place, in order of name: reloading would rebuild every editor, and throw
+  // away text the user typed into another note and has not saved.
+  const note = answer.object;
+  const next = [...$('notes').children].find((li) => li.dataset.name.localeCompare(note.metadata.name) > 0);
+  $('notes').insertBefore(noteItem(note), next || null);
   say(`Created ${name}.`, 'ok');
 }
 

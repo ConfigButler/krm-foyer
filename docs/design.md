@@ -193,6 +193,11 @@ Rules:
 
 - **The status code is the same in both forms.** Only the body differs. A client that
   checks the code sees one behavior.
+- **Every interruption names its reason in a `Krm-Foyer-Interruption` header**, in both
+  forms. The proxy passes no upstream header outside its allowlist, so the API server,
+  or an aggregated API, cannot send it. A body is no such proof: any API can answer a
+  `Status` with reason `CSRFProofRequired`. The helper resends a change only on this
+  header, because only then did the change not reach Kubernetes.
 - **A page is chosen only for a browser navigation:** a `GET` with exactly one
   `Sec-Fetch-Dest: document` field. Browsers set that header, page scripts cannot, and
   non-browser clients do not send it, so `fetch`, the helper and `kubectl`-style clients
@@ -315,7 +320,10 @@ keys sessions by a hash of the ID, so reading the store does not yield usable ID
   shown only if it is one OAuth or OIDC defines; nothing else the callback says is
   repeated on the origin. A refused token exchange is logged the same way: the issuer's
   HTTP status and an error code OAuth defines, never its description, URI or body, since
-  an issuer may echo the request, client secret and code included.
+  an issuer may echo the request, client secret and code included. A refused ID token is
+  logged by cause (`expired`, `audience-mismatch`, `issuer-mismatch`, `not-yet-valid`,
+  `signature`, `keys-unavailable` or `invalid`), never the verifier's error, which quotes
+  the token's claims and the issuer's key-set response.
 - **Until the issuer's discovery document has been read,** `/auth/login` answers 503 and
   `/readyz` fails; `/healthz` does not. krm-foyer keeps trying in the background.
 

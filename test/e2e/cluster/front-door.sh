@@ -36,7 +36,10 @@ kubectl -n fixture delete configmap front-door fixture-ca --ignore-not-found >/d
 apply() { kubectl -n fixture "$@" --dry-run=client -o yaml | kubectl apply -f - >/dev/null; }
 apply create configmap hello-web-config --from-file=nginx.conf="$here/hello-web-nginx.conf"
 apply create configmap hello-web --from-file="$hello/web"
-config_hash="$(cat "$here/hello-web-nginx.conf" "$hello"/web/* | sha256sum | cut -c1-16)"
+# Its certificate is from start-cluster.sh; the Gateway checks it against the fixture CA.
+apply create secret tls hello-web-tls --cert "$E2E_DIR/tls/hello-web.crt" --key "$E2E_DIR/tls/hello-web.key"
+apply create configmap hello-web-ca --from-file=ca.crt="$E2E_DIR/ca.crt"
+config_hash="$(cat "$here/hello-web-nginx.conf" "$hello"/web/* "$E2E_DIR/tls/hello-web.crt" | sha256sum | cut -c1-16)"
 sed -e "s|NGINX_IMAGE|$NGINX_IMAGE|" -e "s|CONFIG_HASH|$config_hash|" "$here/hello-web.yaml" \
   | kubectl apply -f - >/dev/null
 if ! kubectl -n fixture rollout status deployment/hello-web --timeout=120s; then
@@ -49,8 +52,8 @@ echo "== front door: Gateway and routes"
 # The same certificate as krm-foyer: the Gateway answers for the same public name.
 apply create secret tls front-door-tls --cert "$E2E_DIR/foyer/tls.crt" --key "$E2E_DIR/foyer/tls.key"
 kubectl apply -f "$here/gateway.yaml" >/dev/null
-# Accepted: the Gateway admitted the route. ResolvedRefs: its backends, and for krm-foyer
-# the BackendTLSPolicy's CA, were found.
+# Accepted: the Gateway admitted the route. ResolvedRefs: its backends, and their
+# BackendTLSPolicies' CAs, were found.
 kubectl -n fixture wait --for=condition=Programmed gateway/front-door --timeout=60s >/dev/null
 for route in fixture/hello krm-foyer/krm-foyer; do
   for condition in Accepted ResolvedRefs; do

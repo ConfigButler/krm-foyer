@@ -92,15 +92,19 @@ spec:
     - matches:
         - path: { type: PathPrefix, value: /api }
       backendRefs: [{ name: workspaces-api, port: 8080 }]
-    - backendRefs: [{ name: workspaces-frontend, port: 8080 }]
+    # Static files need no cookie, so the session's never reaches them.
+    - filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier: { remove: [Cookie] }
+      backendRefs: [{ name: workspaces-frontend, port: 8443 }]
 ```
 
 During development, the frontend's dev server plays the ingress's role: Vite's
 `server.proxy`, for example, sends the four prefixes to a krm-foyer on a local cluster,
 so the browser still sees one origin. The e2e fixture runs this recipe for real:
 [gateway.yaml](../test/e2e/cluster/gateway.yaml) is a Gateway, an `HTTPRoute` per
-namespace and a `BackendTLSPolicy` that makes the gateway verify krm-foyer's certificate,
-implemented by Traefik.
+namespace and a `BackendTLSPolicy` per backend that makes the gateway verify its
+certificate, implemented by Traefik.
 
 Sending everything through krm-foyer would be wrong for several reasons:
 
@@ -167,6 +171,12 @@ everything on it **one trust boundary**:
   is a bearer credential: anyone who holds it can call krm-foyer as the user, from
   anywhere, until the session ends. A co-hosted service that logs `Cookie` headers hands
   sessions to whoever reads those logs. Co-hosted services must not log or keep it.
+- **Every hop on the origin needs the protection of the hop to krm-foyer**, re-encrypted
+  and verified or isolated as [above](#decision-2026-10-01-both-tls-models). The cookie
+  crosses each one, and so do the answers: a script tampered with on the way to the
+  browser runs as the user, so a plain hop to a static file server is as open as one to
+  krm-foyer. A service that needs no cookie, a file server above all, should not get it:
+  the gateway removes `Cookie` on that route, as in the recipe above.
 - **The prefixes are fixed.** An application that already uses `/auth` has to move it.
   Make them configurable when an adopter needs it, not before.
 
