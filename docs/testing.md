@@ -196,7 +196,9 @@ fixture's network that serves `examples/hello/web` at `/`, sends `/auth/`, `/k8s
 ([config](../test/e2e/cluster/front-door-nginx.conf)). It publishes 8443 and 5556 on
 loopback, which is where browsers resolve `foyer.localhost` and `dex.localhost`, so the
 public URL `https://foyer.localhost:8443` and the issuer work from a browser on this
-machine with no hosts-file entry. Inside the fixture, aliases send the same names to Dex
+machine with no hosts-file entry. In a VS Code devcontainer, where Docker may run on
+another machine than the browser, a relay also listens on the devcontainer's own loopback
+and VS Code forwards both ports, keeping their numbers. Inside the fixture, aliases send the same names to Dex
 and the node. The `foyer` specs reach krm-foyer through the NodePort, not the front door:
 they test krm-foyer, not nginx.
 

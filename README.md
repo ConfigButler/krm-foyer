@@ -22,7 +22,8 @@ for applications whose domain is modelled that way.
 
 ## Try it
 
-In the devcontainer, with Docker on your own machine:
+In the devcontainer (VS Code forwards the demo's ports to your machine, also when Docker
+runs elsewhere):
 
 ```bash
 task demo

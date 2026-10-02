@@ -8,6 +8,11 @@
 # krm-foyer, https://foyer.localhost:8443) and 5556 (Dex, https://dex.localhost:5556).
 # Browsers resolve *.localhost to loopback themselves, so no hosts-file entry is needed.
 #
+# In a VS Code devcontainer, Docker may run on another machine than the browser (VS Code
+# over SSH, or Codespaces), and then loopback there is not the browser's loopback. So
+# inside a devcontainer a relay also listens on the devcontainer's own 127.0.0.1:8443 and
+# :5556, where VS Code finds and forwards them to the machine the browser runs on.
+#
 # Writes E2E_DIR/front-door-env: where the browser test finds the front door.
 set -euo pipefail
 
@@ -81,6 +86,28 @@ if [ "$code" != 401 ]; then
   exit 1
 fi
 front -f https://foyer.localhost:8443/ | grep -q '<title>Hello, krm-foyer</title>'
+
+if [ -n "${REMOTE_CONTAINERS:-}${CODESPACES:-}" ]; then
+  echo "== relay for VS Code's port forwarding"
+  # nginx in the devcontainer's network namespace: its listeners are the devcontainer's.
+  # Recreated each time, since the devcontainer's namespace changes when it restarts.
+  relay="${CLUSTER_NAME}-relay"
+  docker rm -f "$relay" >/dev/null 2>&1 || true
+  docker run -d --rm --name "$relay" --network "container:$(hostname)" "$NGINX_IMAGE" sh -c "
+    printf '%s\n' 'worker_processes 1; error_log /dev/stderr warn; pid /tmp/nginx.pid; events {}' \
+      'stream {' \
+      '  server { listen 127.0.0.1:8443; proxy_pass $FRONT_DOOR_IP:8443; }' \
+      '  server { listen 127.0.0.1:5556; proxy_pass $FRONT_DOOR_IP:5556; }' \
+      '}' > /tmp/relay.conf
+    exec nginx -c /tmp/relay.conf -g 'daemon off;'" >/dev/null
+  for _ in $(seq 1 10); do
+    code="$(curl -sS --cacert "$E2E_DIR/ca.crt" --resolve "foyer.localhost:8443:127.0.0.1" \
+      -o /dev/null -w '%{http_code}' https://foyer.localhost:8443/ 2>/dev/null || true)"
+    [ "$code" = 200 ] && break
+    sleep 1
+  done
+  [ "$code" = 200 ] || { docker logs "$relay" >&2; echo "the relay does not reach the front door" >&2; exit 1; }
+fi
 
 cat > "$E2E_DIR/front-door-env" <<EOF
 FRONT_DOOR_IP=$FRONT_DOOR_IP
