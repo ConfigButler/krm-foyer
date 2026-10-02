@@ -296,8 +296,11 @@ not a 429: waiting does not make the request smaller.
 **Decision (2026-10-02): the Prometheus client, scraped.** krm-foyer records its metrics
 with the Prometheus Go client and serves them on a listener of its own
 (`-metrics-listen`, `:9090` by default, `/metrics` only). The metrics are never served on
-the origin, where any page could read them; a NetworkPolicy keeps the port to the
-monitoring system.
+the origin, where any page could read them. **Keeping the port to the monitoring system
+is the deployment's job:** a NetworkPolicy that admits only the monitoring system to
+it. The Helm chart will ship one ([roadmap](roadmap.md#deployment)); until then, a
+deployment adds its own. The e2e fixture has none, and reaches the port as admin
+through the API server.
 
 The other candidate was the OpenTelemetry metrics API, exported through OpenTelemetry's
 Prometheus exporter, as gitops-reverser does. It instruments the same way and scrapes the
@@ -383,7 +386,9 @@ Which bounds were reached today, and how often:
 sum by (bound) (increase(krm_foyer_bound_reached_total[1d]))
 ```
 
-How close the busiest sessions come to their concurrency limit, at the 99th percentile:
+The 99th percentile, over every request let through, of how much of its session's
+concurrency limit was in use when it started. It describes requests, not sessions: it
+does not single out the busiest session, or give any session's peak.
 
 ```promql
 histogram_quantile(0.99,

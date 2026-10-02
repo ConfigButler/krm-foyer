@@ -261,9 +261,13 @@ func run(cfg config, logger *slog.Logger) error {
 	}
 	go discover(ctx)
 
+	// Either listener failing stops krm-foyer: running without the metrics it was
+	// configured to serve would hide that they are missing.
+	errs := make(chan error, 2)
+
 	// Metrics have a listener of their own, never the origin, where any page could
-	// read them. Plain HTTP: what they say is counts, and a NetworkPolicy keeps the
-	// port to the monitoring system.
+	// read them. Plain HTTP: what they say is counts, and the deployment keeps the
+	// port to the monitoring system (docs/bounds.md, "Metrics").
 	var metricsSrv *http.Server
 	if cfg.metricsListen != "" {
 		metricsSrv = &http.Server{
@@ -274,7 +278,7 @@ func run(cfg config, logger *slog.Logger) error {
 		}
 		go func() {
 			if err := metricsSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-				logger.Error("metrics listener stopped", "err", err)
+				errs <- fmt.Errorf("metrics listener: %w", err)
 			}
 		}()
 	}
@@ -287,7 +291,6 @@ func run(cfg config, logger *slog.Logger) error {
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
 
-	errs := make(chan error, 1)
 	go func() {
 		logger.Info("krm-foyer listening", "addr", cfg.listen, "version", version,
 			"tls", cfg.tlsCert != "", "login", cfg.login != nil)

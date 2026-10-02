@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -244,5 +245,27 @@ func TestMetricsAreServedApartAndCount(t *testing.T) {
 	mh.ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
 	if w.Code != http.StatusNotFound {
 		t.Errorf("the metrics listener serves / with %d", w.Code)
+	}
+}
+
+// A metrics listener that cannot start stops krm-foyer, rather than leaving it
+// running without the metrics it was configured to serve.
+func TestRunFailsWhenMetricsCannotListen(t *testing.T) {
+	taken, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = taken.Close() }()
+	done := make(chan error, 1)
+	go func() {
+		done <- run(config{listen: "127.0.0.1:0", metricsListen: taken.Addr().String()}, slog.New(slog.DiscardHandler))
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "metrics") {
+			t.Fatalf("run = %v, want an error naming the metrics listener", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("krm-foyer kept running without its metrics listener")
 	}
 }
