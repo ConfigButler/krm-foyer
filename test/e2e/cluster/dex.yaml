@@ -1,12 +1,22 @@
 # Dex for the e2e fixture: the identity provider the API server trusts.
 # Every static user's password is "password".
 issuer: https://dex.localhost:5556
+# Dex runs in the cluster (issuers.yaml) and keeps its state in custom resources there,
+# its signing keys included. With memory storage a restarted pod signs with new keys,
+# and the API server goes on refusing every token until it fetches them again (221
+# seconds on k3s 1.36, measured).
 storage:
-  type: memory
+  type: kubernetes
+  config:
+    inCluster: true
+# For the same reason, no rotation while a fixture lives: each new key would mean
+# minutes of refused logins.
+expiry:
+  signingKeys: 8760h
 web:
   https: 0.0.0.0:5556
-  tlsCert: /etc/krm-foyer-e2e/dex.crt
-  tlsKey: /etc/krm-foyer-e2e/dex.key
+  tlsCert: /etc/dex/tls/tls.crt
+  tlsKey: /etc/dex/tls/tls.key
 oauth2:
   skipApprovalScreen: true
   # The password grant lets the suite obtain a user's token without a browser, so it

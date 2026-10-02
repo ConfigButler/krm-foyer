@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # Brings up the e2e fixture: a k3d cluster whose API server trusts a Dex issuer, and
 # records who made every request in an audit log. Safe to rerun: an existing cluster is
-# reused, and Dex and the mounted configuration are refreshed every time.
+# reused, and the issuers and the mounted configuration are refreshed every time.
 #
-# Everything sits on one Docker network. That is what makes the same script work in the
-# devcontainer (Docker runs beside us, so a published port is on the host, not here) and
-# on a CI runner (where it is the host). The devcontainer joins the network; a CI runner
-# routes to it directly. k3d always publishes the API server's port; it is bound to
-# loopback, and the script fails if anything in the fixture is published more widely.
+# Everything runs in the cluster, as in gitops-reverser's e2e: Dex, the test issuer, and
+# later krm-foyer and the front door. Nothing is published but the API server's port, on
+# loopback. People and the suite reach the cluster in two ways:
+#   - over the cluster's Docker network, which the devcontainer (or the CI container)
+#     joins: the API server and NodePorts, for the suite;
+#   - through kubectl port-forward on this container's localhost (port-forward.sh): Dex
+#     and the front door, for a browser, which VS Code forwards to the machine it runs on.
 #
 # Two issuers: Dex, for real logins, and a static test issuer whose signing key the suite
 # holds, for tokens with claims Dex never issues.
 #
 # Outputs, all under E2E_DIR (default .e2e, gitignored):
 #   kubeconfig  admin access for the suite's own setup, never the user's default kubeconfig
-#   ca.crt      the CA that signed both issuers' certificates
+#   ca.crt      the CA that signed every certificate in the fixture
 #   issuer-signing.key  the test issuer's signing key, for the suite to mint tokens with
 #   env         addresses the suite reads
 set -euo pipefail
@@ -23,18 +25,19 @@ CLUSTER_NAME="${CLUSTER_NAME:-krm-foyer-e2e}"
 NETWORK="${NETWORK:-krm-foyer-e2e}"
 SUBNET="${SUBNET:-172.29.250.0/24}"
 GATEWAY="${GATEWAY:-172.29.250.1}"
-DEX_IP="${DEX_IP:-172.29.250.10}"
-# Names under .localhost, so a browser on this machine needs no hosts-file entry: it
-# resolves them to loopback itself, where the front door (front-door.sh) publishes Dex and
-# krm-foyer. Inside the fixture, aliases point the same names at the containers, so the
-# browser, krm-foyer and the API server all use one issuer URL.
+# A name under .localhost, so a browser on this machine needs no hosts-file entry: it
+# resolves it to loopback itself, where port-forward.sh forwards Dex's port. Inside the
+# cluster an alias sends the same name to Dex's Service, so the browser, krm-foyer and the
+# API server all use one issuer URL.
 DEX_HOST="dex.localhost"
-ISSUER_IP="${ISSUER_IP:-172.29.250.11}"
 ISSUER_HOST="issuer.krm-foyer.test"
 ISSUER_URL="https://$ISSUER_HOST:8443"
+# Fixed ClusterIPs in k3s's default Service range (10.43.0.0/16). The API server runs on
+# the node, not in a pod, so it cannot use cluster DNS; --host-alias puts these in the
+# node's /etc/hosts (and in CoreDNS, for pods) when the cluster is created.
+DEX_SERVICE_IP="10.43.200.10"
+ISSUER_SERVICE_IP="10.43.200.11"
 VOLUME="${CLUSTER_NAME}-config"
-DEX_CONTAINER="${CLUSTER_NAME}-dex"
-ISSUER_CONTAINER="${CLUSTER_NAME}-issuer"
 SERVER_CONTAINER="k3d-${CLUSTER_NAME}-server-0"
 # The same k3s release gitops-reverser's e2e runs on.
 K3S_IMAGE="${K3S_IMAGE:-rancher/k3s:v1.36.4-k3s1@sha256:edad48e12bf81c3a09ac1c05c0c0ffaaa22145980b989d6fae84543a76b83657}"
@@ -44,53 +47,54 @@ BUSYBOX_IMAGE="busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e383
 
 here="$(cd "$(dirname "$0")" && pwd)"
 E2E_DIR="${E2E_DIR:-$(cd "$here/../../.." && pwd)/.e2e}"
-mkdir -p "$E2E_DIR/config"
+mkdir -p "$E2E_DIR/apiserver" "$E2E_DIR/tls"
 chmod 700 "$E2E_DIR"
 
 echo "== certificates"
 # Thirty-day certificates in a directory that outlives the cluster, so a rerun renews any
-# that expire within a day. A new CA means new server certificates signed by it; all of
-# them change the configuration hash below, which restarts the issuers and the API server.
+# that expire within a day. A new CA means new server certificates signed by it, and a new
+# authentication config, which restarts the API server.
 expiring() { [ ! -f "$1" ] || ! openssl x509 -checkend 86400 -noout -in "$1" >/dev/null 2>&1; }
 if expiring "$E2E_DIR/ca.crt"; then
-  rm -f "$E2E_DIR/config/dex.crt" "$E2E_DIR/config/issuer-tls.crt"
+  rm -f "$E2E_DIR"/tls/*.crt
   openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=krm-foyer e2e CA" \
     -keyout "$E2E_DIR/ca.key" -out "$E2E_DIR/ca.crt" 2>/dev/null
 fi
 # names CERT HOST: whether CERT is for HOST. -checkhost exits 0 either way.
 names() { openssl x509 -noout -checkhost "$2" -in "$1" 2>/dev/null | grep -q 'does match'; }
-# server_cert NAME HOST: a certificate for HOST at config/NAME.crt, signed by the CA.
+# server_cert NAME HOST: a certificate for HOST at tls/NAME.crt, signed by the CA.
 server_cert() {
-  if ! expiring "$E2E_DIR/config/$1.crt" && names "$E2E_DIR/config/$1.crt" "$2"; then return 0; fi
+  if ! expiring "$E2E_DIR/tls/$1.crt" && names "$E2E_DIR/tls/$1.crt" "$2"; then return 0; fi
   openssl req -newkey rsa:2048 -nodes -subj "/CN=$2" \
-    -keyout "$E2E_DIR/config/$1.key" -out "$E2E_DIR/$1.csr" 2>/dev/null
-  openssl x509 -req -in "$E2E_DIR/$1.csr" -CA "$E2E_DIR/ca.crt" -CAkey "$E2E_DIR/ca.key" \
+    -keyout "$E2E_DIR/tls/$1.key" -out "$E2E_DIR/tls/$1.csr" 2>/dev/null
+  openssl x509 -req -in "$E2E_DIR/tls/$1.csr" -CA "$E2E_DIR/ca.crt" -CAkey "$E2E_DIR/ca.key" \
     -CAcreateserial -days 30 -extfile <(printf 'subjectAltName=DNS:%s' "$2") \
-    -out "$E2E_DIR/config/$1.crt" 2>/dev/null
+    -out "$E2E_DIR/tls/$1.crt" 2>/dev/null
 }
 server_cert dex "$DEX_HOST"
-server_cert issuer-tls "$ISSUER_HOST"
-# The test issuer's signing key stays outside config/, so it is never mounted anywhere.
-# It is kept across runs: a new key is a new JWKS, which restarts the API server.
+server_cert test-issuer "$ISSUER_HOST"
+# Kept across runs: a new key is a new JWKS, which the API server only picks up minutes
+# later.
 [ -f "$E2E_DIR/issuer-signing.key" ] \
   || openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$E2E_DIR/issuer-signing.key" 2>/dev/null
 
-echo "== configuration"
-cp "$here/dex.yaml" "$here/audit-policy.yaml" "$E2E_DIR/config/"
-# Indent the CA into the block scalar the authentication config leaves for it.
+echo "== API server configuration"
+# The only files the API server needs from outside the cluster: whom to trust, and what
+# to audit. Indent the CA into the block scalar the authentication config leaves for it.
+cp "$here/audit-policy.yaml" "$E2E_DIR/apiserver/"
 awk -v ca="$E2E_DIR/ca.crt" '
   $0 == "CA_PEM" { while ((getline line < ca) > 0) print "        " line; close(ca); next }
   { print }
-' "$here/authentication-config.yaml" > "$E2E_DIR/config/authentication-config.yaml"
-
-# The test issuer serves its discovery document and the public half of the signing key.
-modulus="$(openssl rsa -in "$E2E_DIR/issuer-signing.key" -noout -modulus 2>/dev/null | cut -d= -f2 \
-  | basenc --base16 -d | basenc --base64url -w0 | tr -d '=')"
-printf '{"issuer":"%s","jwks_uri":"%s/jwks.json","id_token_signing_alg_values_supported":["RS256"]}\n' \
-  "$ISSUER_URL" "$ISSUER_URL" > "$E2E_DIR/config/issuer-discovery.json"
-printf '{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"e2e","n":"%s","e":"AQAB"}]}\n' \
-  "$modulus" > "$E2E_DIR/config/issuer-jwks.json"
-cp "$here/issuer-nginx.conf" "$E2E_DIR/config/"
+' "$here/authentication-config.yaml" > "$E2E_DIR/apiserver/authentication-config.yaml"
+chmod 0644 "$E2E_DIR"/apiserver/*
+apiserver_hash="$(cat "$E2E_DIR"/apiserver/* | sha256sum | cut -c1-16)"
+# A named volume, not a bind mount: with Docker beside us, a path in this container does
+# not exist for the daemon.
+put_config() {
+  docker volume create "$VOLUME" >/dev/null
+  tar -C "$E2E_DIR/apiserver" -cf - . | docker run --rm -i -v "$VOLUME:/v" "$BUSYBOX_IMAGE" tar -xf - -C /v
+  echo "$apiserver_hash" > "$E2E_DIR/apiserver.hash"
+}
 
 echo "== network $NETWORK ($SUBNET)"
 docker network inspect "$NETWORK" >/dev/null 2>&1 \
@@ -98,50 +102,16 @@ docker network inspect "$NETWORK" >/dev/null 2>&1 \
 # k3d reads the network's gateway to find the host. Newer Docker engines (as on GitHub's
 # runners) only report a gateway that was set explicitly, hence --gateway above.
 
-echo "== dex at https://$DEX_HOST:5556 ($DEX_IP), test issuer at $ISSUER_URL ($ISSUER_IP)"
-# Dex keeps its signing keys in memory, so a restarted Dex signs with new keys, and a
-# running API server goes on rejecting every token as a bad signature. Restart Dex only
-# when its configuration changed, and then restart the API server too (below).
-#
-# The configuration is only rewritten then, too. Dex watches its certificate files, and a
-# reload that catches a half-written or unreadable key leaves it with no certificate at
-# all: every TLS handshake fails until the next reload. That made the suite fail at random.
-# The files get their final mode here, before they are copied, so no reader ever sees a
-# key it cannot open. Dex runs as a non-root user; .e2e itself stays 0700.
-chmod 0644 "$E2E_DIR"/config/*
-config_hash="$(cat "$E2E_DIR"/config/* | sha256sum | cut -c1-16)"
-running_hash="$(docker inspect "$DEX_CONTAINER" --format '{{if .State.Running}}{{index .Config.Labels "config-hash"}}{{end}}' 2>/dev/null || true)"
-# The two issuers start and stop together; one without the other counts as changed.
-[ "$(docker inspect "$ISSUER_CONTAINER" --format '{{.State.Running}}' 2>/dev/null)" = true ] || running_hash=""
-dex_restarted=false
-if [ "$running_hash" != "$config_hash" ]; then
-  docker rm -f "$DEX_CONTAINER" "$ISSUER_CONTAINER" >/dev/null 2>&1 || true
-  # A named volume, not a bind mount: with Docker beside us, a path in this container
-  # does not exist for the daemon.
-  docker volume create "$VOLUME" >/dev/null
-  tar -C "$E2E_DIR/config" -cf - . | docker run --rm -i -v "$VOLUME:/v" "$BUSYBOX_IMAGE" tar -xf - -C /v
-  # Two ways to find Dex by name, for two kinds of caller: the network alias serves the
-  # API server (it resolves through Docker's DNS), and --host-alias below puts the name
-  # in CoreDNS for pods.
-  docker run -d --name "$DEX_CONTAINER" --label "config-hash=$config_hash" \
-    --network "$NETWORK" --ip "$DEX_IP" --network-alias "$DEX_HOST" \
-    -v "$VOLUME:/etc/krm-foyer-e2e:ro" "$DEX_IMAGE" dex serve /etc/krm-foyer-e2e/dex.yaml >/dev/null
-  # Only the API server talks to the test issuer, so the network alias is enough.
-  docker run -d --name "$ISSUER_CONTAINER" \
-    --network "$NETWORK" --ip "$ISSUER_IP" --network-alias "$ISSUER_HOST" \
-    -v "$VOLUME:/etc/krm-foyer-e2e:ro" "$NGINX_IMAGE" \
-    nginx -c /etc/krm-foyer-e2e/issuer-nginx.conf -g 'daemon off;' >/dev/null
-  dex_restarted=true
-fi
-
 echo "== cluster $CLUSTER_NAME"
 if ! k3d cluster get "$CLUSTER_NAME" >/dev/null 2>&1; then
+  put_config
   # --timeout bounds --wait: a server that never becomes ready fails here, not at the
   # CI job's own timeout. A malformed authentication config looks exactly like that:
   # the API server exits and k3d waits for an API that never answers (Voter lost a
   # 30-minute CI run to it). If this times out, read `docker logs $SERVER_CONTAINER`.
-  # Components the suite does not need are disabled; an
-  # unready metrics-server also breaks full API discovery for its first minute.
+  # The issuers do not exist yet; the API server starts anyway and fetches their keys
+  # once they answer. Components the suite does not need are disabled; an unready
+  # metrics-server also breaks full API discovery for its first minute.
   #
   # k3d publishes the API server's port on every interface by default, through a load
   # balancer container. One server needs no load balancer, and the port goes to loopback
@@ -149,7 +119,8 @@ if ! k3d cluster get "$CLUSTER_NAME" >/dev/null 2>&1; then
   k3d cluster create "$CLUSTER_NAME" \
     --image "$K3S_IMAGE" --servers 1 --agents 0 --wait --timeout 180s \
     --network "$NETWORK" --no-lb --api-port 127.0.0.1:0 \
-    --host-alias "$DEX_IP:$DEX_HOST" \
+    --host-alias "$DEX_SERVICE_IP:$DEX_HOST" \
+    --host-alias "$ISSUER_SERVICE_IP:$ISSUER_HOST" \
     --kubeconfig-update-default=false --kubeconfig-switch-context=false \
     --volume "$VOLUME:/etc/krm-foyer-e2e@server:0" \
     --k3s-arg "--disable=traefik,servicelb,metrics-server@server:0" \
@@ -157,19 +128,20 @@ if ! k3d cluster get "$CLUSTER_NAME" >/dev/null 2>&1; then
     --k3s-arg "--kube-apiserver-arg=audit-policy-file=/etc/krm-foyer-e2e/audit-policy.yaml@server:0" \
     --k3s-arg "--kube-apiserver-arg=audit-log-path=/etc/krm-foyer-e2e/audit.log@server:0" \
     --k3s-arg "--kube-apiserver-arg=audit-log-maxsize=50@server:0"
-elif ! docker exec "$SERVER_CONTAINER" grep -qw "$DEX_HOST" /etc/hosts; then
-  # --host-alias is fixed at creation, so a cluster from before a rename cannot find Dex.
-  echo "cluster $CLUSTER_NAME has no alias for $DEX_HOST (made by an older script); run task e2e-down" >&2
+elif ! docker exec "$SERVER_CONTAINER" grep -q "^${DEX_SERVICE_IP}[[:space:]].*${DEX_HOST}" /etc/hosts; then
+  # --host-alias is fixed at creation, so a cluster from an older script cannot find Dex.
+  echo "cluster $CLUSTER_NAME has no alias $DEX_HOST -> $DEX_SERVICE_IP (made by an older script); run task e2e-down" >&2
   exit 1
-elif [ "$dex_restarted" = true ]; then
-  echo "Dex or its configuration changed; restarting the API server so it fetches new keys"
+elif [ "$(cat "$E2E_DIR/apiserver.hash" 2>/dev/null)" != "$apiserver_hash" ]; then
+  echo "the API server's configuration changed; restarting it"
+  put_config
   docker restart "$SERVER_CONTAINER" >/dev/null
 fi
 
 echo "== nothing published beyond loopback"
 # The fixture's API server accepts tokens from an issuer whose key sits in .e2e, and has
 # an admin kubeconfig next to it. Neither should be reachable from another machine.
-public="$(for c in $(docker ps -q --filter "label=k3d.cluster=$CLUSTER_NAME") "$DEX_CONTAINER" "$ISSUER_CONTAINER"; do
+public="$(for c in $(docker ps -q --filter "label=k3d.cluster=$CLUSTER_NAME"); do
   docker inspect "$c" --format '{{.Name}}{{range $p, $b := .NetworkSettings.Ports}}{{range $b}} {{.HostIp}}:{{.HostPort}}->{{$p}}{{end}}{{end}}'
 done | awk '{ for (i = 2; i <= NF; i++) if ($i !~ /^(127\.0\.0\.1|\[?::1\]?):/) print $1, $i }')"
 if [ -n "$public" ]; then
@@ -196,12 +168,48 @@ for _ in $(seq 1 45); do
 done
 kubectl wait --for=condition=Ready "node/$SERVER_CONTAINER" --timeout=90s >/dev/null
 
+echo "== issuers: Dex at https://$DEX_HOST:5556, test issuer at $ISSUER_URL"
+# The test issuer serves its discovery document and the public half of the signing key.
+modulus="$(openssl rsa -in "$E2E_DIR/issuer-signing.key" -noout -modulus 2>/dev/null | cut -d= -f2 \
+  | basenc --base16 -d | basenc --base64url -w0 | tr -d '=')"
+stage="$E2E_DIR/test-issuer"
+mkdir -p "$stage"
+printf '{"issuer":"%s","jwks_uri":"%s/jwks.json","id_token_signing_alg_values_supported":["RS256"]}\n' \
+  "$ISSUER_URL" "$ISSUER_URL" > "$stage/discovery.json"
+printf '{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"e2e","n":"%s","e":"AQAB"}]}\n' \
+  "$modulus" > "$stage/jwks.json"
+cp "$here/issuer-nginx.conf" "$stage/nginx.conf"
+
+kubectl apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fixture
+EOF
+apply() { kubectl -n fixture "$@" --dry-run=client -o yaml | kubectl apply -f - >/dev/null; }
+apply create configmap dex --from-file=config.yaml="$here/dex.yaml"
+apply create secret tls dex-tls --cert "$E2E_DIR/tls/dex.crt" --key "$E2E_DIR/tls/dex.key"
+apply create configmap test-issuer --from-file="$stage"
+apply create secret tls test-issuer-tls --cert "$E2E_DIR/tls/test-issuer.crt" --key "$E2E_DIR/tls/test-issuer.key"
+# A changed configuration or certificate rolls the pods. Dex keeps its signing keys in
+# the cluster (dex.yaml), so a rolled Dex still signs with the keys the API server has.
+config_hash="$(cat "$here/dex.yaml" "$E2E_DIR"/tls/*.crt "$stage"/* | sha256sum | cut -c1-16)"
+sed -e "s|DEX_IMAGE|$DEX_IMAGE|" -e "s|NGINX_IMAGE|$NGINX_IMAGE|" \
+  -e "s|DEX_SERVICE_IP|$DEX_SERVICE_IP|" -e "s|ISSUER_SERVICE_IP|$ISSUER_SERVICE_IP|" \
+  -e "s|CONFIG_HASH|$config_hash|" "$here/issuers.yaml" | kubectl apply -f - >/dev/null
+for d in dex test-issuer; do
+  if ! kubectl -n fixture rollout status "deployment/$d" --timeout=120s; then
+    kubectl -n fixture describe pods -l "app=$d" >&2
+    kubectl -n fixture logs "deployment/$d" --tail=50 >&2 || true
+    exit 1
+  fi
+done
+
 cat > "$E2E_DIR/env" <<EOF
 CLUSTER_NAME=$CLUSTER_NAME
 SERVER_CONTAINER=$SERVER_CONTAINER
 API_SERVER=https://$server_ip:6443
 DEX_ISSUER=https://$DEX_HOST:5556
-DEX_IP=$DEX_IP
 TEST_ISSUER=$ISSUER_URL
 EOF
 echo "fixture ready: KUBECONFIG=$E2E_DIR/kubeconfig"

@@ -1,0 +1,87 @@
+# The front door, in the cluster: nginx serving examples/hello/web at / and sending
+# krm-foyer's prefixes to krm-foyer (front-door-nginx.conf). front-door.sh fills in the
+# image and the configuration hash, and creates the ConfigMaps and the Secret. A browser
+# reaches it through kubectl port-forward (port-forward.sh).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: front-door
+  namespace: fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: front-door
+  template:
+    metadata:
+      labels:
+        app: front-door
+      annotations:
+        krm-foyer.test/config-hash: CONFIG_HASH
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: NGINX_IMAGE
+          command: [nginx, -c, /etc/front-door/config/nginx.conf, -g, "daemon off;"]
+          ports:
+            - name: https
+              containerPort: 8443
+          readinessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/front-door/config
+              readOnly: true
+            - name: web
+              mountPath: /etc/front-door/web
+              readOnly: true
+            - name: tls
+              mountPath: /etc/front-door/tls
+              readOnly: true
+            - name: ca
+              mountPath: /etc/front-door/ca
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: front-door
+        - name: web
+          configMap:
+            name: hello-web
+        # The same certificate as krm-foyer: the front door answers for the same public name.
+        - name: tls
+          secret:
+            secretName: front-door-tls
+        - name: ca
+          configMap:
+            name: fixture-ca
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: front-door
+  namespace: fixture
+spec:
+  selector:
+    app: front-door
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https

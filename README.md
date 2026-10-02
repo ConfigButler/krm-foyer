@@ -22,15 +22,15 @@ for applications whose domain is modelled that way.
 
 ## Try it
 
-In the devcontainer (VS Code forwards the demo's ports to your machine, also when Docker
-runs elsewhere):
+In the devcontainer:
 
 ```bash
 task demo
 ```
 
-This starts a disposable k3d cluster with Dex, deploys krm-foyer, and puts the
-[hello example](examples/hello) in front of it. Open <https://foyer.localhost:8443> and
+This starts a disposable k3d cluster with Dex, krm-foyer and the
+[hello example](examples/hello) in it, and port-forwards the example and Dex into the
+devcontainer, where VS Code forwards them to your machine, also when Docker runs elsewhere. Open <https://foyer.localhost:8443> and
 sign in as `alice@example.com`, who may edit the notes, or `bob@example.com`, who may only
 read them. The password is `password`. The certificates come from the fixture's own CA, so
 import `.e2e/ca.crt` into your browser or accept the warnings. `task e2e-down` removes it
@@ -73,6 +73,7 @@ Kubernetes' own answers.
 | [docs/ingress.md](docs/ingress.md) | Terminating TLS itself or behind an ingress, sharing one domain with other services, and the login gate for an ingress |
 | [docs/frontend.md](docs/frontend.md) | Which pages krm-foyer serves itself, and why it ships no single-page application |
 | [docs/testing.md](docs/testing.md) | How the tests prove krm-foyer invents neither authentication nor authorization, and how to run the e2e fixture |
+| [docs/investigations/choosing-an-issuer.md](docs/investigations/choosing-an-issuer.md) | Which OIDC issuers fit krm-foyer (Dex, Pinniped, Keycloak, authentik, Authelia, OpenUnison), and why the tests use Dex |
 | [docs/heritage.md](docs/heritage.md) | Where it comes from: the Voter demo, what broke on stage, and its sibling projects |
 | [docs/name.md](docs/name.md) | Why it is called krm-foyer |
 

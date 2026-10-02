@@ -20,9 +20,9 @@
     "--group-add=docker",
     "--add-host=host.docker.internal:host-gateway"
   ],
-  // 8443 and 5556: task demo's front door and Dex, relayed into this container. Their
-  // numbers are part of the application's origin and the issuer URL, so the browser's
-  // side must use the same ones.
+  // 8443 and 5556: task demo's front door and Dex, port-forwarded into this container
+  // (test/e2e/cluster/port-forward.sh). Their numbers are part of the application's
+  // origin and the issuer URL, so the browser's side must use the same ones.
   "forwardPorts": [8080, 8443, 5556],
   "portsAttributes": {
     "8080": {
@@ -40,6 +40,10 @@
       "protocol": "https",
       "requireLocalPort": true,
       "onAutoForward": "silent"
+    },
+    // The browser specs' Chromium, while they run: never worth forwarding.
+    "9222": {
+      "onAutoForward": "ignore"
     }
   },
   "customizations": {
