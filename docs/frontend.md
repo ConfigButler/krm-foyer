@@ -97,10 +97,6 @@ The routing recipes come with the ingress work.
 - The helper grows past the session and the proof every request needs. Then it belongs
   in its own package, or in krm-stream.
 
-Looked at (2026-10-02): no published Kubernetes client fits as the helper's transport.
-`@kubernetes/client-node` and the clients built on it need Node's `https` and `tls`.
-The clients that do run in a browser (OpenShift's dynamic-plugin SDK utils, Headlamp's
-`lib/k8s`) bring React and Redux or a whole application with them, and none knows a
-cookie session with a CSRF header. So the helper stays its own, small and without
-dependencies. Watches will be a `fetch` read line by line, which needs no library.
-For types, `kubernetes-models` can be imported as types only, at no runtime cost.
+Looked at (2026-10-02): no published Kubernetes client fits as the helper's transport, so
+the helper stays its own, small and without dependencies. The libraries checked, and
+what each is good for, are in [alternatives](alternatives.md#instead-of-the-browser-helper).
