@@ -24,7 +24,11 @@ NETWORK="${NETWORK:-krm-foyer-e2e}"
 SUBNET="${SUBNET:-172.29.250.0/24}"
 GATEWAY="${GATEWAY:-172.29.250.1}"
 DEX_IP="${DEX_IP:-172.29.250.10}"
-DEX_HOST="dex.krm-foyer.test"
+# Names under .localhost, so a browser on this machine needs no hosts-file entry: it
+# resolves them to loopback itself, where the front door (front-door.sh) publishes Dex and
+# krm-foyer. Inside the fixture, aliases point the same names at the containers, so the
+# browser, krm-foyer and the API server all use one issuer URL.
+DEX_HOST="dex.localhost"
 ISSUER_IP="${ISSUER_IP:-172.29.250.11}"
 ISSUER_HOST="issuer.krm-foyer.test"
 ISSUER_URL="https://$ISSUER_HOST:8443"
@@ -53,9 +57,11 @@ if expiring "$E2E_DIR/ca.crt"; then
   openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=krm-foyer e2e CA" \
     -keyout "$E2E_DIR/ca.key" -out "$E2E_DIR/ca.crt" 2>/dev/null
 fi
+# names CERT HOST: whether CERT is for HOST. -checkhost exits 0 either way.
+names() { openssl x509 -noout -checkhost "$2" -in "$1" 2>/dev/null | grep -q 'does match'; }
 # server_cert NAME HOST: a certificate for HOST at config/NAME.crt, signed by the CA.
 server_cert() {
-  expiring "$E2E_DIR/config/$1.crt" || return 0
+  if ! expiring "$E2E_DIR/config/$1.crt" && names "$E2E_DIR/config/$1.crt" "$2"; then return 0; fi
   openssl req -newkey rsa:2048 -nodes -subj "/CN=$2" \
     -keyout "$E2E_DIR/config/$1.key" -out "$E2E_DIR/$1.csr" 2>/dev/null
   openssl x509 -req -in "$E2E_DIR/$1.csr" -CA "$E2E_DIR/ca.crt" -CAkey "$E2E_DIR/ca.key" \
@@ -151,6 +157,10 @@ if ! k3d cluster get "$CLUSTER_NAME" >/dev/null 2>&1; then
     --k3s-arg "--kube-apiserver-arg=audit-policy-file=/etc/krm-foyer-e2e/audit-policy.yaml@server:0" \
     --k3s-arg "--kube-apiserver-arg=audit-log-path=/etc/krm-foyer-e2e/audit.log@server:0" \
     --k3s-arg "--kube-apiserver-arg=audit-log-maxsize=50@server:0"
+elif ! docker exec "$SERVER_CONTAINER" grep -qw "$DEX_HOST" /etc/hosts; then
+  # --host-alias is fixed at creation, so a cluster from before a rename cannot find Dex.
+  echo "cluster $CLUSTER_NAME has no alias for $DEX_HOST (made by an older script); run task e2e-down" >&2
+  exit 1
 elif [ "$dex_restarted" = true ]; then
   echo "Dex or its configuration changed; restarting the API server so it fetches new keys"
   docker restart "$SERVER_CONTAINER" >/dev/null

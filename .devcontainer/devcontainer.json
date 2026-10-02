@@ -20,11 +20,26 @@
     "--group-add=docker",
     "--add-host=host.docker.internal:host-gateway"
   ],
-  "forwardPorts": [8080],
+  // 8443 and 5556: task demo's front door and Dex, relayed into this container. Their
+  // numbers are part of the application's origin and the issuer URL, so the browser's
+  // side must use the same ones.
+  "forwardPorts": [8080, 8443, 5556],
   "portsAttributes": {
     "8080": {
       "label": "krm-foyer",
       "onAutoForward": "notify"
+    },
+    "8443": {
+      "label": "task demo: https://foyer.localhost:8443",
+      "protocol": "https",
+      "requireLocalPort": true,
+      "onAutoForward": "silent"
+    },
+    "5556": {
+      "label": "task demo: Dex",
+      "protocol": "https",
+      "requireLocalPort": true,
+      "onAutoForward": "silent"
     }
   },
   "customizations": {

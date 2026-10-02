@@ -1,0 +1,257 @@
+//go:build e2e
+
+package e2e
+
+import (
+	"context"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/chromedp/cdproto/runtime"
+	"github.com/chromedp/chromedp"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+// headlessShell is Chromium for the browser specs, driven over the DevTools protocol.
+const headlessShell = "chromedp/headless-shell:151.0.7922.109@sha256:2d349b544a1ea6b5b5fd7c0fe99215ff662339c57407ee2e8c0a11af93516b04"
+
+// The hello example, used the way a person uses it: in a real browser, through the front
+// door, with Dex's own login form. This is the claim that krm-foyer is usable, not only
+// correct: an application with no backend of its own signs in, reads and changes a
+// resource, and shows Kubernetes' 403 and 409 answers, and its script never holds a
+// credential.
+//
+// The browser shares the front door's network namespace, so foyer.localhost and
+// dex.localhost resolve to loopback exactly as on a person's machine, and reach the same
+// published ports.
+var _ = Describe("The hello example", Label("browser"), Ordered, func() {
+	var (
+		tab context.Context
+		ns  string
+	)
+
+	BeforeAll(func(ctx SpecContext) {
+		tab = startBrowser(ctx)
+		ns = fx.namespace()
+		fx.grant(ns, aliceK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch", "create", "update")
+		fx.grant(ns, bobK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch")
+	}, NodeTimeout(2*time.Minute))
+
+	noteText := func(name string) string {
+		return fx.kubectl("-n", ns, "get", "notes.hello.krm-foyer.example", name, "-o", "jsonpath={.spec.text}")
+	}
+
+	It("signs alice in through Dex and lists the notes she may read", func() {
+		run(tab, chromedp.Navigate(fx.foyerURL+"/?namespace="+ns))
+		run(tab, chromedp.WaitVisible("#sign-in", chromedp.ByID), chromedp.Click("#sign-in", chromedp.ByID))
+		signInAtDex(tab, alice)
+
+		// Back where she started, namespace included: the return path survived the trip.
+		var location, who string
+		run(tab, chromedp.WaitVisible("#signed-in", chromedp.ByID),
+			chromedp.Location(&location), chromedp.Text("#who", &who, chromedp.ByID))
+		Expect(location).To(Equal(fx.foyerURL + "/?namespace=" + ns))
+		Expect(who).To(Equal(alice))
+		expectStatus(tab, "ok", "0 notes")
+	})
+
+	It("keeps every credential out of the page's reach", func() {
+		var cookies, storage, sessionAnswer string
+		run(tab,
+			chromedp.Evaluate(`document.cookie`, &cookies),
+			chromedp.Evaluate(`JSON.stringify([localStorage, sessionStorage])`, &storage),
+			chromedp.Evaluate(`fetch('/auth/session').then(r => r.text())`, &sessionAnswer, awaitPromise),
+		)
+		Expect(cookies).To(BeEmpty(), "the session cookie must be HttpOnly")
+		Expect(storage).To(Equal("[{},{}]"))
+		Expect(sessionAnswer).To(ContainSubstring(`"authenticated":true`))
+		Expect(sessionAnswer).NotTo(MatchRegexp(jwtShape))
+	})
+
+	It("creates and edits a note as alice", func() {
+		run(tab,
+			chromedp.SetValue("#new-name", "groceries", chromedp.ByID),
+			chromedp.SetValue("#new-text", "milk", chromedp.ByID),
+			chromedp.Click("#create", chromedp.ByID),
+		)
+		expectStatus(tab, "ok", "Created groceries.")
+		Expect(noteText("groceries")).To(Equal("milk"))
+
+		run(tab,
+			chromedp.SetValue(`li[data-name="groceries"] textarea`, "milk, eggs"),
+			chromedp.Click(`li[data-name="groceries"] .save`),
+		)
+		expectStatus(tab, "ok", "Saved groceries.")
+		Expect(noteText("groceries")).To(Equal("milk, eggs"))
+	})
+
+	It("shows a 409 when the note changed since it was loaded, and overwrites nothing", func() {
+		fx.kubectl("-n", ns, "patch", "notes.hello.krm-foyer.example", "groceries",
+			"--type=merge", "-p", `{"spec":{"text":"bread"}}`)
+		run(tab,
+			chromedp.SetValue(`li[data-name="groceries"] textarea`, "milk, eggs, flour"),
+			chromedp.Click(`li[data-name="groceries"] .save`),
+		)
+		expectStatus(tab, "conflict", "failed with 409")
+		Expect(noteText("groceries")).To(Equal("bread"))
+
+		By("reloading, which shows the other change")
+		run(tab, chromedp.Click("#reload", chromedp.ByID))
+		expectStatus(tab, "ok", "1 notes")
+		var text string
+		run(tab, chromedp.Value(`li[data-name="groceries"] textarea`, &text))
+		Expect(text).To(Equal("bread"))
+	})
+
+	// Signing in again starts a new session with a new CSRF token, and a page loaded before
+	// still holds the old one. Its changes and its logout must still work.
+	It("keeps saving and signs out after alice signs in again in another tab", func() {
+		other, closeOther := chromedp.NewContext(tab)
+		DeferCleanup(closeOther)
+		Expect(chromedp.Run(other)).To(Succeed()) // opens the tab: see startBrowser
+		signInAgain := func() {
+			run(other, chromedp.Navigate(fx.foyerURL+"/auth/login?return_to=/"))
+			signInAtDex(other, alice)
+			run(other, chromedp.WaitVisible("#signed-in", chromedp.ByID))
+		}
+
+		signInAgain()
+		run(tab,
+			chromedp.SetValue(`li[data-name="groceries"] textarea`, "bread, butter"),
+			chromedp.Click(`li[data-name="groceries"] .save`),
+		)
+		expectStatus(tab, "ok", "Saved groceries.")
+		Expect(noteText("groceries")).To(Equal("bread, butter"))
+
+		// Again, so the logout below starts from a stale token too.
+		signInAgain()
+	})
+
+	It("signs alice out", func() {
+		var location string
+		run(tab, chromedp.Click("#logout", chromedp.ByID))
+		Eventually(func() string {
+			run(tab, chromedp.Location(&location))
+			return location
+		}).WithTimeout(10 * time.Second).Should(Equal(fx.foyerURL + "/auth/logged-out"))
+
+		run(tab, chromedp.Navigate(fx.foyerURL+"/?namespace="+ns), chromedp.WaitVisible("#sign-in", chromedp.ByID))
+	})
+
+	It("shows bob, who may only read, Kubernetes' 403 when he edits", func() {
+		run(tab, chromedp.Click("#sign-in", chromedp.ByID))
+		signInAtDex(tab, bob)
+		var who string
+		run(tab, chromedp.WaitVisible("#signed-in", chromedp.ByID), chromedp.Text("#who", &who, chromedp.ByID))
+		Expect(who).To(Equal(bob))
+		expectStatus(tab, "ok", "1 notes")
+
+		run(tab,
+			chromedp.SetValue(`li[data-name="groceries"] textarea`, "bob was here"),
+			chromedp.Click(`li[data-name="groceries"] .save`),
+		)
+		// The message is the API server's own, naming bob: RBAC refused, not krm-foyer.
+		expectStatus(tab, "refused", `User "oidc:bob@example.com" cannot update resource "notes"`)
+		Expect(noteText("groceries")).To(Equal("bread, butter"))
+	})
+})
+
+// startBrowser starts Chromium in the front door's network namespace and returns a tab
+// in it. Both are gone when the spec tree is done.
+func startBrowser(ctx context.Context) context.Context {
+	// Trust exactly the certificates of the front door and Dex, by their public keys:
+	// the fixture's CA is not in the browser's store.
+	trusted := []string{
+		spki(filepath.Join(fx.dir, "foyer", "tls.crt")),
+		spki(filepath.Join(fx.dir, "config", "dex.crt")),
+	}
+	name := "krm-foyer-e2e-browser-" + randomID()
+	out, err := exec.CommandContext(ctx, "docker", "run", "-d", "--rm", "--name", name,
+		"--network", "container:"+fx.frontDoor, headlessShell,
+		"--user-data-dir=/tmp/profile",
+		"--ignore-certificate-errors-spki-list="+strings.Join(trusted, ","),
+	).CombinedOutput()
+	Expect(err).NotTo(HaveOccurred(), "%s", out)
+	DeferCleanup(func(ctx SpecContext) { _ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run() })
+
+	devtools := "http://" + fx.frontDoorIP + ":9222"
+	Eventually(func() error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, devtools+"/json/version", nil)
+		Expect(err).NotTo(HaveOccurred())
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		return err
+	}).WithContext(ctx).WithTimeout(30 * time.Second).WithPolling(500 * time.Millisecond).Should(Succeed())
+
+	allocator, cancelAllocator := chromedp.NewRemoteAllocator(context.Background(), devtools)
+	tab, cancelTab := chromedp.NewContext(allocator)
+	DeferCleanup(func() { cancelTab(); cancelAllocator() })
+	// The first Run opens the tab, which lives as long as the context it is given: so this
+	// one gets the tab's own context, not run's shorter one.
+	Expect(chromedp.Run(tab)).To(Succeed())
+	return tab
+}
+
+// spki is the browser's pin for the certificate in file: the SHA-256 of its public key.
+func spki(file string) string {
+	raw, err := os.ReadFile(file)
+	Expect(err).NotTo(HaveOccurred())
+	block, _ := pem.Decode(raw)
+	Expect(block).NotTo(BeNil())
+	cert, err := x509.ParseCertificate(block.Bytes)
+	Expect(err).NotTo(HaveOccurred())
+	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// run performs actions in the tab, each run bounded so a missing element fails the spec
+// instead of hanging it.
+func run(tab context.Context, actions ...chromedp.Action) {
+	GinkgoHelper()
+	ctx, cancel := context.WithTimeout(tab, 20*time.Second)
+	defer cancel()
+	Expect(chromedp.Run(ctx, actions...)).To(Succeed())
+}
+
+// signInAtDex fills in Dex's login form as user, once the browser has been sent there.
+func signInAtDex(tab context.Context, user string) {
+	GinkgoHelper()
+	run(tab, chromedp.WaitVisible("#login", chromedp.ByID))
+	var location string
+	run(tab, chromedp.Location(&location))
+	Expect(location).To(HavePrefix(fx.dexIssuer + "/"))
+	run(tab,
+		chromedp.SetValue("#login", user, chromedp.ByID),
+		chromedp.SetValue("#password", password, chromedp.ByID),
+		chromedp.Click("#submit-login", chromedp.ByID),
+	)
+}
+
+// expectStatus waits for the example's status line to report outcome with text in it.
+func expectStatus(tab context.Context, outcome, text string) {
+	GinkgoHelper()
+	var got, gotOutcome string
+	Eventually(func(g Gomega) {
+		ctx, cancel := context.WithTimeout(tab, 5*time.Second)
+		defer cancel()
+		g.Expect(chromedp.Run(ctx,
+			chromedp.Text("#status", &got, chromedp.ByID),
+			chromedp.AttributeValue("#status", "data-outcome", &gotOutcome, nil, chromedp.ByID),
+		)).To(Succeed())
+		g.Expect(gotOutcome).To(Equal(outcome), "status: %s", got)
+		g.Expect(got).To(ContainSubstring(text))
+	}).WithTimeout(20 * time.Second).WithPolling(250 * time.Millisecond).Should(Succeed())
+}
+
+func awaitPromise(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }

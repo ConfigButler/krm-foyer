@@ -3,13 +3,13 @@
 What is left to build, and in what order. The [design](design.md) says what krm-foyer
 must do; this file tracks how far along that is.
 
-**The core of the security model is proved against a real cluster; the rest is not
-built yet.** Server-held tokens, access decided by Kubernetes alone and no
-service-account fallback each have an e2e spec that tries to get past them, against a
-real API server and Dex, with krm-foyer's service account as cluster-admin bait. Each
-other requirement becomes a property of krm-foyer when its test exists and passes, and
-not before. Until the bounds in step 3 exist, no release is fit for a cluster that
-matters.
+**The core of the security model is proved against a real cluster, and a person can use
+it: `task demo` starts an example application in a browser.** Server-held tokens, access
+decided by Kubernetes alone and no service-account fallback each have an e2e spec that
+tries to get past them, against a real API server and Dex, with krm-foyer's service
+account as cluster-admin bait. Each other requirement becomes a property of krm-foyer
+when its test exists and passes, and not before. Until the bounds in step 4 exist, no
+release is fit for a cluster that matters.
 
 ## Order of work
 
@@ -34,15 +34,28 @@ Each step makes pending specs real and ends with `task verify` green.
    binary serving `/k8s`; interruption pages; deployment into the fixture with the login
    and identity specs; then the differential, CSRF, logout and token-scan specs.
 
-   **Step 2b, refresh and shared session storage,** follows directly: refresh serialized
-   per session and bounded, a refused refresh ending the session, the disablement bound
-   measured for Dex, and a shared store so more than one replica works. The token scan
-   then also reads the store, for tokens krm-foyer obtained by refresh.
-3. **Bounds**, before anyone runs krm-foyer for real: page size, response bytes (counted
+3. **A working demo** (done). Moved ahead of refresh, shared storage and bounds
+   (2026-10-01), because a first useful experience shows what the rest must serve, and
+   the backend already worked against a real Dex and API server. One command, `task
+   demo`, starts the [hello example](../examples/hello) for a browser on this machine:
+   an nginx front door puts it and krm-foyer on one origin, and the fixture's names
+   moved to `*.localhost`, which browsers resolve to loopback with no setup. The example
+   signs in, lists, creates and edits a custom resource, shows Kubernetes' 403 and 409,
+   and signs out, with no application-specific code in krm-foyer; the generic browser
+   helper (`/_foyer/foyer.js`) came with it. Browser specs drive that journey in
+   Chromium. It reloads on request rather than streaming, and keeps one replica,
+   in-memory sessions and a new login when the ID token expires.
+4. **Bounds**, before anyone runs krm-foyer for real: page size, response bytes (counted
    decoded), request rate, watch duration and concurrent native watches, each with a test
    that reaches it. Until this step is done, no release is fit for a cluster that matters.
-4. **Streams**, once the first three hold, with their own bound on concurrent streams.
-5. **An example domain** with pending, accepted, rejected and failed outcomes, and a
+5. **Refresh and shared session storage, when the demo shows the need** (was step 2b):
+   refresh serialized per session and bounded, a refused refresh ending the session, the
+   disablement bound measured for Dex, and a shared store so more than one replica
+   works. The token scan then also reads the store, for tokens krm-foyer obtained by
+   refresh.
+6. **Streams**, with their own bound on concurrent streams. The example then follows
+   its notes live instead of reloading.
+7. **An example domain** with pending, accepted, rejected and failed outcomes, and a
    second frontend on a different API group, with no application-specific code in
    krm-foyer. Then measure the operational cost against keeping auth and transport in
    each application.
@@ -77,9 +90,13 @@ Security items need tests that try to get past the boundary.
 - [x] The `foyer` specs for step 2 made real: login, identity, differential answers,
       RBAC changes, watches, path and subresource refusals, CSRF, logout and the token
       scan, each checked by deploying a krm-foyer broken on purpose
-- [ ] The remaining `foyer` specs: refusal of a refresh (step 2b), the ingress (later)
-- [ ] Browser e2e with Playwright: log in, read, edit, get refused with 403, hit a 409,
-      log out
+- [ ] The remaining `foyer` specs: refusal of a refresh (step 5), the ingress (later)
+- [x] Browser e2e: log in, read, create, edit, get refused with 403, hit a 409, log out,
+      and no credential within the page's reach. Chromium driven from the Go suite
+      with chromedp, rather than Playwright: no Node or npm in CI, one language for the
+      suite
+- [x] `task demo`: the e2e fixture with the hello example behind a front door, for a
+      browser on this machine
 - [ ] Coverage baseline that ratchets upward
 - [x] Fuzz tests for path checking, the upstream response check, the CSRF rule and
       return paths, with a short fuzz run of each in `task verify`
@@ -141,7 +158,7 @@ Security items need tests that try to get past the boundary.
       the audit log names the user for every request with one
 - [x] A test proves that no response, on any route, and no log line contains a token
       krm-foyer holds, a session ID or a client secret
-- [ ] The same for tokens obtained by refresh, read from the session store (step 2b)
+- [ ] The same for tokens obtained by refresh, read from the session store (step 5)
 - [x] Upstream bodies reach the browser decoded: the browser's `Accept-Encoding` is
       dropped, and a gzip answer from the API server arrives uncompressed without
       `Content-Encoding`
@@ -158,8 +175,8 @@ Security items need tests that try to get past the boundary.
       (unit tests against an issuer that misbehaves on request; e2e in step 2)
 - [x] Opaque server-side sessions: rotated at login, with idle and absolute expiry, and
       ended with the ID token while there is no refresh (unit tests; e2e in step 2)
-- [ ] Refresh is serialized per session and bounded (step 2b)
-- [ ] A refused refresh ends the session at once: 401s, and its streams close (step 2b)
+- [ ] Refresh is serialized per session and bounded (step 5)
+- [ ] A refused refresh ends the session at once: 401s, and its streams close (step 5)
 - [ ] The disablement bound measured for Dex in the fixture (remove a user, time the
       refused refresh), and documented per issuer configuration; elsewhere the documented
       bound is the absolute session expiry
@@ -173,7 +190,7 @@ Security items need tests that try to get past the boundary.
 - [ ] `/_foyer/access`: the rules for a namespace from a SelfSubjectRulesReview, and a
       "can I?" form answered by a SelfSubjectAccessReview. See
       [what may I do](design.md#what-may-i-do)
-- [ ] Shared session storage, so more than one replica works (step 2b)
+- [ ] Shared session storage, so more than one replica works (step 5)
 - [ ] The [session lifecycle](design.md#session-lifecycle) bounds, each with a test:
       logout seen by every replica at once, logout racing a refresh, the session store
       unavailable, and a stream open across logout and expiry
@@ -187,7 +204,7 @@ Security items need tests that try to get past the boundary.
 - [x] Native watches and logs stream without buffering, and cancellation reaches the
       upstream
 - [ ] Bounds on page size, response bytes, request rate, watch duration and concurrent
-      streams (step 3)
+      streams (step 4)
 
 ### Streams
 
@@ -207,11 +224,12 @@ Security items need tests that try to get past the boundary.
 
 ### Making it easy for others
 
-- [ ] One task that brings up k3d, Dex and krm-foyer with a sample CRD, in minutes
-- [ ] A minimal example frontend with no framework and no build step, which calls
-      `fetch('/k8s/apis/...')`. It lives in `examples/`, not in the binary
-- [ ] A small, framework-independent JavaScript helper: log in on a 401, show a 403 as a
-      refusal, and treat a 409 as a conflict to reconcile
+- [x] One task that brings up k3d, Dex and krm-foyer with a sample CRD, in minutes
+      (`task demo`)
+- [x] A minimal example frontend with no framework and no build step, which calls
+      `/k8s/apis/...`. It lives in `examples/`, not in the binary
+- [x] A small, framework-independent JavaScript helper: log in on a 401, show a 403 as a
+      refusal, and treat a 409 as a conflict to reconcile (`/_foyer/foyer.js`)
 - [ ] Deployment examples that show who krm-foyer suits without a scope: users granted a
       Role that matches the application, next to a note on why it is the wrong tool for
       users with broad grants such as cluster-admin. See

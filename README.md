@@ -12,13 +12,34 @@ KRM is the [Kubernetes Resource Model](https://github.com/kubernetes/design-prop
 the idea that everything is a declarative resource with a spec and a status. krm-foyer is
 for applications whose domain is modelled that way.
 
-> **Status: a design, a server skeleton and the API proxy.** The skeleton serves health
-> endpoints and a start page, and an e2e fixture puts a real API server behind a real Dex.
-> The API proxy exists with unit tests but is not wired into the binary, because there is
-> no login yet to give it a credential. Login and streams are specified in
-> [docs/design.md](docs/design.md) but not implemented.
-> The principles below are requirements, not properties of the code yet; the
-> [roadmap](docs/roadmap.md) tracks which have tests.
+> **Status: a working prototype, not yet for a cluster that matters.** Sign-in through
+> OIDC, server-side sessions and the API proxy work, and e2e specs against a real API
+> server and Dex try to get past each security boundary. `task demo` runs an example
+> application against them in your browser. Still missing: the bounds on request rate and
+> response size that make it safe in front of a real cluster, token refresh, more than
+> one replica, and streams. The [roadmap](docs/roadmap.md) tracks which of the principles
+> below have tests.
+
+## Try it
+
+In the devcontainer (VS Code forwards the demo's ports to your machine, also when Docker
+runs elsewhere):
+
+```bash
+task demo
+```
+
+This starts a disposable k3d cluster with Dex, deploys krm-foyer, and puts the
+[hello example](examples/hello) in front of it. Open <https://foyer.localhost:8443> and
+sign in as `alice@example.com`, who may edit the notes, or `bob@example.com`, who may only
+read them. The password is `password`. The certificates come from the fixture's own CA, so
+import `.e2e/ca.crt` into your browser or accept the warnings. `task e2e-down` removes it
+all. A fixture made by an older version of the scripts is refused with a message saying
+so; run `task e2e-down` once, then `task demo` again.
+
+The example is one HTML file and one script with no backend of its own: everything it
+does goes through `/k8s` as the signed-in user, and the 403 and 409 it shows are
+Kubernetes' own answers.
 
 ## Principles
 

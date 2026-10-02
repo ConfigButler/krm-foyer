@@ -65,24 +65,30 @@ separate:
 1. **Routing recipes, not hosting.** A Gateway API `HTTPRoute`, an nginx server block and
    a Vite dev-server proxy that put the application and krm-foyer on one origin. These are
    documentation and examples, not code in krm-foyer.
-2. **A tiny browser helper**, served by krm-foyer as a plain ES module. It covers four
-   calls: `session()`, `login(returnTo)`, `logout()` and `requireSession()`, including the
-   CSRF header. `requireSession()` sends a signed-out page to login, for deployments whose
-   ingress cannot run the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages). Every
-   application needs these, and they are easy to get subtly wrong. There is no npm
+2. **A tiny browser helper** at `/_foyer/foyer.js`, served by krm-foyer as a plain ES
+   module ([source](../internal/pages/assets/foyer.js)). It has five calls: `session()`,
+   `login(returnTo)`, `logout(next)`, `requireSession()` and `k8s(path, options)`. The
+   last puts the CSRF header on every change and reports each answer as an outcome
+   (`ok`, `signed-out`, `refused`, `missing`, `conflict`, `invalid`, `error`) with the
+   `Status` message, without retrying anything Kubernetes answered. Its one resend is of
+   a change krm-foyer refused for a stale CSRF token, which never reached Kubernetes.
+   `requireSession()` sends a signed-out page to login, for deployments whose ingress
+   cannot run the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages).
+   Every application needs these, and they are easy to get subtly wrong. There is no npm
    package until someone needs one outside a krm-foyer origin.
-3. **`examples/hello/`**: one HTML file and one script. It signs in, lists one
-   resource through `/k8s` and follows it live through `/stream` with krm-stream's ESM
-   bundle, with no bundler, served by the same nginx container the e2e fixture puts in
-   front of krm-foyer. It is the copy-and-edit starting point, and the browser test
-   that proves the helper works end to end.
+3. **[`examples/hello/`](../examples/hello)** (exists): one HTML file, one script and a
+   stylesheet, with no bundler and no backend of its own. It signs in, lists, creates and
+   edits Notes (a small custom resource) through `/k8s`, and shows Kubernetes' 403 and 409
+   answers as they are. An nginx front door serves it at `/` and sends krm-foyer's
+   prefixes to krm-foyer, on one origin. `task demo` starts it in a disposable cluster,
+   and the e2e suite's browser specs drive it in Chromium. It reloads on request; following
+   changes live through `/stream` comes with streams.
 
-Build them in that order. The start page and the auth pages come first, because the
-OIDC work needs them anyway. The example comes last, because it depends on the proxy and
-the stream being real.
+The start page and the auth pages came first, because the OIDC work needed them anyway.
+The routing recipes come with the ingress work.
 
 ## Revisit when
 
 - Two adopters write the same page themselves. That is a sign it belongs in the service.
-- The helper grows past session handling. Then it belongs in its own package, or in
-  krm-stream.
+- The helper grows past the session and the proof every request needs. Then it belongs
+  in its own package, or in krm-stream.
