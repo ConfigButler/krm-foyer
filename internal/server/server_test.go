@@ -157,3 +157,28 @@ func TestAuthRoutes(t *testing.T) {
 		t.Error("the start page offers sign-in without login configured")
 	}
 }
+
+// /stream/v1 reaches the stream with any method, so that it answers the ones it
+// refuses itself; no other path under /stream does.
+func TestStreamRoute(t *testing.T) {
+	var reached []string
+	h := New(Config{Version: "test", Stream: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		reached = append(reached, r.Method+" "+r.URL.Path)
+	})})
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), method, "/stream/v1?resource=notes&version=v1", nil))
+	}
+	for _, target := range []string{"/stream", "/stream/", "/stream/v1/", "/stream/v2"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s = %d, want 404", target, rec.Code)
+		}
+	}
+	if got := strings.Join(reached, ", "); got != "GET /stream/v1, POST /stream/v1" {
+		t.Errorf("reached %s", got)
+	}
+	if rec := get(t, "/stream/v1"); rec.Code != http.StatusNotFound {
+		t.Errorf("without streams, /stream/v1 = %d", rec.Code)
+	}
+}

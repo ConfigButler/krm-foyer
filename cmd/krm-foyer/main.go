@@ -26,6 +26,7 @@ import (
 	"github.com/ConfigButler/krm-foyer/internal/proxy"
 	"github.com/ConfigButler/krm-foyer/internal/server"
 	"github.com/ConfigButler/krm-foyer/internal/session"
+	"github.com/ConfigButler/krm-foyer/internal/stream"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -254,8 +255,12 @@ func handler(cfg config, logger *slog.Logger, m *metrics.Metrics) (http.Handler,
 	if err != nil {
 		return nil, nil, err
 	}
+	streams, err := stream.New(stream.Config{Server: l.kubernetes.Server, RootCAs: l.kubernetes.RootCAs, Gate: g})
+	if err != nil {
+		return nil, nil, err
+	}
 	return server.New(server.Config{
-		Version: version, Kubernetes: api, Auth: login.Handler(), Ready: login.Ready,
+		Version: version, Kubernetes: api, Stream: streams, Auth: login.Handler(), Ready: login.Ready,
 	}), login.Run, nil
 }
 

@@ -237,8 +237,10 @@ Security items need tests that try to get past the boundary.
 
 ### Streams
 
-- [ ] Host krm-stream, with RBAC deciding what a user may watch; which resources use a
-      shared watch is configuration for efficiency, not access
+- [x] Host krm-stream, with RBAC deciding what a user may watch, and no list of
+      resources in krm-foyer (unit tests; e2e with the audit log as witness, checked by
+      deploying a krm-foyer that opens watches as its service account). Which resources
+      use a shared watch will be configuration for efficiency, not access
 - [ ] User-authenticated watches first, with the hello example following its notes live
       (step 5)
 - [ ] Bounds on browser subscriptions and on upstream watches, counted separately

@@ -122,6 +122,19 @@ bugs are here, where they are cheap to find:
   bound and cancelled at the API server. The property is checked from the browser's
   side over random sizes, chunkings and encodings: a response that ends cleanly is
   complete and within the bound, and none ever delivers more.
+- **Streams** ([internal/stream](../internal/stream)) run krm-stream's gateway against an
+  `httptest` API server that answers a streaming list. A stream opens its watch with
+  its own session's token and nothing the browser sent but its `User-Agent`, twenty
+  streams of two sessions open at once included; without a session it is krm-foyer's
+  401 and reaches nothing; a method other than `GET` is krm-foyer's 405. The upstream is
+  pinned and verified. Scopes the gateway will not serve (an API-server address, a
+  token, another target, a malformed name) end with a terminal refusal before anything
+  is sent. Kubernetes' 403, 401 and 404 keep their meaning, with no address inside the
+  cluster in what the browser reads, and an API server that cannot answer is retried
+  with a wait that doubles. A stream whose session ends is aborted and its watch
+  cancelled, even where no write deadline can be set. Each was seen to fail against a
+  build broken on purpose; the one mutation no test sees is the message of a retryable
+  error, which krm-stream v0.4.0 never sends.
 - **Login** ([internal/auth](../internal/auth)) runs against a fake issuer in the test
   that behaves like a strict one (PKCE enforced, codes single use) unless told to
   misbehave: a token for another audience or issuer, expired, signed by a stranger, with
@@ -181,6 +194,13 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   never refuses failed. A list the API server compresses to a few hundred bytes, but
   that decodes to 200 KiB, never passes the brief instance's 128 KiB bound as a complete
   answer, which a build without the byte bound failed.
+- **Streams** (in the `foyer` label): bob streams the notes RBAC lets him read, gets the
+  snapshot and then a change made while he watches, and the audit log names bob, and
+  nobody else, for every request of that stream. alice, with no grant, gets a terminal
+  `FORBIDDEN` with Kubernetes' own message, and the audit log shows the API server
+  refused alice herself. Without a session there is a 401 and no request at all. A
+  build that opened watches with its service account, cluster-admin in the fixture,
+  failed the first two.
 - **The hello example** (label `browser`) is the claim that krm-foyer is usable, not
   only correct. Chromium ([chromedp/headless-shell](https://hub.docker.com/r/chromedp/headless-shell),
   pinned by digest, driven from Go with chromedp) runs in the network namespace of the

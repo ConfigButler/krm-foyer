@@ -15,6 +15,9 @@ type Config struct {
 	Version string
 	// Kubernetes serves /k8s: the API proxy. Nil leaves /k8s unrouted.
 	Kubernetes http.Handler
+	// Stream serves /stream/v1: live resources from krm-stream. Nil leaves it
+	// unrouted.
+	Stream http.Handler
 	// Auth serves /auth/: login, logout and the session. Nil leaves it unrouted.
 	Auth http.Handler
 	// Ready reports whether krm-foyer can serve logins yet. Nil means always.
@@ -38,6 +41,11 @@ func New(cfg Config) http.Handler {
 	})
 	if cfg.Auth != nil {
 		mux.Handle("/auth/", cfg.Auth)
+	}
+	if cfg.Stream != nil {
+		// Every method, so that the stream answers one that is not a GET with an
+		// interruption of its own rather than ServeMux's plain 405.
+		mux.Handle("/stream/v1", cfg.Stream)
 	}
 	// /_foyer/ is the one path prefix krm-foyer reserves for its own files, so it
 	// never collides with an application served on the same origin.
