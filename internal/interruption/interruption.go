@@ -28,6 +28,9 @@ type Interruption struct {
 	Message string
 	// Causes go into the Status details, for example the target of a redirect.
 	Causes []Cause
+	// RetryAfter, when positive, is sent as Retry-After in seconds, in both forms:
+	// how long to wait before the request can succeed.
+	RetryAfter int
 }
 
 // Cause is a Kubernetes StatusCause.
@@ -106,6 +109,7 @@ func (i *Interruption) Write(w http.ResponseWriter) {
 	h := w.Header()
 	SetHeaders(h)
 	h.Set(Header, i.Reason)
+	i.setRetryAfter(h)
 	h.Set("Content-Type", "application/json")
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(i.Status)
@@ -123,6 +127,7 @@ var titles = map[string]string{
 	"CSRFProofRequired":         "Refused by krm-foyer",
 	"CrossOriginRequest":        "Refused by krm-foyer",
 	"TooManyConcurrentRequests": "Too many requests at once",
+	"RequestRateExceeded":       "Too many requests",
 }
 
 // page answers with the interruption as a page, for a person browsing.
@@ -151,5 +156,12 @@ func (i *Interruption) page(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set(Header, i.Reason)
+	i.setRetryAfter(w.Header())
 	pages.Render(w, i.Status, "interruption.html", data)
+}
+
+func (i *Interruption) setRetryAfter(h http.Header) {
+	if i.RetryAfter > 0 {
+		h.Set("Retry-After", strconv.Itoa(i.RetryAfter))
+	}
 }

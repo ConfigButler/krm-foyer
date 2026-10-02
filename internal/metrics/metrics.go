@@ -32,6 +32,10 @@ const (
 	BoundResponseDuration          = "response_duration"
 	BoundSessionConcurrentRequests = "session_concurrent_requests"
 	BoundConcurrentRequests        = "concurrent_requests"
+	// BoundSessionRequestRate has a limit only: the rate a session's burst refills
+	// at. Usage and refusals are counted against the burst.
+	BoundSessionRequestRate  = "session_request_rate"
+	BoundSessionRequestBurst = "session_request_burst"
 )
 
 // The causes of krm_foyer_responses_cut_short_total: why krm-foyer cut a response

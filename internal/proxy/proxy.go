@@ -70,7 +70,19 @@ type Config struct {
 	// may be in flight at once for one session, and for this replica. Zero means
 	// the defaults below.
 	MaxSessionConcurrentRequests, MaxConcurrentRequests int
+	// SessionRequestRate is how many requests a second one session may send, in
+	// bursts of up to SessionRequestBurst. Zero means the defaults below.
+	SessionRequestRate  float64
+	SessionRequestBurst int
+	// Now is the clock the request rate is measured by. Nil means time.Now.
+	Now func() time.Time
 }
+
+// The request rate when none is configured. See docs/bounds.md for why.
+const (
+	DefaultSessionRequestRate  = 20
+	DefaultSessionRequestBurst = 100
+)
 
 // The concurrency limits when none is configured. See docs/bounds.md for why.
 const (
@@ -95,6 +107,7 @@ type Proxy struct {
 	checkEvery  time.Duration
 	maxDuration time.Duration
 	concurrency *concurrency
+	rate        *rate
 }
 
 // New returns a proxy to cfg.Server.
@@ -135,6 +148,16 @@ func New(cfg Config) (*Proxy, error) {
 	if perSession < 0 || total < 0 {
 		return nil, fmt.Errorf("concurrency limits must be positive, got %d per session and %d in all", perSession, total)
 	}
+	perSecond, burst := cfg.SessionRequestRate, cfg.SessionRequestBurst
+	if perSecond == 0 {
+		perSecond = DefaultSessionRequestRate
+	}
+	if burst == 0 {
+		burst = DefaultSessionRequestBurst
+	}
+	if perSecond < 0 || burst < 0 {
+		return nil, fmt.Errorf("the request rate must be positive, got %v a second in bursts of %d", perSecond, burst)
+	}
 	return &Proxy{
 		server: url.URL{Scheme: cfg.Server.Scheme, Host: cfg.Server.Host},
 		transport: &http.Transport{
@@ -155,6 +178,7 @@ func New(cfg Config) (*Proxy, error) {
 		checkEvery:  checkEvery,
 		maxDuration: maxDuration,
 		concurrency: newConcurrency(perSession, total, cfg.Metrics),
+		rate:        newRate(perSecond, burst, cfg.Now, cfg.Metrics),
 	}, nil
 }
 
@@ -207,6 +231,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if refused != nil {
 		p.interrupt(w, r, refused)
+		return
+	}
+	if ok, wait := p.rate.allow(cred.Session); !ok {
+		p.interrupt(w, r, p.rate.refuse(wait))
 		return
 	}
 	release, refused := p.concurrency.acquire(cred.Session)

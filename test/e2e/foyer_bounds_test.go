@@ -189,4 +189,37 @@ var _ = Describe("krm-foyer's bounds", Label("foyer"), func() {
 		eventually(ctx, func() int { return alice.viaFoyer(ctx, http.MethodGet, path, nil, nil).Code }).
 			Should(Equal(http.StatusOK))
 	})
+
+	It("refuses a session sending faster than its rate with its own 429 and Retry-After, before it reaches the API server", func(ctx SpecContext) {
+		ns := fx.namespace()
+		fx.grant(ns, aliceK8sName, "configmaps", "get", "list")
+		alice := signInBrief(ctx, alice)
+		reached := `krm_foyer_bound_reached_total{bound="session_request_burst"}`
+		before := fx.briefMetric(reached)
+		Expect(fx.briefMetric(`krm_foyer_bound_limit{bound="session_request_burst"}`)).To(Equal(10.0))
+		Expect(fx.briefMetric(`krm_foyer_bound_limit{bound="session_request_rate"}`)).To(Equal(1.0))
+
+		// The brief instance lets a session send ten requests at once, then one a
+		// second. Twenty in a row take well under ten seconds.
+		path := "/api/v1/namespaces/" + ns + "/configmaps"
+		var refused *answer
+		for i := range 20 {
+			a := alice.viaFoyer(ctx, http.MethodGet, path, nil, nil)
+			if i < 10 {
+				Expect(a.Code).To(Equal(http.StatusOK), "request %d of the burst: %s", i+1, a.Body)
+			} else if a.Code == http.StatusTooManyRequests && refused == nil {
+				refused = &a
+			}
+		}
+		Expect(refused).NotTo(BeNil(), "twenty requests in a row were all let through")
+		Expect(refused.Header.Get("Krm-Foyer-Interruption")).To(Equal("RequestRateExceeded"))
+		Expect(refused.Header.Get("Retry-After")).To(Equal("1"))
+		Expect(refused.status().Reason).To(Equal("RequestRateExceeded"))
+		assertNeverAudited(ctx, refused.Marker)
+		Expect(fx.briefMetric(reached)).To(BeNumerically(">", before))
+
+		By("and lets the session through again after Retry-After")
+		time.Sleep(time.Second)
+		Expect(alice.viaFoyer(ctx, http.MethodGet, path, nil, nil).Code).To(Equal(http.StatusOK))
+	})
 })

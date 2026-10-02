@@ -1,6 +1,6 @@
 # A second krm-foyer in the e2e fixture with small bounds: sessions end within a
 # minute, responses within 20 seconds, and a session may have two requests in
-# flight. The specs that wait for a bound to be reached use it. The main instance keeps ordinary timeouts, so no
+# flight and send ten at once, then one a second. The specs that wait for a bound to be reached use it. The main instance keeps ordinary timeouts, so no
 # other spec has to race its own session. It is the same image, certificate, public
 # URL and Dex client as foyer.yaml; deploy-foyer.sh fills in IMAGE and CONFIG_HASH.
 # The suite reaches it on its own NodePort, under the same name.
@@ -51,6 +51,8 @@ spec:
             - -session-check-interval=1s
             - -max-response-duration=20s
             - -max-session-concurrent-requests=2
+            - -session-request-burst=10
+            - -session-request-rate=1
           ports:
             - name: https
               containerPort: 8443

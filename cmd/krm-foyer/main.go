@@ -78,7 +78,8 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		scopes, apiServer, apiServerCA string
 		idle, absolute, checkEvery     time.Duration
 		maxDuration                    time.Duration
-		perSession, inAll              int
+		perSession, inAll, burst       int
+		perSecond                      float64
 	)
 	fs.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
 	fs.StringVar(&cfg.tlsCert, "tls-cert-file", "", "serve TLS with this certificate (PEM); needs -tls-key-file")
@@ -102,6 +103,10 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		"how many requests, watches included, one session may have in flight; more get 429")
 	fs.IntVar(&inAll, "max-concurrent-requests", proxy.DefaultMaxConcurrentRequests,
 		"how many requests, watches included, this replica may have in flight; more get 429")
+	fs.Float64Var(&perSecond, "session-request-rate", proxy.DefaultSessionRequestRate,
+		"how many requests a second one session may send, once its burst is spent; more get 429 with Retry-After")
+	fs.IntVar(&burst, "session-request-burst", proxy.DefaultSessionRequestBurst,
+		"how many requests one session may send at once")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -181,6 +186,10 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		return config{}, fmt.Errorf("-max-session-concurrent-requests and -max-concurrent-requests must be positive, got %d and %d", perSession, inAll)
 	}
 	login.kubernetes.MaxSessionConcurrentRequests, login.kubernetes.MaxConcurrentRequests = perSession, inAll
+	if perSecond <= 0 || burst <= 0 {
+		return config{}, fmt.Errorf("-session-request-rate and -session-request-burst must be positive, got %v and %d", perSecond, burst)
+	}
+	login.kubernetes.SessionRequestRate, login.kubernetes.SessionRequestBurst = perSecond, burst
 	if login.kubernetes.Server, err = url.Parse(apiServer); err != nil {
 		return config{}, fmt.Errorf("-kubernetes-server: %w", err)
 	}
