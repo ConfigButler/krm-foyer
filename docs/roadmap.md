@@ -10,6 +10,8 @@ tries to get past them, against a real API server and Dex, with krm-foyer's serv
 account as cluster-admin bait. Each other requirement becomes a property of krm-foyer
 when its test exists and passes, and not before. Since step 4, every
 [bound](bounds.md) is reached by a test, and an open response ends with its session.
+Since step 5, the hello example follows its notes live through krm-stream, each watch
+opened as the user, and a rehearsal holds 1800 streams of 200 identities on one replica.
 
 ## Order of work
 
@@ -56,7 +58,7 @@ Each step makes pending specs real and ends with `task verify` green.
    special case: krm-foyer does not tell them apart, and no bound needs it to. A bound on
    page size was left out (2026-10-02): it would not reliably bound what a list costs.
    See [bounds](bounds.md).
-5. **Live notes with krm-stream** (was step 6). Moved ahead of refresh and shared
+5. **Live notes with krm-stream** (done; was step 6). Moved ahead of refresh and shared
    storage (2026-10-02), because live state is the experience krm-foyer is for: `/k8s`
    for reads and changes, krm-stream for what changes while a page is open. krm-foyer
    hosts krm-stream with user-authenticated upstream watches, and the hello example
