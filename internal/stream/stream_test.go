@@ -182,7 +182,7 @@ func newFoyer(t *testing.T, api *apiServer, creds gate.Credentials, adjust func(
 	server, _ := url.Parse(api.URL)
 	roots := x509.NewCertPool()
 	roots.AddCert(api.Certificate())
-	cfg := Config{Server: server, RootCAs: roots, MinWatchLife: 50 * time.Millisecond}
+	cfg := Config{Server: server, RootCAs: roots}
 	if adjust != nil {
 		adjust(&cfg, &gcfg)
 	}
@@ -668,8 +668,9 @@ func TestAStreamRecoversWhenItsWatchEnds(t *testing.T) {
 			api := newAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 				if watches.Add(1) == 1 {
 					snapshotOf(w, 10, "before")
-					// A real watch lives for minutes; one that ends at once is failing.
-					time.Sleep(200 * time.Millisecond)
+					// A real watch lives for minutes. krm-stream takes one that ends
+					// within a second of its snapshot for a failing one.
+					time.Sleep(1200 * time.Millisecond)
 					end(w)
 					return
 				}
@@ -749,11 +750,17 @@ func TestARedirectIsNotFollowed(t *testing.T) {
 			defer cancel()
 			s := f.open(ctx, t, notes, nil)
 			e, err := s.next()
-			if err != nil || e.Type != "error" || !e.Terminal {
-				t.Errorf("%+v, %v; want a terminal error", e, err)
+			if err != nil || e.Type != "error" || e.Code != "INTERNAL" || !e.Terminal {
+				t.Errorf("%+v, %v; want a terminal INTERNAL", e, err)
 			}
 			if got := target.rc.reached(); len(got) != 0 {
 				t.Errorf("the redirect was followed, with Authorization %q", got)
+			}
+			if n := len(api.received()); n != 1 {
+				t.Errorf("the watch was opened %d times; a redirect is final", n)
+			}
+			if logs := f.logs.String(); !strings.Contains(logs, `"cause":"redirect"`) {
+				t.Errorf("the redirect was not logged as one: %s", logs)
 			}
 		})
 	}
@@ -885,7 +892,8 @@ func TestAnEndedStreamLeavesNoGoroutines(t *testing.T) {
 // non-terminal UPSTREAM_UNAVAILABLE, with the API server's Retry-After as its hint,
 // and closes after that one attempt. Each retry is then a request of its own, through
 // the gate and its request rate. A watch that ends before its snapshot, or hardly
-// after it, is such a failure too, not a reason to open it again at once.
+// after it, is such a failure too: krm-stream opens it once more on the stream, as
+// it would after a routine end, and the second such end closes it.
 func TestARetryableFailureIsLeftToTheBrowser(t *testing.T) {
 	// The hint in the Status alone: with a Retry-After header, client-go waits and
 	// asks again itself, up to ten times, before the stream hears of it.
@@ -902,6 +910,8 @@ func TestARetryableFailureIsLeftToTheBrowser(t *testing.T) {
 	for name, tc := range map[string]struct {
 		respond http.HandlerFunc
 		hint    int
+		// attempts is how many watches the stream opens; zero means one.
+		attempts int
 	}{
 		"503 at opening":        {respond: status(http.StatusServiceUnavailable, "ServiceUnavailable", "etcd is down at 10.0.0.7")},
 		"429 at opening":        {respond: retryAfter(http.StatusTooManyRequests, "TooManyRequests"), hint: 3000},
@@ -909,12 +919,12 @@ func TestARetryableFailureIsLeftToTheBrowser(t *testing.T) {
 		"429 on the open watch": {respond: watchThen(watchError(http.StatusTooManyRequests, "TooManyRequests", "slow down"))},
 		"ended before its snapshot": {respond: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-		}},
-		"ended right after its snapshot": {respond: func(w http.ResponseWriter, _ *http.Request) { snapshotOf(w, 10, "x") }},
+		}, attempts: 2},
+		"ended right after its snapshot": {respond: func(w http.ResponseWriter, _ *http.Request) { snapshotOf(w, 10, "x") }, attempts: 2},
 		"410 right after its snapshot": {respond: func(w http.ResponseWriter, r *http.Request) {
 			snapshotOf(w, 10, "x")
 			watchError(http.StatusGone, "Expired", "too old resource version")(w)
-		}},
+		}, attempts: 2},
 	} {
 		t.Run(name, func(t *testing.T) {
 			api := newAPIServer(t, tc.respond)
@@ -936,8 +946,9 @@ func TestARetryableFailureIsLeftToTheBrowser(t *testing.T) {
 			if tc.hint != 0 && (last.RetryAfter == nil || *last.RetryAfter != tc.hint) {
 				t.Errorf("retryAfterMs %v, want the API server's %d", last.RetryAfter, tc.hint)
 			}
-			if n := len(api.received()); n != 1 {
-				t.Errorf("%d attempts on one connection; the browser's client retries, not the stream", n)
+			want := max(tc.attempts, 1)
+			if n := len(api.received()); n != want {
+				t.Errorf("%d attempts on one connection, want %d; the browser's client retries, not the stream", n, want)
 			}
 			if strings.Contains(s.raw.String(), "10.0.0.7") {
 				t.Errorf("what the API server said reached the browser: %s", s.raw.String())

@@ -19,7 +19,6 @@ import (
 
 	"github.com/ConfigButler/krm-stream/gateway"
 	"github.com/ConfigButler/krm-stream/gateway/kube"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 
 	"github.com/ConfigButler/krm-foyer/internal/gate"
@@ -37,16 +36,7 @@ type Config struct {
 	// request and response is held to. A stream is cut short by it like any other
 	// response.
 	Gate *gate.Gate
-	// MinWatchLife is how long a watch must stay open after its snapshot for its end
-	// to be the API server's routine timeout, opened again at once. One that ends
-	// sooner is failing, and is left to the browser's client to retry, after a wait.
-	// Zero means DefaultMinWatchLife.
-	MinWatchLife time.Duration
 }
-
-// DefaultMinWatchLife is the MinWatchLife when none is configured. The API server
-// keeps a watch open for half an hour or more.
-const DefaultMinWatchLife = time.Second
 
 // Streams serves /stream/v1. Create it with New.
 type Streams struct {
@@ -54,7 +44,6 @@ type Streams struct {
 	transport http.RoundTripper
 	gate      *gate.Gate
 	logger    *slog.Logger
-	watchLife time.Duration
 }
 
 // New returns streams from cfg.Server.
@@ -65,13 +54,6 @@ func New(cfg Config) (*Streams, error) {
 	}
 	if cfg.Gate == nil {
 		return nil, errors.New("no gate")
-	}
-	watchLife := cfg.MinWatchLife
-	if watchLife == 0 {
-		watchLife = DefaultMinWatchLife
-	}
-	if watchLife < 0 {
-		return nil, fmt.Errorf("the least life of a watch must be positive, got %v", watchLife)
 	}
 	return &Streams{
 		server: url.URL{Scheme: cfg.Server.Scheme, Host: cfg.Server.Host},
@@ -87,9 +69,8 @@ func New(cfg Config) (*Streams, error) {
 			MaxIdleConnsPerHost: 100,
 			IdleConnTimeout:     90 * time.Second,
 		},
-		gate:      cfg.Gate,
-		logger:    cfg.Gate.Logger(),
-		watchLife: watchLife,
+		gate:   cfg.Gate,
+		logger: cfg.Gate.Logger(),
 	}, nil
 }
 
@@ -152,11 +133,20 @@ func project(_ context.Context, _ gateway.Principal, _ gateway.Scope, requested 
 // instead wrote (see package upstream). A recovered resync is routine.
 func (s *Streams) diagnose(d gateway.Diagnostic) {
 	if d.Code == gateway.CodeResyncRequired {
-		s.logger.Debug("stream resynchronised", "cause", upstreamerr.Class(d.Err))
+		s.logger.Debug("stream resynchronised", "cause", class(d.Err))
 		return
 	}
 	s.logger.Warn("API server could not serve a stream", "code", string(d.Code), "terminal", d.Terminal,
-		"cause", upstreamerr.Class(d.Err))
+		"cause", class(d.Err))
+}
+
+// class is upstreamerr.Class, which also names the redirect krm-stream's client
+// refuses as a redirect.
+func class(err error) string {
+	if errors.Is(err, kube.ErrRedirectRefused) {
+		return "redirect"
+	}
+	return upstreamerr.Class(err)
 }
 
 // upstream reaches the API server for one stream, as its user.
@@ -175,30 +165,23 @@ func (u *upstream) backend(_ context.Context, _ string, p gateway.Principal) (ga
 	// Built by hand, with nothing from the environment: no kubeconfig, no in-cluster
 	// service account, no proxy. The token is the user's and only the user's, and goes
 	// to the configured API server alone: client-go would follow a redirect and send
-	// the token along, so its client refuses every redirect, as /k8s does.
+	// the token along, so krm-stream's client refuses every redirect, as /k8s does, and
+	// ends the stream.
 	cfg := &rest.Config{
 		Host:        u.streams.server.String(),
 		BearerToken: cred.Token,
 		Transport:   u.streams.transport,
 		UserAgent:   u.userAgent,
 	}
-	httpClient, err := rest.HTTPClientFor(cfg)
+	kb, err := kube.NewBackendForConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return upstreamerr.ErrRedirect }
-	client, err := dynamic.NewForConfigAndClient(cfg, httpClient)
-	if err != nil {
-		return nil, err
-	}
-	return &backend{streams: u.streams, kube: kube.NewBackend(client)}, nil
+	return &backend{streams: u.streams, kube: kb}, nil
 }
 
-// backend is krm-stream's Kubernetes backend, which maps the API server's answers to
-// the protocol's codes, with two things it does not do: a redirect ends the stream
-// rather than being retried, and a watch that ends before it was of use is a failure
-// rather than a routine end (docs/investigations/krm-stream-feedback.md). It also
-// counts the watches open at the API server.
+// backend is krm-stream's Kubernetes backend, counting the watches open at the API
+// server.
 type backend struct {
 	streams *Streams
 	kube    *kube.Backend
@@ -206,65 +189,20 @@ type backend struct {
 
 func (b *backend) Watch(ctx context.Context, scope gateway.Scope) (gateway.Watcher, error) {
 	w, err := b.kube.Watch(ctx, scope)
-	if errors.Is(err, upstreamerr.ErrRedirect) {
-		return nil, &gateway.StreamError{Code: gateway.CodeInternal, Terminal: true,
-			Message: upstreamerr.ErrRedirect.Error(), Cause: err}
-	}
 	if err != nil {
 		return nil, err
 	}
-	return &watcher{streams: b.streams, Watcher: w, done: b.streams.gate.Metrics().UpstreamWatch()}, nil
+	return &watcher{Watcher: w, done: b.streams.gate.Metrics().UpstreamWatch()}, nil
 }
 
 // watcher passes on an open watch's events, and counts the watch while it is open.
 type watcher struct {
-	streams *Streams
 	gateway.Watcher
 	done func()
 	stop sync.Once
-	// synced is when its snapshot was complete; zero until then.
-	synced time.Time
 }
 
 func (w *watcher) Stop() {
 	w.Watcher.Stop()
 	w.stop.Do(w.done)
-}
-
-func (w *watcher) Next(ctx context.Context) (gateway.WatchEvent, error) {
-	ev, err := w.Watcher.Next(ctx)
-	switch {
-	case ctx.Err() != nil:
-	case err == nil && ev.Type == gateway.WatchBookmark && ev.InitialEventsEnd:
-		w.synced = time.Now()
-	case err == nil && ev.Type == gateway.WatchError && w.early():
-		// The gateway would start a new snapshot at once, on this connection; for a
-		// watch that was of no use yet, the browser's client waits first.
-		var se *gateway.StreamError
-		if ev.Err == nil || errors.As(ev.Err, &se) && se.Code == gateway.CodeResyncRequired {
-			return ev, failing(ev.Err)
-		}
-	case errors.Is(err, gateway.ErrWatchClosed) && w.early():
-		return ev, failing(err)
-	}
-	return ev, err
-}
-
-// early reports whether the watch is ending before its snapshot was complete, or
-// hardly after it: before it was of use.
-func (w *watcher) early() bool {
-	return w.synced.IsZero() || time.Since(w.synced) < w.streams.watchLife
-}
-
-// errEnded is the cause of the answer for a watch that ended before it was of use.
-// It must not wrap gateway.ErrWatchClosed, or a resync: the gateway would read either
-// as a reason to open the watch again at once, on this connection.
-var errEnded = errors.New("the watch ended before it was of use")
-
-// failing is the retryable answer for a watch that ended before it was of use; why it
-// ended is logged by kind (see Streams.diagnose).
-func failing(why error) error {
-	se := gateway.UpstreamUnavailable("the API server ended the watch before it was of use", 0)
-	se.Cause = fmt.Errorf("%w (%s)", errEnded, upstreamerr.Class(why))
-	return se
 }
