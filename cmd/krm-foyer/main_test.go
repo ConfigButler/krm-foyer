@@ -48,7 +48,7 @@ func TestParseConfigWithLogin(t *testing.T) {
 	if l == nil || l.auth.ClientSecret != "s3cret" || l.kubernetes.Server.Host != "kubernetes.default.svc" ||
 		strings.Join(l.auth.Scopes, " ") != "openid email groups" || l.sessions.Origin != "https://foyer.example.test" ||
 		l.sessions.IdleTimeout != time.Hour || l.sessions.AbsoluteTimeout != 8*time.Hour ||
-		l.kubernetes.SessionCheckInterval != 5*time.Second {
+		l.kubernetes.SessionCheckInterval != 5*time.Second || l.kubernetes.MaxResponseDuration != 30*time.Minute {
 		t.Fatalf("%+v", l)
 	}
 }
@@ -71,19 +71,21 @@ func TestParseConfigRefuses(t *testing.T) {
 		files map[string]string
 		want  string
 	}{
-		"no public URL":       {without("-public-url"), secret, "-public-url"},
-		"no issuer":           {without("-oidc-issuer"), secret, "-oidc-issuer"},
-		"no client ID":        {without("-oidc-client-id"), secret, "-oidc-client-id"},
-		"no secret file":      {without("-oidc-client-secret-file"), secret, "-oidc-client-secret-file"},
-		"no API server":       {without("-kubernetes-server"), secret, "-kubernetes-server"},
-		"secret file missing": {loginArgs, nil, "client secret"},
-		"secret file empty":   {loginArgs, map[string]string{"/secret": "\n"}, "empty"},
-		"only a cert":         {[]string{"-tls-cert-file", "/c"}, nil, "-tls-key-file"},
-		"only a key":          {[]string{"-tls-key-file", "/k"}, nil, "-tls-cert-file"},
-		"CA without login":    {[]string{"-kubernetes-ca-file", "/ca"}, nil, "sign-in flags"},
-		"CA not PEM":          {append(loginArgs, "-kubernetes-ca-file", "/ca"), map[string]string{"/secret": "s", "/ca": "nope"}, "no PEM"},
-		"stray argument":      {[]string{"serve"}, nil, "unexpected"},
-		"no session checks":   {append(loginArgs, "-session-check-interval", "0s"), secret, "-session-check-interval"},
+		"no public URL":        {without("-public-url"), secret, "-public-url"},
+		"no issuer":            {without("-oidc-issuer"), secret, "-oidc-issuer"},
+		"no client ID":         {without("-oidc-client-id"), secret, "-oidc-client-id"},
+		"no secret file":       {without("-oidc-client-secret-file"), secret, "-oidc-client-secret-file"},
+		"no API server":        {without("-kubernetes-server"), secret, "-kubernetes-server"},
+		"secret file missing":  {loginArgs, nil, "client secret"},
+		"secret file empty":    {loginArgs, map[string]string{"/secret": "\n"}, "empty"},
+		"only a cert":          {[]string{"-tls-cert-file", "/c"}, nil, "-tls-key-file"},
+		"only a key":           {[]string{"-tls-key-file", "/k"}, nil, "-tls-cert-file"},
+		"CA without login":     {[]string{"-kubernetes-ca-file", "/ca"}, nil, "sign-in flags"},
+		"CA not PEM":           {append(loginArgs, "-kubernetes-ca-file", "/ca"), map[string]string{"/secret": "s", "/ca": "nope"}, "no PEM"},
+		"stray argument":       {[]string{"serve"}, nil, "unexpected"},
+		"no session checks":    {append(loginArgs, "-session-check-interval", "0s"), secret, "-session-check-interval"},
+		"no response duration": {append(loginArgs, "-max-response-duration", "0s"), secret, "-max-response-duration"},
+		"duration past idle":   {append(loginArgs, "-max-response-duration", "1h"), secret, "below -session-idle-timeout"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := parseConfig(tc.args, files(tc.files), io.Discard)

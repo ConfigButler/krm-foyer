@@ -265,7 +265,7 @@ func TestUpstreamErrorAfterACutAborts(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cut := context.WithCancelCause(t.Context())
-	cut(errSessionEnded)
+	cut(cutSessionEnded)
 	r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/k8s/api/v1/configmaps?watch=1", nil)
 	w := httptest.NewRecorder()
 	defer func() {

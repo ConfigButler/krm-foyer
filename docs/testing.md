@@ -101,7 +101,8 @@ bugs are here, where they are cheap to find:
   the session ends, the browser's response is aborted, never ended cleanly, and the
   request to the API server is cancelled. So is a response whose session ends before
   the API server answers, one whose session check hangs, and one whose browser has
-  stopped reading; a live session's response is never touched.
+  stopped reading; a live session's response is never touched. The same holds for a
+  response open longer than its duration.
 - **Login** ([internal/auth](../internal/auth)) runs against a fake issuer in the test
   that behaves like a strict one (PKCE enforced, codes single use) unless told to
   misbehave: a token for another audience or issuer, expired, signed by a stranger, with
@@ -148,13 +149,13 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   the service account's token sent instead of the user's, an unchecked `state`. The
   impersonation spec first passed for the wrong reason (alice could not impersonate
   anyone, so a forwarded header was refused anyway); it now grants alice the right to
-  impersonate bob, so a forwarded header would turn its 403 into a 200. The session
-  lifecycle specs failed against a build whose session check always says live.
+  impersonate bob, so a forwarded header would turn its 403 into a 200.
 - **Bounds and the session lifecycle** (in the `foyer` label) read krm-foyer's metrics
   through the API server's service proxy, as admin. A native watch through `/k8s` is
   aborted when its session logs out and when it expires, and the audit log shows the API
   server completed it within a minute although it asked for `timeoutSeconds=600`: the
-  cancellation reached the API server.
+  cancellation reached the API server. The same is shown for a watch open longer than
+  its duration. Each was seen to fail against a build that did not cut the response.
 - **The hello example** (label `browser`) is the claim that krm-foyer is usable, not
   only correct. Chromium ([chromedp/headless-shell](https://hub.docker.com/r/chromedp/headless-shell),
   pinned by digest, driven from Go with chromedp) runs in the network namespace of the
@@ -229,8 +230,9 @@ before it starts.
 
 Beside it runs a second, brief krm-foyer ([foyer-brief.yaml](../test/e2e/cluster/foyer-brief.yaml)):
 the same image, certificate, public URL and Dex client, but sessions that end 45
-seconds after login and a session check every second. The specs that wait for a session
-to expire use it, on a NodePort of its own, so no other spec has to race its session.
+seconds after login, a session check every second, and responses cut short after 20
+seconds. The specs that wait for a session to expire or a bound to be reached use it, on
+a NodePort of its own, so no other spec has to race its session.
 
 The front door is Gateway API, implemented by Traefik: the official chart, at the version
 gitops-reverser's e2e uses. k3s's own Traefik is disabled, so k3s stays minimal, and

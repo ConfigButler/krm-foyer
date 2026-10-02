@@ -1,5 +1,5 @@
-# A second krm-foyer in the e2e fixture, whose sessions end within a minute, for the
-# specs that wait for one to expire. The main instance keeps ordinary timeouts, so no
+# A second krm-foyer in the e2e fixture, whose sessions end within a minute and whose
+# responses within 20 seconds, for the specs that wait for a bound to be reached. The main instance keeps ordinary timeouts, so no
 # other spec has to race its own session. It is the same image, certificate, public
 # URL and Dex client as foyer.yaml; deploy-foyer.sh fills in IMAGE and CONFIG_HASH.
 # The suite reaches it on its own NodePort, under the same name.
@@ -48,6 +48,7 @@ spec:
             - -session-idle-timeout=45s
             - -session-absolute-timeout=45s
             - -session-check-interval=1s
+            - -max-response-duration=20s
           ports:
             - name: https
               containerPort: 8443

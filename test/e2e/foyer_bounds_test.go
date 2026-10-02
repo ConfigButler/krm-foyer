@@ -103,8 +103,8 @@ var _ = Describe("krm-foyer's bounds", Label("foyer"), func() {
 		It("aborts a native watch when its session expires, and cancels it at the API server", func(ctx SpecContext) {
 			ns := fx.namespace()
 			fx.grant(ns, aliceK8sName, "configmaps", "get", "list", "watch")
-			// The brief instance ends a session 45 seconds after login and checks
-			// open responses every second.
+			// The brief instance ends a session 45 seconds after login, checks open
+			// responses every second, and cuts one short after 20 seconds.
 			beforeLogin := time.Now()
 			alice := signInBrief(ctx, alice)
 			afterLogin := time.Now()
@@ -112,7 +112,7 @@ var _ = Describe("krm-foyer's bounds", Label("foyer"), func() {
 
 			By("opening the watch late in the session, so nothing but its end can close it")
 			select {
-			case <-time.After(time.Until(beforeLogin.Add(30 * time.Second))):
+			case <-time.After(time.Until(beforeLogin.Add(32 * time.Second))):
 			case <-ctx.Done():
 				Fail("interrupted")
 			}
@@ -133,5 +133,29 @@ var _ = Describe("krm-foyer's bounds", Label("foyer"), func() {
 			again := alice.viaFoyer(ctx, http.MethodGet, "/api/v1/namespaces/"+ns+"/configmaps?watch=1&timeoutSeconds=1", nil, nil)
 			Expect(again.Code).To(Equal(http.StatusUnauthorized), "%s", again.Body)
 		})
+	})
+
+	It("aborts a response open longer than its duration, and cancels it at the API server", func(ctx SpecContext) {
+		ns := fx.namespace()
+		fx.grant(ns, aliceK8sName, "configmaps", "get", "list", "watch")
+		alice := signInBrief(ctx, alice)
+		reached := `krm_foyer_bound_reached_total{bound="response_duration"}`
+		cut := `krm_foyer_responses_cut_short_total{cause="response_duration"}`
+		beforeReached, beforeCut := fx.briefMetric(reached), fx.briefMetric(cut)
+		Expect(fx.briefMetric(`krm_foyer_bound_limit{bound="response_duration"}`)).To(Equal(20.0))
+
+		// The watch asks the API server for ten minutes; the brief instance allows 20
+		// seconds.
+		opened := time.Now()
+		w := alice.watch(ctx, "/api/v1/namespaces/"+ns+"/configmaps?watch=1&timeoutSeconds=600")
+		Expect(w.resp.StatusCode).To(Equal(http.StatusOK))
+		Expect(w.event()).To(ContainSubstring(`"type":"ADDED"`))
+		at, err := w.end(40 * time.Second)
+		Expect(err).To(HaveOccurred(), "the watch ended cleanly; a response cut short is aborted")
+		Expect(at.Sub(opened)).To(BeNumerically(">=", 20*time.Second), "cut short before its duration")
+		Expect(at.Sub(opened)).To(BeNumerically("<", 25*time.Second))
+		assertCancelledUpstream(ctx, w.Marker, aliceK8sName)
+		Expect(fx.briefMetric(reached)).To(Equal(beforeReached + 1))
+		Expect(fx.briefMetric(cut)).To(Equal(beforeCut + 1))
 	})
 })

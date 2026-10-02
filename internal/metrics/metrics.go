@@ -21,10 +21,18 @@ type Metrics struct {
 	registry      *prometheus.Registry
 	interruptions *prometheus.CounterVec
 	cutShort      *prometheus.CounterVec
+	boundLimit    *prometheus.GaugeVec
+	boundUsage    *prometheus.HistogramVec
+	boundReached  *prometheus.CounterVec
 }
 
+// The bounds, as the bound label of the krm_foyer_bound_* metrics names them.
+const (
+	BoundResponseDuration = "response_duration"
+)
+
 // The causes of krm_foyer_responses_cut_short_total: why krm-foyer cut a response
-// short.
+// short. A bound that cuts responses short is a cause under its own name.
 const (
 	CauseSessionEnded = "session_ended"
 )
@@ -42,16 +50,33 @@ func New() *Metrics {
 			Name: "krm_foyer_responses_cut_short_total",
 			Help: "Responses krm-foyer cut short, by why: aborted towards the browser and cancelled at the API server.",
 		}, []string{"cause"}),
+		boundLimit: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "krm_foyer_bound_limit",
+			Help: "The configured limit of each bound, in its own unit: seconds, bytes, requests, or requests a second.",
+		}, []string{"bound"}),
+		boundUsage: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "krm_foyer_bound_usage_ratio",
+			Help: "How much of its bound each request or response let through used, from 0 to 1. " +
+				"1 means the whole bound was used, not that anything was refused.",
+			Buckets: []float64{0.1, 0.25, 0.5, 0.75, 0.9, 1},
+		}, []string{"bound"}),
+		boundReached: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "krm_foyer_bound_reached_total",
+			Help: "Requests refused, and responses cut short, because a bound was reached.",
+		}, []string{"bound"}),
 	}
 	m.registry.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.interruptions,
 		m.cutShort,
+		m.boundLimit,
+		m.boundUsage,
+		m.boundReached,
 	)
 	// Every cause is there from the start, so a dashboard shows a zero rather than
 	// no data.
-	for _, cause := range []string{CauseSessionEnded} {
+	for _, cause := range []string{CauseSessionEnded, BoundResponseDuration} {
 		m.cutShort.WithLabelValues(cause)
 	}
 	return m
@@ -76,4 +101,31 @@ func (m *Metrics) CutShort(cause string) {
 		return
 	}
 	m.cutShort.WithLabelValues(cause).Inc()
+}
+
+// BoundLimit records the configured limit of a bound, and starts its count of
+// refusals at zero.
+func (m *Metrics) BoundLimit(bound string, limit float64) {
+	if m == nil {
+		return
+	}
+	m.boundLimit.WithLabelValues(bound).Set(limit)
+	m.boundReached.WithLabelValues(bound)
+}
+
+// BoundUsage records how much of its bound one request or response used, as a
+// fraction of the limit. Past the limit counts as all of it.
+func (m *Metrics) BoundUsage(bound string, ratio float64) {
+	if m == nil {
+		return
+	}
+	m.boundUsage.WithLabelValues(bound).Observe(min(ratio, 1))
+}
+
+// BoundReached counts one request refused, or one response cut short, by a bound.
+func (m *Metrics) BoundReached(bound string) {
+	if m == nil {
+		return
+	}
+	m.boundReached.WithLabelValues(bound).Inc()
 }

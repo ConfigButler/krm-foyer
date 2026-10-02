@@ -77,6 +77,7 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		secretFile, issuerCAFile       string
 		scopes, apiServer, apiServerCA string
 		idle, absolute, checkEvery     time.Duration
+		maxDuration                    time.Duration
 	)
 	fs.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
 	fs.StringVar(&cfg.tlsCert, "tls-cert-file", "", "serve TLS with this certificate (PEM); needs -tls-key-file")
@@ -94,6 +95,8 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	fs.DurationVar(&absolute, "session-absolute-timeout", 8*time.Hour, "end any session this long after login")
 	fs.DurationVar(&checkEvery, "session-check-interval", proxy.DefaultSessionCheckInterval,
 		"how often an open response asks whether its session is still live; it is cut short when not")
+	fs.DurationVar(&maxDuration, "max-response-duration", proxy.DefaultMaxResponseDuration,
+		"how long a response, a watch above all, may stay open; it is cut short then. Below -session-idle-timeout")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -162,6 +165,13 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		return config{}, fmt.Errorf("-session-check-interval must be positive, got %v", checkEvery)
 	}
 	login.kubernetes.SessionCheckInterval = checkEvery
+	// A reconnect counts as use and an open response does not, so a tab that only
+	// watches stays signed in only if its watches end, and reconnect, within the
+	// idle timeout.
+	if maxDuration <= 0 || maxDuration >= idle {
+		return config{}, fmt.Errorf("-max-response-duration must be positive and below -session-idle-timeout (%v), got %v", idle, maxDuration)
+	}
+	login.kubernetes.MaxResponseDuration = maxDuration
 	if login.kubernetes.Server, err = url.Parse(apiServer); err != nil {
 		return config{}, fmt.Errorf("-kubernetes-server: %w", err)
 	}

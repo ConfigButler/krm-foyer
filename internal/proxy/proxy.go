@@ -60,7 +60,14 @@ type Config struct {
 	// SessionCheckInterval is how often an open response asks whether its session
 	// is still live. Zero means DefaultSessionCheckInterval.
 	SessionCheckInterval time.Duration
+	// MaxResponseDuration is how long a response may stay open. Zero means
+	// DefaultMaxResponseDuration.
+	MaxResponseDuration time.Duration
 }
+
+// DefaultMaxResponseDuration is the response duration when none is configured: the
+// shortest time the API server keeps a watch open that names no timeoutSeconds.
+const DefaultMaxResponseDuration = 30 * time.Minute
 
 // DefaultSessionCheckInterval is the session-check interval when none is configured.
 const DefaultSessionCheckInterval = 5 * time.Second
@@ -73,6 +80,7 @@ type Proxy struct {
 	logger      *slog.Logger
 	metrics     *metrics.Metrics
 	checkEvery  time.Duration
+	maxDuration time.Duration
 }
 
 // New returns a proxy to cfg.Server.
@@ -95,6 +103,14 @@ func New(cfg Config) (*Proxy, error) {
 	if checkEvery < 0 {
 		return nil, fmt.Errorf("session-check interval must be positive, got %v", checkEvery)
 	}
+	maxDuration := cfg.MaxResponseDuration
+	if maxDuration == 0 {
+		maxDuration = DefaultMaxResponseDuration
+	}
+	if maxDuration < 0 {
+		return nil, fmt.Errorf("response duration must be positive, got %v", maxDuration)
+	}
+	cfg.Metrics.BoundLimit(metrics.BoundResponseDuration, maxDuration.Seconds())
 	return &Proxy{
 		server: url.URL{Scheme: cfg.Server.Scheme, Host: cfg.Server.Host},
 		transport: &http.Transport{
@@ -113,6 +129,7 @@ func New(cfg Config) (*Proxy, error) {
 		logger:      logger,
 		metrics:     cfg.Metrics,
 		checkEvery:  checkEvery,
+		maxDuration: maxDuration,
 	}, nil
 }
 
@@ -330,51 +347,73 @@ func (w *headWriter) Write(b []byte) (int, error) {
 // Unwrap lets http.ResponseController reach Flush on the real writer.
 func (w *headWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// errSessionEnded is why a response is cut short when its session ends.
-var errSessionEnded = errors.New(metrics.CauseSessionEnded)
+// cutCause is why krm-foyer cut a response short. Its text is the cause label of
+// krm_foyer_responses_cut_short_total.
+type cutCause string
+
+func (c cutCause) Error() string { return string(c) }
+
+const (
+	cutSessionEnded     = cutCause(metrics.CauseSessionEnded)
+	cutResponseDuration = cutCause(metrics.BoundResponseDuration)
+)
 
 // cutShort reports whether krm-foyer cut short the request ctx belongs to, rather
 // than the browser leaving.
 func cutShort(ctx context.Context) bool {
-	return errors.Is(context.Cause(ctx), errSessionEnded)
+	_, ok := context.Cause(ctx).(cutCause)
+	return ok
 }
 
 // guard watches the response to r while it is open, and cuts it short when its
-// session ends: cut cancels the request to the API server, and the browser's
-// response is aborted. A session check that does not answer within an interval
-// counts as a session that has ended. The returned function stops the guard; it
-// returns once the guard has.
+// session ends or its duration is up. A session check that does not answer within
+// an interval counts as a session that has ended. The returned function stops the
+// guard; it returns once the guard has.
 func (p *Proxy) guard(w http.ResponseWriter, r *http.Request, cut context.CancelCauseFunc, live func(context.Context) bool) (stop func()) {
 	ctx := r.Context()
+	start := time.Now()
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
 		tick := time.NewTicker(p.checkEvery)
 		defer tick.Stop()
+		deadline := time.NewTimer(p.maxDuration)
+		defer deadline.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-deadline.C:
+				p.metrics.BoundReached(metrics.BoundResponseDuration)
+				p.cut(w, r, cut, cutResponseDuration)
+				return
 			case <-tick.C:
+				if p.live(ctx, live) || ctx.Err() != nil {
+					continue
+				}
+				p.cut(w, r, cut, cutSessionEnded)
+				return
 			}
-			if p.live(ctx, live) || ctx.Err() != nil {
-				continue
-			}
-			path, _, _ := strings.Cut(r.RequestURI, "?")
-			p.logger.Info("response cut short", "cause", errSessionEnded.Error(), "method", r.Method, "path", path)
-			p.metrics.CutShort(errSessionEnded.Error())
-			cut(errSessionEnded)
-			// The response may be blocked writing to a browser that stopped
-			// reading. A deadline in the past fails that write, so the handler
-			// returns and the abort happens.
-			_ = http.NewResponseController(w).SetWriteDeadline(time.Now())
-			return
 		}
 	}()
 	return func() {
 		cut(nil)
 		<-exited
+		p.metrics.BoundUsage(metrics.BoundResponseDuration, float64(time.Since(start))/float64(p.maxDuration))
 	}
+}
+
+// cut cuts the response to r short, for why: the request to the API server is
+// cancelled, and the browser's response aborted.
+func (p *Proxy) cut(w http.ResponseWriter, r *http.Request, cut context.CancelCauseFunc, why cutCause) {
+	path, _, _ := strings.Cut(r.RequestURI, "?")
+	p.logger.Info("response cut short", "cause", string(why), "method", r.Method, "path", path)
+	p.metrics.CutShort(string(why))
+	cut(why)
+	// The response may be blocked writing to a browser that stopped reading. A
+	// deadline in the past fails that write, so the handler returns and the abort
+	// happens.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now())
 }
 
 // live asks whether a session is still live, giving it one interval to answer.
