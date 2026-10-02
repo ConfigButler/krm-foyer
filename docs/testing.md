@@ -45,7 +45,7 @@ again after the whole suite. It looks for every token the suite obtained, exactl
 anything shaped like a JWT. The second covers the tokens krm-foyer holds and never showed
 the suite: the ID tokens it got by redeeming codes, and its own service-account token.
 krm-foyer holds no refresh token yet, since it asks for no `offline_access`. When refresh
-arrives (roadmap step 5), its session store moves out of process, and the scan also reads
+arrives (roadmap step 6), its session store moves out of process, and the scan also reads
 it as admin for the opaque refresh tokens no pattern can find.
 
 A session ID has exactly one place it belongs: the `Set-Cookie` header that issues it,

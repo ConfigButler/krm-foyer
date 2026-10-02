@@ -47,16 +47,32 @@ Each step makes pending specs real and ends with `task verify` green.
    helper (`/_foyer/foyer.js`) came with it. Browser specs drive that journey in
    Chromium. It reloads on request rather than streaming, and keeps one replica,
    in-memory sessions and a new login when the ID token expires.
-4. **Bounds**, before anyone runs krm-foyer for real: page size, response bytes (counted
-   decoded), request rate, watch duration and concurrent native watches, each with a test
-   that reaches it. Until this step is done, no release is fit for a cluster that matters.
-5. **Refresh and shared session storage, when the demo shows the need** (was step 2b):
-   refresh serialized per session and bounded, a refused refresh ending the session, the
-   disablement bound measured for Dex, and a shared store so more than one replica
-   works. The token scan then also reads the store, for tokens krm-foyer obtained by
-   refresh.
-6. **Streams**, with their own bound on concurrent streams. The example then follows
-   its notes live instead of reloading.
+4. **Bounds**, before anyone runs krm-foyer for real: the request rate per session,
+   concurrent requests per session and per replica, response duration and response
+   bytes (counted decoded), each configurable with a documented default and a test that
+   reaches it. Every open response ends when its session ends, at logout or expiry, and
+   is cancelled at the API server, proved against the real cluster. Metrics show how
+   close real traffic comes to each limit. Native watches stay open and are not a
+   special case: krm-foyer does not tell them apart, and no bound needs it to. A bound on
+   page size was left out (2026-10-02): it would not reliably bound what a list costs.
+   See [bounds](bounds.md). Until this step is done, no release is fit for a cluster
+   that matters.
+5. **Live notes with krm-stream** (was step 6). Moved ahead of refresh and shared
+   storage (2026-10-02), because live state is the experience krm-foyer is for: `/k8s`
+   for reads and changes, krm-stream for what changes while a page is open. krm-foyer
+   hosts krm-stream with user-authenticated upstream watches, and the hello example
+   follows its notes live instead of reloading. Its bounds come with it: browser
+   subscriptions and upstream watches counted separately (with sharing, several
+   subscriptions use one upstream watch, and the `/k8s` bounds do not cover watches
+   krm-stream opens itself), subscriptions closed when their session ends, and
+   recovery after a disconnect tested. The rehearsal with 200 identities measures what
+   one replica holds, which the per-replica defaults in [bounds](bounds.md) only
+   assume.
+6. **Refresh and shared session storage, when the demo shows the need** (was step 5, and
+   before that 2b): refresh serialized per session and bounded, a refused refresh ending
+   the session, the disablement bound measured for Dex, and a shared store so more than
+   one replica works. The token scan then also reads the store, for tokens krm-foyer
+   obtained by refresh.
 7. **An example domain** with pending, accepted, rejected and failed outcomes, and a
    second frontend on a different API group, with no application-specific code in
    krm-foyer. Then measure the operational cost against keeping auth and transport in
@@ -92,7 +108,7 @@ Security items need tests that try to get past the boundary.
 - [x] The `foyer` specs for step 2 made real: login, identity, differential answers,
       RBAC changes, watches, path and subresource refusals, CSRF, logout and the token
       scan, each checked by deploying a krm-foyer broken on purpose
-- [ ] The remaining `foyer` specs: refusal of a refresh (step 5), the ingress (later)
+- [ ] The remaining `foyer` specs: refusal of a refresh (step 6), the ingress (later)
 - [x] Browser e2e: log in, read, create, edit, get refused with 403, hit a 409, log out,
       and no credential within the page's reach. Chromium driven from the Go suite
       with chromedp, rather than Playwright: no Node or npm in CI, one language for the
@@ -126,7 +142,8 @@ Security items need tests that try to get past the boundary.
 - [ ] Behind an ingress: the public URL from configuration and no trust in `Host` or
       `X-Forwarded-*`, with one e2e spec running nginx in front. See [ingress](ingress.md)
 - [ ] Behind an ingress with re-encryption: the ingress verifies krm-foyer's certificate
-- [ ] A NetworkPolicy in the chart that admits only the ingress to krm-foyer's port
+- [ ] A NetworkPolicy in the chart that admits only the ingress to krm-foyer's port, and
+      only the monitoring system to the metrics port
 - [ ] Helm chart values for both models
 - [ ] Routing recipes for one shared domain: a Gateway API `HTTPRoute`, an nginx server
       block and a Vite dev-server proxy
@@ -160,7 +177,7 @@ Security items need tests that try to get past the boundary.
       the audit log names the user for every request with one
 - [x] A test proves that no response, on any route, and no log line contains a token
       krm-foyer holds, a session ID or a client secret
-- [ ] The same for tokens obtained by refresh, read from the session store (step 5)
+- [ ] The same for tokens obtained by refresh, read from the session store (step 6)
 - [x] Upstream bodies reach the browser decoded: the browser's `Accept-Encoding` is
       dropped, and a gzip answer from the API server arrives uncompressed without
       `Content-Encoding`
@@ -177,8 +194,8 @@ Security items need tests that try to get past the boundary.
       (unit tests against an issuer that misbehaves on request; e2e in step 2)
 - [x] Opaque server-side sessions: rotated at login, with idle and absolute expiry, and
       ended with the ID token while there is no refresh (unit tests; e2e in step 2)
-- [ ] Refresh is serialized per session and bounded (step 5)
-- [ ] A refused refresh ends the session at once: 401s, and its streams close (step 5)
+- [ ] Refresh is serialized per session and bounded (step 6)
+- [ ] A refused refresh ends the session at once: 401s, and its streams close (step 6)
 - [ ] The disablement bound measured for Dex in the fixture (remove a user, time the
       refused refresh), and documented per issuer configuration; elsewhere the documented
       bound is the absolute session expiry
@@ -192,7 +209,7 @@ Security items need tests that try to get past the boundary.
 - [ ] `/_foyer/access`: the rules for a namespace from a SelfSubjectRulesReview, and a
       "can I?" form answered by a SelfSubjectAccessReview. See
       [what may I do](design.md#what-may-i-do)
-- [ ] Shared session storage, so more than one replica works (step 5)
+- [ ] Shared session storage, so more than one replica works (step 6)
 - [ ] The [session lifecycle](design.md#session-lifecycle) bounds, each with a test:
       logout seen by every replica at once, logout racing a refresh, the session store
       unavailable, and a stream open across logout and expiry
@@ -205,24 +222,34 @@ Security items need tests that try to get past the boundary.
 - [ ] Mutations are never replayed, including after the session is refreshed
 - [x] Native watches and logs stream without buffering, and cancellation reaches the
       upstream
-- [ ] Bounds on page size, response bytes, request rate, watch duration and concurrent
-      streams (step 4)
+- [ ] [Bounds](bounds.md) on the request rate per session, concurrent requests per
+      session and per replica, response duration and response bytes, each reached by a
+      test (step 4)
+- [ ] A response cut short by a bound or by the end of its session is aborted, never
+      ended cleanly, and cancelled at the API server (unit tests over HTTP/1.1 and
+      HTTP/2, and e2e with the audit log as witness)
 
 ### Streams
 
 - [ ] Host krm-stream, with RBAC deciding what a user may watch; which resources use a
       shared watch is configuration for efficiency, not access
-- [ ] User-authenticated watches first
+- [ ] User-authenticated watches first, with the hello example following its notes live
+      (step 5)
+- [ ] Bounds on browser subscriptions and on upstream watches, counted separately
 - [ ] Shared watches with per-subscriber SubjectAccessReview and bounded rechecks
 - [ ] A stream ends when its session or its token expires, whichever comes first, and
       logout closes that session's streams
-- [ ] A rehearsal with 200 identities, as a repeatable test
+- [ ] A rehearsal with 200 identities, as a repeatable test, which also sets the
+      per-replica defaults in [bounds](bounds.md)
 
 ### Seeing what happened
 
 - [ ] One log line per refusal (policy denial, upstream 401, 403, 409 or 422) with
       subject, route and reason
-- [ ] Metrics for requests, refusals, active sessions and active streams
+- [ ] Metrics on every bound, requests in flight, why responses are cut short, and
+      interruptions by reason, on a listener of their own (step 4; see
+      [metrics](bounds.md#metrics))
+- [ ] Metrics for requests and active sessions
 
 ### Making it easy for others
 
