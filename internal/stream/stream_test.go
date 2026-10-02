@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -147,22 +148,36 @@ func status(code int, reason, message string) http.HandlerFunc {
 
 type foyer struct {
 	url  string
-	logs *strings.Builder
+	logs *lockedLog
+}
+
+// lockedLog keeps what krm-foyer logs, for a test to read while it may still be
+// writing.
+type lockedLog struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 // newFoyer serves streams from api behind a gate with creds; adjust changes the
 // streams' configuration and the gate's.
 func newFoyer(t *testing.T, api *apiServer, creds gate.Credentials, adjust func(*Config, *gate.Config)) foyer {
 	t.Helper()
-	logs := &strings.Builder{}
-	var mu sync.Mutex
+	logs := &lockedLog{}
 	gcfg := gate.Config{
 		Credentials: creds, SessionCheckInterval: checkEvery,
-		Logger: slog.New(slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
-			mu.Lock()
-			defer mu.Unlock()
-			return logs.Write(p)
-		}), nil)),
+		Logger: slog.New(slog.NewJSONHandler(logs, nil)),
 	}
 	server, _ := url.Parse(api.URL)
 	roots := x509.NewCertPool()
@@ -184,10 +199,6 @@ func newFoyer(t *testing.T, api *apiServer, creds gate.Credentials, adjust func(
 	t.Cleanup(front.Close)
 	return foyer{url: front.URL, logs: logs}
 }
-
-type writerFunc func([]byte) (int, error)
-
-func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 // event is one krm-stream event, as the browser receives it.
 type event struct {
@@ -684,6 +695,8 @@ func TestAStreamRecoversWhenItsWatchEnds(t *testing.T) {
 			api := newAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 				if watches.Add(1) == 1 {
 					snapshotOf(w, 10, "before")
+					// A real watch lives for minutes; one that ends at once is failing.
+					time.Sleep(200 * time.Millisecond)
 					end(w)
 					return
 				}
@@ -715,5 +728,217 @@ func TestAStreamRecoversWhenItsWatchEnds(t *testing.T) {
 				t.Errorf("a routine end of a watch was logged as a failure: %s", logs)
 			}
 		})
+	}
+}
+
+// recorder is a server that should never be reached, and records what reached it.
+type recorder struct {
+	mu   sync.Mutex
+	auth []string
+}
+
+func (rc *recorder) ServeHTTP(_ http.ResponseWriter, r *http.Request) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	rc.auth = append(rc.auth, r.Header.Get("Authorization"))
+}
+
+func (rc *recorder) reached() []string {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return append([]string(nil), rc.auth...)
+}
+
+// A redirect from the API server is not followed, as /k8s does not follow one: not to
+// another host over https, and not to plain http. The token never leaves for anywhere
+// but the configured API server, and the stream ends saying why.
+func TestARedirectIsNotFollowed(t *testing.T) {
+	elsewhereTLS := &recorder{}
+	tlsServer := httptest.NewTLSServer(elsewhereTLS) // the same certificate as the API server's
+	t.Cleanup(tlsServer.Close)
+	elsewherePlain := &recorder{}
+	plainServer := httptest.NewServer(elsewherePlain)
+	t.Cleanup(plainServer.Close)
+
+	for name, target := range map[string]struct {
+		url string
+		rc  *recorder
+	}{
+		"to another https server": {tlsServer.URL, elsewhereTLS},
+		"to plain http":           {plainServer.URL, elsewherePlain},
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := newAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.url+r.URL.RequestURI(), http.StatusTemporaryRedirect) //nolint:gosec // the hostile API server under test redirects on purpose
+			})
+			f := newFoyer(t, api, credentials{token: userToken}, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			s := f.open(ctx, t, notes, nil)
+			e, err := s.next()
+			if err != nil || e.Type != "error" || !e.Terminal {
+				t.Errorf("%+v, %v; want a terminal error", e, err)
+			}
+			if got := target.rc.reached(); len(got) != 0 {
+				t.Errorf("the redirect was followed, with Authorization %q", got)
+			}
+		})
+	}
+}
+
+// watchThen answers a streaming list of the two notes, then whatever then writes.
+func watchThen(then func(w http.ResponseWriter)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		snapshotOf(w, 10, "note first")
+		then(w)
+		_ = http.NewResponseController(w).Flush()
+		<-r.Context().Done()
+	}
+}
+
+// watchError writes an ERROR event carrying a Kubernetes Status, as the API server
+// sends one on an open watch.
+func watchError(code int, reason, message string) func(w http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "ERROR", "object": map[string]any{
+			"kind": "Status", "apiVersion": "v1", "status": "Failure",
+			"reason": reason, "code": code, "message": message,
+		}})
+	}
+}
+
+// Kubernetes' refusals on an open watch end the stream with their meaning, as at
+// opening: a 403 is a terminal FORBIDDEN with Kubernetes' message, a 401 a terminal
+// UNAUTHENTICATED, and the watch is not opened again.
+func TestARefusalOnAnOpenWatchEndsTheStream(t *testing.T) {
+	const forbidden = `notes.hello.krm-foyer.example is forbidden: User "oidc:carol@example.com" cannot watch resource "notes"`
+	for name, tc := range map[string]struct {
+		then    func(http.ResponseWriter)
+		code    string
+		message string
+	}{
+		"403": {watchError(http.StatusForbidden, "Forbidden", forbidden), "FORBIDDEN", forbidden},
+		"401": {watchError(http.StatusUnauthorized, "Unauthorized", "Unauthorized"), "UNAUTHENTICATED", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := newAPIServer(t, watchThen(tc.then))
+			f := newFoyer(t, api, credentials{token: userToken}, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			s := f.open(ctx, t, notes, nil)
+			s.until(t, "synced")
+			e, err := s.next()
+			if err != nil || e.Type != "error" || e.Code != tc.code || !e.Terminal {
+				t.Fatalf("%+v, %v; want a terminal %s", e, err, tc.code)
+			}
+			if tc.message != "" && e.Message != tc.message {
+				t.Errorf("message %q, want Kubernetes' own %q", e.Message, tc.message)
+			}
+			if n := len(api.received()); n != 1 {
+				t.Errorf("the watch was opened %d times; a refusal is final", n)
+			}
+		})
+	}
+}
+
+// A watch that fails while open, or ends before its snapshot is complete, is opened
+// again only after a wait that grows, as a watch that cannot be opened is. A 410 Gone
+// is not a failure: it is opened again at once, and its stream recovers (see
+// TestAStreamRecoversWhenItsWatchEnds).
+func TestAFailingOpenWatchIsRetriedWithBackoff(t *testing.T) {
+	for name, respond := range map[string]http.HandlerFunc{
+		"500 on the open watch": watchThen(watchError(http.StatusInternalServerError, "InternalError", "etcd is down")),
+		"429 on the open watch": watchThen(watchError(http.StatusTooManyRequests, "TooManyRequests", "slow down")),
+		"ended before its snapshot": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := newAPIServer(t, respond)
+			f := newFoyer(t, api, credentials{token: userToken}, nil) // first wait 50ms
+			ctx, cancel := context.WithTimeout(t.Context(), 1200*time.Millisecond)
+			defer cancel()
+			s := f.open(ctx, t, notes, nil)
+			for {
+				e, err := s.next()
+				if err != nil {
+					break
+				}
+				if e.Terminal {
+					t.Fatalf("%+v; a failure that may pass is not a reason to give up", e)
+				}
+			}
+			// 50ms doubling: about five attempts in 1.2s. Without a wait, hundreds.
+			if n := len(api.received()); n < 3 || n > 7 {
+				t.Errorf("%d attempts in 1.2s, want about 5", n)
+			}
+		})
+	}
+}
+
+// What the API server says when it fails is never logged as it is: it is not
+// krm-foyer's text, and it could hold anything, the token it was sent among it.
+func TestFailuresAreLoggedWithoutTheirText(t *testing.T) {
+	echo := func(w http.ResponseWriter, r *http.Request) {
+		status(http.StatusServiceUnavailable, "ServiceUnavailable", "you sent "+r.Header.Get("Authorization"))(w, r)
+	}
+	for name, respond := range map[string]http.HandlerFunc{
+		"a Status at opening": echo,
+		"a Status on the open watch": func(w http.ResponseWriter, r *http.Request) {
+			watchThen(watchError(http.StatusInternalServerError, "InternalError", "you sent "+r.Header.Get("Authorization")))(w, r)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := newAPIServer(t, respond)
+			f := newFoyer(t, api, credentials{token: userToken}, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+			defer cancel()
+			s := f.open(ctx, t, notes, nil)
+			for {
+				if _, err := s.next(); err != nil {
+					break
+				}
+			}
+			if strings.Contains(f.logs.String(), userToken) {
+				t.Errorf("the token reached krm-foyer's log: %s", f.logs.String())
+			}
+			if strings.Contains(s.raw.String(), userToken) {
+				t.Errorf("the token reached the browser: %s", s.raw.String())
+			}
+		})
+	}
+}
+
+// A stream leaves nothing behind when it ends, even while the API server is still
+// sending: every goroutine it started is gone once its browser is.
+func TestAnEndedStreamLeavesNoGoroutines(t *testing.T) {
+	api := newAPIServer(t, watchThen(func(w http.ResponseWriter) {
+		// Bookmarks, as the API server sends them, faster than anyone reads them.
+		for range 10000 {
+			if json.NewEncoder(w).Encode(map[string]any{"type": "BOOKMARK", "object": map[string]any{
+				"apiVersion": "hello.krm-foyer.example/v1", "kind": "Note",
+				"metadata": map[string]any{"resourceVersion": "99"},
+			}}) != nil {
+				return
+			}
+		}
+	}))
+	f := newFoyer(t, api, credentials{token: userToken}, nil)
+	f.open(t.Context(), t, notes, nil).until(t, "synced") // warm up, so pools exist
+	time.Sleep(100 * time.Millisecond)
+	before := runtime.NumGoroutine()
+	for range 20 {
+		ctx, cancel := context.WithCancel(t.Context())
+		f.open(ctx, t, notes, nil).until(t, "synced")
+		cancel()
+	}
+	deadline := time.Now().Add(within)
+	for runtime.NumGoroutine() > before+5 {
+		if time.Now().After(deadline) {
+			buf := make([]byte, 1<<20)
+			t.Fatalf("%d goroutines, %d before 20 streams opened and ended:\n%s",
+				runtime.NumGoroutine(), before, buf[:runtime.Stack(buf, true)])
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

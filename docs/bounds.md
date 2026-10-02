@@ -137,10 +137,11 @@ Why these defaults:
 - **32 streams per session.** A page shows a handful of live lists, and one session is
   every tab of the application in that browser. Thirty-two leaves room for several tabs
   with several streams each, and a page that leaks streams meets it.
-- **2000 streams per replica.** [Measured](#measured-the-rehearsal): 1800 streams on one
-  replica took about 250 MiB of resident memory, so 2000 take about 300 MiB, and every
-  other number held well within bounds at that load. Give a replica allowed this many
-  memory for it, or lower the limit.
+- **2000 streams per replica, provisionally.** In [the rehearsal](#measured-the-rehearsal),
+  1800 streams of one small note each took about 250 MiB of resident memory on one
+  replica, so 2000 like them would take about 300 MiB. That holds for that workload only:
+  a stream's cost grows with its snapshot, its objects and how often they change. Measure
+  your own scopes before sizing a replica by it.
 - **30 minutes per response.** Ordinary requests finish in seconds; the API server gives
   them 60 at most. What stays open is a watch or a followed log. Thirty minutes is the
   shortest time the API server itself keeps a watch open when the client names no
@@ -322,13 +323,18 @@ one replica, the suite and the cluster on one devcontainer host):
 | One change reaching all 1800, from `kubectl patch` starting | under 110 ms, the slowest; the spread from first to slowest under 50 ms |
 | Logout to stream aborted, the slowest of 1800 | 4.1 to 4.5 seconds, within the 5-second check |
 | Goroutines per open stream | 6 |
-| Resident memory | 30 MiB idle, 34 MiB with 200 sessions, 235 to 267 MiB with 1800 streams: at most 133 KiB per stream |
+| Resident memory | 30 MiB idle, 34 MiB with 200 sessions, 235 to 267 MiB with 1800 streams: about 110 to 130 KiB per stream, for this workload |
 | Watches at the API server | one per stream, 1800, all released at logout |
 
-Resident memory is measured in a fresh process, where it only grows, so the figure per
-stream is an upper bound; the garbage collector made smaller measurements too noisy
-to use. What the rehearsal does not cover: native watches through `/k8s`, many replicas,
-shared watches, a slow or distant API server, and the browser's side. A real cluster's
+Every stream watches the same scope: one small note. So the memory figures describe
+that workload, not a stream in general. krm-stream keeps per-object bookkeeping for each
+stream, and its list-then-watch fallback holds a whole snapshot while it lists, so
+larger scopes, larger objects and frequent changes cost more, possibly much more.
+Resident memory is measured in a fresh process, where it only grows over a run this
+short; the garbage collector made smaller measurements too noisy to use. What the
+rehearsal does not cover: representative scopes and objects, sustained change, native
+watches through `/k8s`, many replicas, shared watches, a slow or distant API server, and
+the browser's side. A real cluster's
 numbers belong next to these when someone measures them.
 
 ## Left out: a bound on page size

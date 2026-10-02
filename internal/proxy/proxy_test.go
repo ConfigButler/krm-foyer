@@ -870,6 +870,41 @@ func TestTokenNeverLeaves(t *testing.T) {
 	}
 }
 
+// What the API server writes is never logged as it is, even where krm-foyer answers
+// instead of it: it could hold anything, the token it was sent among it. (What it
+// answers reaches the browser as it is; that is the API server's to get right.)
+func TestUpstreamTextIsNeverLogged(t *testing.T) {
+	api := newAPIServerWith(t, false, func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		switch r.URL.Query().Get("answer") {
+		case "malformed":
+			conn, buf, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				panic(err)
+			}
+			// Go's transport quotes a malformed status code in its error.
+			_, _ = buf.WriteString("HTTP/1.1 " + strings.ReplaceAll(auth, " ", "_") + " OK\r\n\r\n")
+			_ = buf.Flush()
+			_ = conn.Close()
+		case "content-type":
+			w.Header().Set("Content-Type", "text/html; sent="+strings.ReplaceAll(auth, " ", "_"))
+			_, _ = io.WriteString(w, "<p>hi</p>")
+		case "location":
+			w.Header().Set("Location", "/elsewhere?sent="+url.QueryEscape(auth))
+			w.WriteHeader(http.StatusFound)
+		}
+	})
+	f := newFoyer(t, api, credentials{token: userToken})
+	for _, answer := range []string{"malformed", "content-type", "location"} {
+		if a := f.get(t, "/k8s/api/v1/secrets?answer="+answer); a.StatusCode != http.StatusBadGateway {
+			t.Errorf("%s: %d, want krm-foyer's 502", answer, a.StatusCode)
+		}
+	}
+	if strings.Contains(f.logs.String(), userToken) {
+		t.Errorf("what the API server wrote, the token in it, is in krm-foyer's logs: %s", f.logs.String())
+	}
+}
+
 // Content-Type sent as more than one header field is ambiguous: a browser takes
 // the last usable value, a check of the first would see another. Held back, in
 // either order and even when the values agree.

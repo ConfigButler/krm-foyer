@@ -21,6 +21,7 @@ import (
 	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
 	"github.com/ConfigButler/krm-foyer/internal/metrics"
+	"github.com/ConfigButler/krm-foyer/internal/upstream"
 )
 
 // Config is what the proxy needs to reach one API server.
@@ -242,10 +243,12 @@ func emptyBody(resp *http.Response) bool {
 		resp.ContentLength == 0 || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified
 }
 
+// heldBack names the field in its message, which is logged, and its value only in a
+// cause, which is not: the value is the API server's text (see package upstream).
 func heldBack(field, value string) *interruption.Interruption {
 	return &interruption.Interruption{
 		Status: http.StatusBadGateway, Reason: "BadGateway",
-		Message: "the API server answered with content krm-foyer does not pass on: " + field + " " + value,
+		Message: "the API server answered with content krm-foyer does not pass on, by its " + field,
 		Causes:  []interruption.Cause{{Reason: "HeldBack", Field: field, Message: value}},
 	}
 }
@@ -261,7 +264,7 @@ func (p *Proxy) upstreamError(w http.ResponseWriter, r *http.Request, err error)
 		if r.Context().Err() != nil {
 			return // the browser went away; nobody is left to answer
 		}
-		p.logger.Warn("API server unreachable", "err", err)
+		p.logger.Warn("API server unreachable", "cause", upstream.Class(err))
 		refused = &interruption.Interruption{
 			Status: http.StatusBadGateway, Reason: "BadGateway",
 			Message: "the API server could not be reached",

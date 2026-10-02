@@ -132,7 +132,12 @@ bugs are here, where they are cheap to find:
   is sent. Kubernetes' 403, 401 and 404 keep their meaning, with no address inside the
   cluster in what the browser reads, and an API server that cannot answer is retried
   with a wait that doubles. A stream whose session ends is aborted and its watch
-  cancelled, even where no write deadline can be set. Streams count against limits of
+  cancelled, even where no write deadline can be set. A redirect from the API server is
+  not followed, to another https server or to plain http, so the token goes nowhere
+  else. A 401 or 403 on an open watch ends the stream as it does at opening; a failure
+  on an open watch, or one that ends before its snapshot, waits before the watch is
+  opened again; and what the API server wrote when it failed, the token it echoed
+  among it, reaches neither the browser nor the log. Streams count against limits of
   their own, not the request limits, but draw on the same request rate; the streams
   open and the watches they hold at the API server are counted, and counted out again
   when a stream ends. A watch the API server ends, or ends with 410 Gone, is opened
@@ -140,6 +145,10 @@ bugs are here, where they are cheap to find:
   between, and without the wait or the warning of a failure. Each was seen to fail against a
   build broken on purpose; the one mutation no test sees is the message of a retryable
   error, which krm-stream v0.4.0 never sends.
+- **Upstream text in the log** ([internal/proxy](../internal/proxy),
+  [internal/upstream](../internal/upstream)): an API server that echoes the token in a
+  malformed response, a `Content-Type` or a `Location` never gets it into krm-foyer's
+  log, which names failures by kind from a fixed set.
 - **Login** ([internal/auth](../internal/auth)) runs against a fake issuer in the test
   that behaves like a strict one (PKCE enforced, codes single use) unless told to
   misbehave: a token for another audience or issuer, expired, signed by a stranger, with

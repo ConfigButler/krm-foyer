@@ -76,8 +76,9 @@ Kubernetes answered. Things to keep when you copy this:
   own origin only, as the fixture's file server does
   ([hello-web-nginx.conf](../../test/e2e/cluster/hello-web-nginx.conf)).
 
-A 409 can still happen when the page shows the latest text: a change to what the stream
-does not show, such as the `kubectl.kubernetes.io/last-applied-configuration` annotation
+A 409 can still happen when the page shows the latest text. Two saves can cross: each
+is sent before the other's change has come back through the stream. And a change to what
+the stream does not show, such as the `kubectl.kubernetes.io/last-applied-configuration` annotation
 that `kubectl apply` writes, moves the note's version without an event. The page then
 opens its stream again for the current version, keeps the user's text, and saves only
 when asked again. See krm-stream's

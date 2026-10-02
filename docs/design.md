@@ -455,15 +455,20 @@ other response. Once the stream has started, krm-foyer's own refusals and Kubern
 answers arrive as krm-stream's events, because a browser's `EventSource` cannot read the
 body of an error status:
 
-| The API server answers the watch with | The browser receives |
+| The API server answers the watch, at opening or on the open watch, with | The browser receives |
 | --- | --- |
 | 403 | `FORBIDDEN`, terminal, with Kubernetes' own message |
 | 401 | `UNAUTHENTICATED`, terminal |
 | 404 | `SCOPE_INVALID`, terminal: the resource is not served |
 | 400 or 422 | `SCOPE_INVALID`, terminal, with Kubernetes' message |
-| Anything else, or no answer | Nothing yet: the watch is opened again after a wait that doubles from one second to 30, and at least as long as a `Retry-After` |
+| 410 Gone on the open watch | `RESYNC_REQUIRED`, and a fresh snapshot at once |
+| A redirect | `INTERNAL`, terminal: it is not followed, as `/k8s` follows none, so the token goes nowhere else |
+| Anything else, no answer, or an end before the snapshot is complete or hardly after it | Nothing yet: the watch is opened again after a wait that doubles from one second to 30, and at least as long as a `Retry-After`. A stream healthy for longer than 30 seconds starts counting again |
 
-What went wrong inside never reaches the browser; it is logged. krm-stream v0.4.0 does
+What went wrong inside never reaches the browser, and is logged by its kind
+(`status_503`, `connection`, `tls`...), never by its text: the API server, or whatever
+answered instead, writes that text, and it could hold anything, the token among it.
+`/k8s` logs the same way. krm-stream v0.4.0 does
 not map these itself, so krm-foyer does, until it does
 ([feedback](investigations/krm-stream-feedback.md)). Every built-in projection may be
 requested: none hides anything from a user who can read the whole object through `/k8s`

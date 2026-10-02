@@ -137,6 +137,7 @@ func (i *Interruption) page(w http.ResponseWriter, r *http.Request) {
 		Status                     int
 		Title, Message, Reason     string
 		SignIn, Target, TargetLink string
+		HeldField, HeldValue       string
 	}{Status: i.Status, Title: titles[i.Reason], Message: i.Message, Reason: i.Reason}
 	if data.Title == "" {
 		data.Title = "Interrupted by krm-foyer"
@@ -147,6 +148,9 @@ func (i *Interruption) page(w http.ResponseWriter, r *http.Request) {
 		data.SignIn = "/auth/login?" + url.Values{"return_to": {r.RequestURI}}.Encode()
 	}
 	for _, c := range i.Causes {
+		if c.Reason == "HeldBack" {
+			data.HeldField, data.HeldValue = c.Field, c.Message
+		}
 		if c.Reason == "Redirect" {
 			data.Target = c.Message
 			// A link only to an absolute web URL; anything else stays text. The person

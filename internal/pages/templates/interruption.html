@@ -4,6 +4,10 @@
     {{- if .SignIn}}
     <p><a href="{{.SignIn}}">Sign in</a> to open this page with your own Kubernetes access.</p>
     {{- end}}
+    {{- if .HeldField}}
+    <p>Its <code>{{.HeldField}}</code> was:</p>
+    <p><code>{{.HeldValue}}</code></p>
+    {{- end}}
     {{- if .Target}}
     <p>The API server answered with a redirect to:</p>
     <p><code>{{.Target}}</code></p>
