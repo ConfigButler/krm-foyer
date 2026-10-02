@@ -74,6 +74,7 @@ jobs:
             hadolint --version
             kubectl version --client
             k3d version
+            helm version --short
             docker --version
             openssl version
           '

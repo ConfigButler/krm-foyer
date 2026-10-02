@@ -38,8 +38,9 @@ Each step makes pending specs real and ends with `task verify` green.
    (2026-10-01), because a first useful experience shows what the rest must serve, and
    the backend already worked against a real Dex and API server. One command, `task
    demo`, starts the [hello example](../examples/hello) for a browser on this machine:
-   everything runs in one k3d cluster, an nginx front door puts the example and krm-foyer
-   on one origin, and `kubectl port-forward` brings the front door and Dex to
+   everything runs in one k3d cluster, a Gateway API front door (Traefik, the chart
+   gitops-reverser uses) puts the example and krm-foyer on one origin, and
+   `kubectl port-forward` brings the front door and Dex to
    `*.localhost`, which browsers resolve to loopback with no setup. The example
    signs in, lists, creates and edits a custom resource, shows Kubernetes' 403 and 409,
    and signs out, with no application-specific code in krm-foyer; the generic browser

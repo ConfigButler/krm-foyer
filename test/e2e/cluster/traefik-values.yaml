@@ -1,0 +1,61 @@
+# Traefik for the e2e fixture: the same chart (39.0.5) gitops-reverser's e2e installs,
+# here as a Gateway API implementation only. install-traefik.sh installs it with Helm.
+#
+# The fixture's routing is Gateway API (gateway.yaml): a Gateway and HTTPRoutes, the
+# portable form docs/ingress.md recommends, rather than Traefik's own IngressRoute.
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+image:
+  registry: docker.io
+  repository: traefik
+  # Pinned by digest; versionOverride below tells the chart which version that is.
+  tag: v3.6.10@sha256:c549d482c55d7a797398562064f35428cc53e748d84d7190997930e7b31bcc32
+versionOverride: v3.6.10
+
+deployment:
+  kind: Deployment
+  replicas: 1
+
+providers:
+  kubernetesGateway:
+    enabled: true
+  # Gateway API only: no Ingress or IngressRoute is read.
+  kubernetesCRD:
+    enabled: false
+  kubernetesIngress:
+    enabled: false
+
+# The fixture defines its own Gateway (gateway.yaml), so the listener, its certificate and
+# the routes it admits are all in one file next to the routes.
+gateway:
+  enabled: false
+gatewayClass:
+  enabled: true
+  name: traefik
+
+ingressClass:
+  enabled: false
+
+ingressRoute:
+  dashboard:
+    enabled: false
+
+ports:
+  # HTTPS only. The Gateway's listener binds to this entrypoint by its port, 8443.
+  web:
+    expose:
+      default: false
+  websecure:
+    port: 8443
+    exposedPort: 443
+
+# k3s's ServiceLB is disabled, so a LoadBalancer would stay pending. A browser reaches
+# Traefik through kubectl port-forward (port-forward.sh).
+service:
+  type: ClusterIP
+
+logs:
+  access:
+    enabled: true
