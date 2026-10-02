@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
+	"github.com/ConfigButler/krm-foyer/internal/metrics"
 )
 
 // Credentials gives the proxy the token of the user behind a request. It is the
@@ -42,6 +43,8 @@ type Config struct {
 	Credentials Credentials
 	// Logger receives one line per interruption. Nil discards them.
 	Logger *slog.Logger
+	// Metrics counts interruptions. Nil counts nothing.
+	Metrics *metrics.Metrics
 }
 
 // Proxy serves Prefix. Create it with New.
@@ -50,6 +53,7 @@ type Proxy struct {
 	transport   http.RoundTripper
 	credentials Credentials
 	logger      *slog.Logger
+	metrics     *metrics.Metrics
 }
 
 // New returns a proxy to cfg.Server.
@@ -81,6 +85,7 @@ func New(cfg Config) (*Proxy, error) {
 		},
 		credentials: cfg.Credentials,
 		logger:      logger,
+		metrics:     cfg.Metrics,
 	}, nil
 }
 
@@ -246,6 +251,7 @@ func (p *Proxy) interrupt(w http.ResponseWriter, r *http.Request, i *interruptio
 	path, _, _ := strings.Cut(r.RequestURI, "?")
 	p.logger.Info("interruption", "status", i.Status, "reason", i.Reason, "message", i.Message,
 		"method", r.Method, "path", path)
+	p.metrics.Interruption(i.Reason)
 	i.Serve(w, r)
 }
 

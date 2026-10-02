@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ConfigButler/krm-foyer/internal/metrics"
 )
 
 // files is a fake file system for parseConfig.
@@ -31,7 +33,7 @@ var loginArgs = []string{
 
 func TestParseConfigWithoutLogin(t *testing.T) {
 	cfg, err := parseConfig(nil, files(nil), io.Discard)
-	if err != nil || cfg.login != nil || cfg.listen != ":8080" {
+	if err != nil || cfg.login != nil || cfg.listen != ":8080" || cfg.metricsListen != ":9090" {
 		t.Fatalf("%+v, %v", cfg, err)
 	}
 }
@@ -92,7 +94,7 @@ func TestParseConfigRefuses(t *testing.T) {
 
 // Without login there is no /k8s and no /auth: the start page and probes only.
 func TestHandlerWithoutLogin(t *testing.T) {
-	h, _, err := handler(config{}, slog.New(slog.DiscardHandler))
+	h, _, err := handler(config{}, slog.New(slog.DiscardHandler), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +122,7 @@ func TestHandlerWithLoginNeedsASession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, _, err := handler(cfg, slog.New(slog.DiscardHandler))
+	h, _, err := handler(cfg, slog.New(slog.DiscardHandler), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +167,7 @@ func TestSignInLinkIsAcceptedByLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, _, err := handler(cfg, slog.New(slog.DiscardHandler))
+	h, _, err := handler(cfg, slog.New(slog.DiscardHandler), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,5 +194,43 @@ func TestSignInLinkIsAcceptedByLogin(t *testing.T) {
 		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "issuer-unavailable") {
 			t.Errorf("%s: login answered %d to its sign-in link %s", target, w.Code, link)
 		}
+	}
+}
+
+// Metrics are served on their own listener and nowhere on the origin, where any page
+// could read them, and an interruption in the wired binary is counted there.
+func TestMetricsAreServedApartAndCount(t *testing.T) {
+	cfg, err := parseConfig(loginArgs, files(map[string]string{"/secret": "s"}), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := metrics.New()
+	h, _, err := handler(cfg, slog.New(slog.DiscardHandler), m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/k8s/api/v1/namespaces", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("/k8s without a session = %d", w.Code)
+	}
+	for _, path := range []string{"/metrics", "/k8s/metrics", "/_foyer/metrics"} {
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
+		if strings.Contains(w.Body.String(), "krm_foyer_") {
+			t.Errorf("the origin serves metrics at %s", path)
+		}
+	}
+
+	mh := metricsHandler(m)
+	w = httptest.NewRecorder()
+	mh.ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+	if want := `krm_foyer_interruptions_total{reason="Unauthorized"} 1`; !strings.Contains(w.Body.String(), want) {
+		t.Errorf("metrics lack %q:\n%s", want, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	mh.ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("the metrics listener serves / with %d", w.Code)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/ConfigButler/krm-foyer/internal/auth"
+	"github.com/ConfigButler/krm-foyer/internal/metrics"
 	"github.com/ConfigButler/krm-foyer/internal/proxy"
 	"github.com/ConfigButler/krm-foyer/internal/server"
 	"github.com/ConfigButler/krm-foyer/internal/session"
@@ -49,6 +50,9 @@ func main() {
 type config struct {
 	listen          string
 	tlsCert, tlsKey string
+	// metricsListen is where /metrics is served, apart from the origin. Empty
+	// serves no metrics.
+	metricsListen string
 	// login is nil when no sign-in is configured: krm-foyer then serves its start
 	// page and probes only.
 	login *loginConfig
@@ -77,6 +81,7 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	fs.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
 	fs.StringVar(&cfg.tlsCert, "tls-cert-file", "", "serve TLS with this certificate (PEM); needs -tls-key-file")
 	fs.StringVar(&cfg.tlsKey, "tls-key-file", "", "the private key for -tls-cert-file (PEM)")
+	fs.StringVar(&cfg.metricsListen, "metrics-listen", ":9090", "address to serve Prometheus metrics on, apart from the origin; empty serves none")
 	fs.StringVar(&publicURL, "public-url", "", "krm-foyer's origin as browsers reach it, such as https://app.example.com")
 	fs.StringVar(&issuer, "oidc-issuer", "", "the OIDC issuer URL the API server trusts")
 	fs.StringVar(&clientID, "oidc-client-id", "", "krm-foyer's client ID at the issuer; the API server must accept ID tokens for it")
@@ -175,9 +180,9 @@ func appendCAs(pool *x509.CertPool, file string, readFile func(string) ([]byte, 
 	return nil
 }
 
-// handler builds every route from cfg. With login configured it returns a function
-// that discovers the issuer in the background.
-func handler(cfg config, logger *slog.Logger) (http.Handler, func(context.Context), error) {
+// handler builds every route from cfg, recording into m. With login configured it
+// returns a function that discovers the issuer in the background.
+func handler(cfg config, logger *slog.Logger, m *metrics.Metrics) (http.Handler, func(context.Context), error) {
 	if cfg.login == nil {
 		return server.New(server.Config{Version: version}), func(context.Context) {}, nil
 	}
@@ -194,7 +199,7 @@ func handler(cfg config, logger *slog.Logger) (http.Handler, func(context.Contex
 	}
 	// Login is the proxy's only credential source: there is no other way to give
 	// krm-foyer a token, and no service-account fallback.
-	l.kubernetes.Credentials, l.kubernetes.Logger = login, logger
+	l.kubernetes.Credentials, l.kubernetes.Logger, l.kubernetes.Metrics = login, logger, m
 	api, err := proxy.New(l.kubernetes)
 	if err != nil {
 		return nil, nil, err
@@ -208,11 +213,30 @@ func run(cfg config, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	h, discover, err := handler(cfg, logger)
+	m := metrics.New()
+	h, discover, err := handler(cfg, logger, m)
 	if err != nil {
 		return err
 	}
 	go discover(ctx)
+
+	// Metrics have a listener of their own, never the origin, where any page could
+	// read them. Plain HTTP: what they say is counts, and a NetworkPolicy keeps the
+	// port to the monitoring system.
+	var metricsSrv *http.Server
+	if cfg.metricsListen != "" {
+		metricsSrv = &http.Server{
+			Addr:              cfg.metricsListen,
+			Handler:           metricsHandler(m),
+			ReadHeaderTimeout: 10 * time.Second,
+			ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		}
+		go func() {
+			if err := metricsSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("metrics listener stopped", "err", err)
+			}
+		}()
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.listen,
@@ -243,6 +267,9 @@ func run(cfg config, logger *slog.Logger) error {
 	// default) before killing the pod, so finish in-flight requests well inside that.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	if metricsSrv != nil {
+		_ = metricsSrv.Shutdown(shutdownCtx)
+	}
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return err
 	}
@@ -251,4 +278,11 @@ func run(cfg config, logger *slog.Logger) error {
 	}
 	logger.Info("krm-foyer shut down cleanly")
 	return nil
+}
+
+// metricsHandler serves /metrics and nothing else.
+func metricsHandler(m *metrics.Metrics) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", m.Handler())
+	return mux
 }

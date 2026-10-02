@@ -76,6 +76,8 @@ spec:
           ports:
             - name: https
               containerPort: 8443
+            - name: metrics
+              containerPort: 9090
           readinessProbe:
             httpGet:
               path: /readyz
@@ -137,3 +139,19 @@ spec:
       port: 443
       targetPort: https
       nodePort: 30443
+---
+# Metrics are served apart from the origin. The suite scrapes them through the API
+# server's service proxy, as admin, the way a monitoring system inside the cluster
+# would reach them; nothing publishes them on the node.
+apiVersion: v1
+kind: Service
+metadata:
+  name: krm-foyer-metrics
+  namespace: krm-foyer
+spec:
+  selector:
+    app: krm-foyer
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics

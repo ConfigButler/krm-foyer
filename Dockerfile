@@ -21,5 +21,6 @@ FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c
 
 COPY --from=build /out/krm-foyer /krm-foyer
 USER 65532:65532
-EXPOSE 8080
+# 8080 is the origin, 9090 the metrics, which stay off it.
+EXPOSE 8080 9090
 ENTRYPOINT ["/krm-foyer"]
