@@ -359,7 +359,9 @@ keys sessions by a hash of the ID, so reading the store does not yield usable ID
   it, its absolute timeout since login, and the expiry of its ID token. There is no
   refresh yet, so the token's expiry is a hard end; the cookie's `Max-Age` is the time to
   the earlier of the last two. An expired session is deleted when it is next presented,
-  whatever the store's own expiry does. A refused request does not count as use.
+  whatever the store's own expiry does. A request the session refuses, for missing CSRF
+  proof or another origin, does not count as use; one a [bound](bounds.md) refuses does,
+  since the session had let it through.
 - **The store is in memory**, so this release runs one replica, and a restart signs
   everyone out. Shared storage, and refresh with it, are a later step on the
   [roadmap](roadmap.md#order-of-work).

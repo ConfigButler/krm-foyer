@@ -74,9 +74,15 @@ type Config struct {
 	// bursts of up to SessionRequestBurst. Zero means the defaults below.
 	SessionRequestRate  float64
 	SessionRequestBurst int
+	// MaxResponseBytes is the most decoded bytes a response may have. Zero means
+	// DefaultMaxResponseBytes.
+	MaxResponseBytes int64
 	// Now is the clock the request rate is measured by. Nil means time.Now.
 	Now func() time.Time
 }
+
+// DefaultMaxResponseBytes is the response-byte limit when none is configured.
+const DefaultMaxResponseBytes = 32 << 20
 
 // The request rate when none is configured. See docs/bounds.md for why.
 const (
@@ -108,6 +114,7 @@ type Proxy struct {
 	maxDuration time.Duration
 	concurrency *concurrency
 	rate        *rate
+	maxBytes    int64
 }
 
 // New returns a proxy to cfg.Server.
@@ -158,6 +165,14 @@ func New(cfg Config) (*Proxy, error) {
 	if perSecond < 0 || burst < 0 {
 		return nil, fmt.Errorf("the request rate must be positive, got %v a second in bursts of %d", perSecond, burst)
 	}
+	maxBytes := cfg.MaxResponseBytes
+	if maxBytes == 0 {
+		maxBytes = DefaultMaxResponseBytes
+	}
+	if maxBytes < 0 {
+		return nil, fmt.Errorf("the response-byte limit must be positive, got %d", maxBytes)
+	}
+	cfg.Metrics.BoundLimit(metrics.BoundResponseBytes, float64(maxBytes))
 	return &Proxy{
 		server: url.URL{Scheme: cfg.Server.Scheme, Host: cfg.Server.Host},
 		transport: &http.Transport{
@@ -179,6 +194,7 @@ func New(cfg Config) (*Proxy, error) {
 		maxDuration: maxDuration,
 		concurrency: newConcurrency(perSession, total, cfg.Metrics),
 		rate:        newRate(perSecond, burst, cfg.Now, cfg.Metrics),
+		maxBytes:    maxBytes,
 	}, nil
 }
 
@@ -272,8 +288,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 		Transport: p.transport,
 		// Watches and logs stream: write every chunk as it arrives.
-		FlushInterval:  -1,
-		ModifyResponse: checkResponse,
+		FlushInterval: -1,
+		ModifyResponse: func(resp *http.Response) error {
+			if err := checkResponse(resp); err != nil {
+				return err
+			}
+			return p.limitBytes(r, cut, resp)
+		},
 		// ReverseProxy hands its error handler the outgoing request, whose headers
 		// are the allowlisted ones. How to answer depends on the browser's request.
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) { p.upstreamError(w, r, err) },
@@ -323,6 +344,23 @@ func checkResponse(resp *http.Response) error {
 	// Trailers are headers too, and none is on the allowlist. The transport fills
 	// this in again when the body ends; headWriter discards that copy.
 	resp.Trailer = nil
+	return nil
+}
+
+// limitBytes holds resp to the response-byte limit: refused with a 502 when its
+// length is known to be past it, and otherwise cut short when byte limit+1 arrives.
+// The bytes counted are decoded ones, since the transport decodes gzip.
+func (p *Proxy) limitBytes(r *http.Request, cut context.CancelCauseFunc, resp *http.Response) error {
+	if resp.ContentLength > p.maxBytes && !emptyBody(resp) {
+		p.metrics.BoundReached(metrics.BoundResponseBytes)
+		return tooLarge(p.maxBytes)
+	}
+	resp.Body = &limitedBody{body: resp.Body, limit: p.maxBytes, metrics: p.metrics, over: func() {
+		p.metrics.BoundReached(metrics.BoundResponseBytes)
+		// The copy is not blocked: it ends with this read, and ReverseProxy aborts
+		// the response once the bytes within the limit are written.
+		p.cut(r, cut, cutResponseBytes)
+	}}
 	return nil
 }
 
@@ -415,6 +453,7 @@ func (c cutCause) Error() string { return string(c) }
 const (
 	cutSessionEnded     = cutCause(metrics.CauseSessionEnded)
 	cutResponseDuration = cutCause(metrics.BoundResponseDuration)
+	cutResponseBytes    = cutCause(metrics.BoundResponseBytes)
 )
 
 // cutShort reports whether krm-foyer cut short the request ctx belongs to, rather
@@ -444,15 +483,18 @@ func (p *Proxy) guard(w http.ResponseWriter, r *http.Request, cut context.Cancel
 				return
 			case <-deadline.C:
 				p.metrics.BoundReached(metrics.BoundResponseDuration)
-				p.cut(w, r, cut, cutResponseDuration)
-				return
+				p.cut(r, cut, cutResponseDuration)
 			case <-tick.C:
 				if p.live(ctx, live) || ctx.Err() != nil {
 					continue
 				}
-				p.cut(w, r, cut, cutSessionEnded)
-				return
+				p.cut(r, cut, cutSessionEnded)
 			}
+			// The response may be blocked writing to a browser that stopped reading.
+			// A deadline in the past fails that write, so the handler returns and the
+			// abort happens.
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now())
+			return
 		}
 	}()
 	return func() {
@@ -463,16 +505,12 @@ func (p *Proxy) guard(w http.ResponseWriter, r *http.Request, cut context.Cancel
 }
 
 // cut cuts the response to r short, for why: the request to the API server is
-// cancelled, and the browser's response aborted.
-func (p *Proxy) cut(w http.ResponseWriter, r *http.Request, cut context.CancelCauseFunc, why cutCause) {
+// cancelled, and with it the copy of its body, which aborts the browser's response.
+func (p *Proxy) cut(r *http.Request, cut context.CancelCauseFunc, why cutCause) {
 	path, _, _ := strings.Cut(r.RequestURI, "?")
 	p.logger.Info("response cut short", "cause", string(why), "method", r.Method, "path", path)
 	p.metrics.CutShort(string(why))
 	cut(why)
-	// The response may be blocked writing to a browser that stopped reading. A
-	// deadline in the past fails that write, so the handler returns and the abort
-	// happens.
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now())
 }
 
 // live asks whether a session is still live, giving it one interval to answer.

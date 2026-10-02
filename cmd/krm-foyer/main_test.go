@@ -50,7 +50,8 @@ func TestParseConfigWithLogin(t *testing.T) {
 		l.sessions.IdleTimeout != time.Hour || l.sessions.AbsoluteTimeout != 8*time.Hour ||
 		l.kubernetes.SessionCheckInterval != 5*time.Second || l.kubernetes.MaxResponseDuration != 30*time.Minute ||
 		l.kubernetes.MaxSessionConcurrentRequests != 64 || l.kubernetes.MaxConcurrentRequests != 2000 ||
-		l.kubernetes.SessionRequestRate != 20 || l.kubernetes.SessionRequestBurst != 100 {
+		l.kubernetes.SessionRequestRate != 20 || l.kubernetes.SessionRequestBurst != 100 ||
+		l.kubernetes.MaxResponseBytes != 32<<20 {
 		t.Fatalf("%+v", l)
 	}
 }
@@ -92,6 +93,7 @@ func TestParseConfigRefuses(t *testing.T) {
 		"no session concurrency": {append(loginArgs, "-max-session-concurrent-requests", "-1"), secret, "-max-session-concurrent-requests"},
 		"no request rate":        {append(loginArgs, "-session-request-rate", "0"), secret, "-session-request-rate"},
 		"no request burst":       {append(loginArgs, "-session-request-burst", "0"), secret, "-session-request-burst"},
+		"no byte limit":          {append(loginArgs, "-max-response-bytes", "0"), secret, "-max-response-bytes"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := parseConfig(tc.args, files(tc.files), io.Discard)

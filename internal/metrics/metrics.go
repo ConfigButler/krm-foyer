@@ -36,6 +36,7 @@ const (
 	// at. Usage and refusals are counted against the burst.
 	BoundSessionRequestRate  = "session_request_rate"
 	BoundSessionRequestBurst = "session_request_burst"
+	BoundResponseBytes       = "response_bytes"
 )
 
 // The causes of krm_foyer_responses_cut_short_total: why krm-foyer cut a response
@@ -88,7 +89,7 @@ func New() *Metrics {
 	)
 	// Every cause is there from the start, so a dashboard shows a zero rather than
 	// no data.
-	for _, cause := range []string{CauseSessionEnded, BoundResponseDuration} {
+	for _, cause := range []string{CauseSessionEnded, BoundResponseDuration, BoundResponseBytes} {
 		m.cutShort.WithLabelValues(cause)
 	}
 	return m

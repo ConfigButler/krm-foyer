@@ -80,6 +80,7 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		maxDuration                    time.Duration
 		perSession, inAll, burst       int
 		perSecond                      float64
+		maxBytes                       int64
 	)
 	fs.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
 	fs.StringVar(&cfg.tlsCert, "tls-cert-file", "", "serve TLS with this certificate (PEM); needs -tls-key-file")
@@ -107,6 +108,8 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		"how many requests a second one session may send, once its burst is spent; more get 429 with Retry-After")
 	fs.IntVar(&burst, "session-request-burst", proxy.DefaultSessionRequestBurst,
 		"how many requests one session may send at once")
+	fs.Int64Var(&maxBytes, "max-response-bytes", proxy.DefaultMaxResponseBytes,
+		"the most decoded bytes a response may have; past it, 502 if known in advance, otherwise it is cut short")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -190,6 +193,10 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		return config{}, fmt.Errorf("-session-request-rate and -session-request-burst must be positive, got %v and %d", perSecond, burst)
 	}
 	login.kubernetes.SessionRequestRate, login.kubernetes.SessionRequestBurst = perSecond, burst
+	if maxBytes <= 0 {
+		return config{}, fmt.Errorf("-max-response-bytes must be positive, got %d", maxBytes)
+	}
+	login.kubernetes.MaxResponseBytes = maxBytes
 	if login.kubernetes.Server, err = url.Parse(apiServer); err != nil {
 		return config{}, fmt.Errorf("-kubernetes-server: %w", err)
 	}

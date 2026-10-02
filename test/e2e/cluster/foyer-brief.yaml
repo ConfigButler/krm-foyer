@@ -1,9 +1,10 @@
-# A second krm-foyer in the e2e fixture with small bounds: sessions end within a
-# minute, responses within 20 seconds, and a session may have two requests in
-# flight and send ten at once, then one a second. The specs that wait for a bound to be reached use it. The main instance keeps ordinary timeouts, so no
-# other spec has to race its own session. It is the same image, certificate, public
-# URL and Dex client as foyer.yaml; deploy-foyer.sh fills in IMAGE and CONFIG_HASH.
-# The suite reaches it on its own NodePort, under the same name.
+# A second krm-foyer in the e2e fixture with small bounds, for the specs that wait
+# for a bound to be reached: sessions end within a minute, responses within 20
+# seconds, a session may have two requests in flight and send ten at once, then one
+# a second, and a response has at most 128 KiB. The main instance keeps ordinary
+# bounds, so no other spec has to race them. It is the same image, certificate,
+# public URL and Dex client as foyer.yaml; deploy-foyer.sh fills in IMAGE and
+# CONFIG_HASH. The suite reaches it on its own NodePort, under the same name.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,6 +54,7 @@ spec:
             - -max-session-concurrent-requests=2
             - -session-request-burst=10
             - -session-request-rate=1
+            - -max-response-bytes=131072
           ports:
             - name: https
               containerPort: 8443

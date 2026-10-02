@@ -241,6 +241,8 @@ The exact rule, for a limit of *L* bytes:
   `ResponseTooLarge` before any of it is sent.
 - **Counted as it streams:** when byte *L* + 1 arrives, it is not forwarded, and the
   response is [cut short](#cutting-a-response-short).
+- **A `HEAD` response is never too large:** it has no body, and its `Content-Length`
+  describes the `GET`.
 
 The tests send *L* − 1, *L* and *L* + 1 bytes, both with a known length and gzip-encoded.
 

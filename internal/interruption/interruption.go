@@ -128,6 +128,7 @@ var titles = map[string]string{
 	"CrossOriginRequest":        "Refused by krm-foyer",
 	"TooManyConcurrentRequests": "Too many requests at once",
 	"RequestRateExceeded":       "Too many requests",
+	"ResponseTooLarge":          "Response too large",
 }
 
 // page answers with the interruption as a page, for a person browsing.

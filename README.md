@@ -96,8 +96,11 @@ proxy come together, and need:
 
 Optional: `-oidc-ca-file` and `-kubernetes-ca-file` (CAs to trust), `-oidc-scopes`,
 `-session-idle-timeout` (1h), `-session-absolute-timeout` (8h), `-tls-cert-file` and
-`-tls-key-file` to serve TLS, and `-listen` (`:8080`). Sessions live in memory: run one
-replica.
+`-tls-key-file` to serve TLS, `-listen` (`:8080`) and `-metrics-listen` (`:9090`). The
+[bounds](docs/bounds.md) each have a flag and a documented default: the request rate and
+concurrent requests per session, concurrent requests per replica, how long a response
+may stay open, its size, and how often an open response checks its session. Sessions
+live in memory: run one replica.
 
 Or as a container:
 

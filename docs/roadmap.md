@@ -8,8 +8,8 @@ it: `task demo` starts an example application in a browser.** Server-held tokens
 decided by Kubernetes alone and no service-account fallback each have an e2e spec that
 tries to get past them, against a real API server and Dex, with krm-foyer's service
 account as cluster-admin bait. Each other requirement becomes a property of krm-foyer
-when its test exists and passes, and not before. Until the bounds in step 4 exist, no
-release is fit for a cluster that matters.
+when its test exists and passes, and not before. Since step 4, every
+[bound](bounds.md) is reached by a test, and an open response ends with its session.
 
 ## Order of work
 
@@ -47,7 +47,7 @@ Each step makes pending specs real and ends with `task verify` green.
    helper (`/_foyer/foyer.js`) came with it. Browser specs drive that journey in
    Chromium. It reloads on request rather than streaming, and keeps one replica,
    in-memory sessions and a new login when the ID token expires.
-4. **Bounds**, before anyone runs krm-foyer for real: the request rate per session,
+4. **Bounds** (done), before anyone runs krm-foyer for real: the request rate per session,
    concurrent requests per session and per replica, response duration and response
    bytes (counted decoded), each configurable with a documented default and a test that
    reaches it. Every open response ends when its session ends, at logout or expiry, and
@@ -55,8 +55,7 @@ Each step makes pending specs real and ends with `task verify` green.
    close real traffic comes to each limit. Native watches stay open and are not a
    special case: krm-foyer does not tell them apart, and no bound needs it to. A bound on
    page size was left out (2026-10-02): it would not reliably bound what a list costs.
-   See [bounds](bounds.md). Until this step is done, no release is fit for a cluster
-   that matters.
+   See [bounds](bounds.md).
 5. **Live notes with krm-stream** (was step 6). Moved ahead of refresh and shared
    storage (2026-10-02), because live state is the experience krm-foyer is for: `/k8s`
    for reads and changes, krm-stream for what changes while a page is open. krm-foyer
@@ -181,7 +180,7 @@ Security items need tests that try to get past the boundary.
 - [x] Upstream bodies reach the browser decoded: the browser's `Accept-Encoding` is
       dropped, and a gzip answer from the API server arrives uncompressed without
       `Content-Encoding`
-- [ ] The response-byte bound counts decoded bytes (a test with a small body that expands
+- [x] The response-byte bound counts decoded bytes (a test with a small body that expands
       past the bound)
 - [x] Exec, attach, port-forward and the service, node and pod proxy subresources return
       an explicit unsupported error
@@ -212,7 +211,10 @@ Security items need tests that try to get past the boundary.
 - [ ] Shared session storage, so more than one replica works (step 6)
 - [ ] The [session lifecycle](design.md#session-lifecycle) bounds, each with a test:
       logout seen by every replica at once, logout racing a refresh, the session store
-      unavailable, and a stream open across logout and expiry
+      unavailable, and krm-stream's streams open across logout and expiry
+- [x] A native watch open across logout and expiry is aborted and cancelled at the API
+      server within the session-check interval (one replica; e2e against the real
+      cluster)
 - [x] Session IDs never appear in krm-foyer's logs or error pages
 
 ### Proxy semantics
@@ -226,10 +228,10 @@ Security items need tests that try to get past the boundary.
       aborted, never ended cleanly, and cancelled at the API server (unit tests over
       every pair of protocols; e2e against the real cluster, with the audit log as
       witness, each checked by deploying a krm-foyer broken on purpose)
-- [ ] [Bounds](bounds.md) on the request rate per session, concurrent requests per
+- [x] [Bounds](bounds.md) on the request rate per session, concurrent requests per
       session and per replica, response duration and response bytes, each reached by a
       test (step 4)
-- [ ] A response cut short by a bound is aborted, never ended cleanly, and cancelled at
+- [x] A response cut short by a bound is aborted, never ended cleanly, and cancelled at
       the API server (unit tests over HTTP/1.1 and HTTP/2, and e2e with the audit log as
       witness)
 
@@ -250,7 +252,7 @@ Security items need tests that try to get past the boundary.
 
 - [ ] One log line per refusal (policy denial, upstream 401, 403, 409 or 422) with
       subject, route and reason
-- [ ] Metrics on every bound, requests in flight, why responses are cut short, and
+- [x] Metrics on every bound, requests in flight, why responses are cut short, and
       interruptions by reason, on a listener of their own (step 4; see
       [metrics](bounds.md#metrics))
 - [ ] Metrics for requests and active sessions

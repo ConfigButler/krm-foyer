@@ -114,6 +114,13 @@ bugs are here, where they are cheap to find:
   outside the bucket and checked over random request times: in any stretch of time a
   session gets at most its burst plus the rate times the stretch let through, and a
   session that never sends faster than the rate is never refused.
+- **The response-byte bound** ([internal/proxy](../internal/proxy)) counts decoded bytes,
+  exactly: *L* − 1 and *L* bytes pass whole, *L* + 1 gets a 502 when its length is
+  known and is cut short after exactly *L* bytes when it is gzip-encoded, over HTTP/1.1
+  and HTTP/2. A gzip stream of zeros that would expand without end is stopped at the
+  bound and cancelled at the API server. The property is checked from the browser's
+  side over random sizes, chunkings and encodings: a response that ends cleanly is
+  complete and within the bound, and none ever delivers more.
 - **Login** ([internal/auth](../internal/auth)) runs against a fake issuer in the test
   that behaves like a strict one (PKCE enforced, codes single use) unless told to
   misbehave: a token for another audience or issuer, expired, signed by a stranger, with
@@ -170,7 +177,9 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   session's third request while two watches are open gets krm-foyer's own 429 and never
   reaches the API server, which a build without the per-session check failed. So does a
   session sending faster than its rate, with `Retry-After`, which a build whose rate
-  never refuses failed.
+  never refuses failed. A list the API server compresses to a few hundred bytes, but
+  that decodes to 200 KiB, never passes the brief instance's 128 KiB bound as a complete
+  answer, which a build without the byte bound failed.
 - **The hello example** (label `browser`) is the claim that krm-foyer is usable, not
   only correct. Chromium ([chromedp/headless-shell](https://hub.docker.com/r/chromedp/headless-shell),
   pinned by digest, driven from Go with chromedp) runs in the network namespace of the

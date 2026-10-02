@@ -222,4 +222,41 @@ var _ = Describe("krm-foyer's bounds", Label("foyer"), func() {
 		time.Sleep(time.Second)
 		Expect(alice.viaFoyer(ctx, http.MethodGet, path, nil, nil).Code).To(Equal(http.StatusOK))
 	})
+
+	It("cuts short a response past its byte bound, counting what the API server compressed as it decodes", func(ctx SpecContext) {
+		const limit = 128 << 10 // the brief instance's
+		ns := fx.namespace()
+		fx.grant(ns, aliceK8sName, "configmaps", "get", "list")
+		// A list of some 200 KiB of one letter: past the API server's threshold for
+		// compressing (128 KiB), and a few hundred bytes once compressed. Two keys,
+		// since one argument may hold at most 128 KiB.
+		letters := strings.Repeat("a", 100<<10)
+		fx.kubectl("-n", ns, "create", "configmap", "big", "--from-literal=a="+letters, "--from-literal=b="+letters)
+		alice := signInBrief(ctx, alice)
+		path := "/api/v1/namespaces/" + ns + "/configmaps"
+		Expect(fx.briefMetric(`krm_foyer_bound_limit{bound="response_bytes"}`)).To(Equal(float64(limit)))
+
+		By("the API server sends it compressed, far below the bound")
+		compressed := fx.directWith(ctx, alice.token, http.MethodGet, path, nil, http.Header{"Accept-Encoding": {"gzip"}})
+		Expect(compressed.Code).To(Equal(http.StatusOK))
+		Expect(compressed.Header.Get("Content-Encoding")).To(Equal("gzip"))
+		Expect(len(compressed.Body)).To(BeNumerically("<", limit))
+
+		By("and krm-foyer counts it decoded, so it never passes as a complete answer")
+		before := fx.briefMetric(`krm_foyer_bound_reached_total{bound="response_bytes"}`)
+		s := alice.watch(ctx, path)
+		if s.resp.StatusCode == http.StatusBadGateway {
+			Expect(s.resp.Header.Get("Krm-Foyer-Interruption")).To(Equal("ResponseTooLarge"))
+			_, _ = s.end(30 * time.Second)
+		} else {
+			Expect(s.resp.StatusCode).To(Equal(http.StatusOK))
+			_, err := s.end(30 * time.Second)
+			Expect(err).To(HaveOccurred(), "a response past the byte bound ended cleanly")
+			Expect(s.read.Len()).To(BeNumerically("<=", limit))
+		}
+		Expect(fx.briefMetric(`krm_foyer_bound_reached_total{bound="response_bytes"}`)).To(Equal(before + 1))
+
+		By("while a small answer passes whole")
+		Expect(alice.viaFoyer(ctx, http.MethodGet, path+"/kube-root-ca.crt", nil, nil).Code).To(Equal(http.StatusOK))
+	})
 })
