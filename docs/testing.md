@@ -134,10 +134,11 @@ bugs are here, where they are cheap to find:
   cancelled, even where no write deadline can be set. A redirect from the API server is
   not followed, to another https server or to plain http, so the token goes nowhere
   else. A 401 or 403 on an open watch ends the stream as it does at opening. A failure
-  that may pass (a 503 or 429 at opening, a 500 or 429 on an open watch, a watch that
-  ends before its snapshot or hardly after it, a 410 right after it) ends the stream with
-  a non-terminal `UPSTREAM_UNAVAILABLE` and the API server's hint, after one attempt: the
-  browser's client retries, through the gate. What the API server wrote when it failed,
+  that may pass (a 503 or 429 at opening, a 500 or 429 on an open watch) ends the stream
+  with a non-terminal `UPSTREAM_UNAVAILABLE` and the API server's hint, after one
+  attempt: the browser's client retries, through the gate. A watch that ends before its
+  snapshot or hardly after it, or with a 410 right after it, is opened once more and
+  then ends the stream the same way, after two attempts and never more. What the API server wrote when it failed,
   the token it echoed among it, reaches neither the browser nor the log, and an ended
   stream leaves no goroutine behind while the API server is still sending. Streams count against limits of
   their own, not the request limits, but draw on the same request rate; the streams

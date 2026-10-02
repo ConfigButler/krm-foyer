@@ -60,7 +60,7 @@ means inheriting its semantics exactly, not approximately.*
 
 [krm-stream](https://github.com/ConfigButler/krm-stream) owns the watch-to-browser protocol,
 shared watches, projections, drafts and reconciliation. Voter was its first real consumer, at
-0.4.0, and krm-foyer its second: krm-stream 0.5.0 took its
+0.4.0, and krm-foyer its second: krm-stream 0.5.0 and 0.6.0 took its
 [feedback](investigations/krm-stream-feedback.md). krm-foyer hosts krm-stream; it does not
 reimplement any of it. Problems found while building on it are reported to krm-stream, the
 way Voter did in its consumer feedback notes.

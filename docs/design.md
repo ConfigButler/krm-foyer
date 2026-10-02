@@ -463,14 +463,15 @@ body of an error status:
 | 400 or 422 | `SCOPE_INVALID`, terminal, with Kubernetes' message |
 | 410 Gone on the open watch | `RESYNC_REQUIRED`, and a fresh snapshot at once |
 | A redirect | `INTERNAL`, terminal: it is not followed, as `/k8s` follows none, so the token goes nowhere else |
-| 429, 5xx, no answer, or an end before the snapshot is complete or hardly after it | `UPSTREAM_UNAVAILABLE`, not terminal, with the API server's hint as `retryAfterMs`. The stream closes, and krm-stream's browser client opens it again after a wait that grows, as a new request through the gate and its request rate. (A 429 that names `Retry-After` in its header is first asked again by client-go itself, at the API server's pace, up to ten times) |
+| An end before the snapshot is complete, or within a second of it | Opened again once on the same stream, as after a routine end; a second such end in a row is `UPSTREAM_UNAVAILABLE`, as below |
+| 429, 5xx, or no answer | `UPSTREAM_UNAVAILABLE`, not terminal, with the API server's hint as `retryAfterMs`. The stream closes, and krm-stream's browser client opens it again after a wait that grows, as a new request through the gate and its request rate. (A 429 that names `Retry-After` in its header is first asked again by client-go itself, at the API server's pace, up to ten times) |
 
 What went wrong inside never reaches the browser, and is logged by its kind
 (`status_503`, `connection`, `tls`...), never by its text: the API server, or whatever
 answered instead, writes that text, and it could hold anything, the token among it.
-`/k8s` logs the same way. krm-stream maps the API server's answers since 0.5.0;
-krm-foyer adds the redirect and the end before a watch was of use, and logs through
-krm-stream's diagnostics hook ([feedback](investigations/krm-stream-feedback.md)). Every built-in projection may be
+`/k8s` logs the same way. krm-stream maps the API server's answers, and since 0.6.0
+refuses the redirect and stops reopening a watch that ends before it was of use;
+krm-foyer logs through krm-stream's diagnostics hook ([feedback](investigations/krm-stream-feedback.md)). Every built-in projection may be
 requested: none hides anything from a user who can read the whole object through `/k8s`
 (see below).
 

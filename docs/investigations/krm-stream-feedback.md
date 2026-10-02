@@ -16,8 +16,41 @@ any resource with `ScopePolicy.AnyResource`, and lets `Principal` choose its ref
 krm-foyer's own mapping, status capture and backoff are gone.
 
 Reviewing krm-foyer's integration found three more, below the original asks as
-[asks 6 to 8](#ask-6-refuse-redirects-in-the-kubernetes-backend). krm-foyer works around
-each meanwhile.
+[asks 6 to 8](#ask-6-refuse-redirects-in-the-kubernetes-backend).
+
+## Status (2026-10-02): asks 6 to 8 are in krm-stream 0.6.0
+
+krm-stream 0.6.0 took all three (krm-stream #42), and krm-foyer moved to it. It helped:
+krm-foyer's stream package lost its hand-built HTTP client, its redirect mapping, its
+timing of each watch and the `MinWatchLife` setting that came with it, about sixty
+lines and the subtlest of them. What remains of krm-foyer's backend wrapper only counts
+the watches open at the API server.
+
+- **Ask 6.** `kube.NewBackendForConfig` refuses redirects through `kube.HTTPClientFor`,
+  and a refused redirect is a terminal `INTERNAL` with `kube.ErrRedirectRefused` as its
+  cause. krm-foyer's test, in which an API server redirects the watch elsewhere, passes
+  unchanged against it, and fails against a client-go client that follows redirects.
+  krm-foyer names the cause `redirect` in its log by matching `ErrRedirectRefused`.
+- **Ask 7.** The gateway, and a shared watch, stop reopening a watch that ends before it
+  is of use, by the same one-second rule krm-foyer used. One such end is reopened on the
+  connection, as continuity loss is; the second in a row closes it with
+  `UPSTREAM_UNAVAILABLE`. That is one attempt more than krm-foyer made, and bounded, so
+  krm-foyer's tests now expect two. The `Unwrap` pitfall is handled and commented in
+  both places.
+- **Ask 8.** The operations guide now says that client-go retries a 429 or 5xx with
+  `Retry-After` itself, and why krm-stream keeps that on: the API server sets the pace,
+  and a reconnect would cost every browser a fresh snapshot. That reasoning holds for
+  krm-foyer too, and we leave it there.
+
+One thing we noticed while moving: the 0.6.0 release job failed at "a stranger can `go
+get` this". `sum.golang.org` and `proxy.golang.org` answered `unknown revision
+gateway/v0.6.0` for some time after the tag was pushed, so `go get` of 0.6.0 failed for
+everyone, and the npm publish after that job did not run. 0.5.0 released through the
+same flow without it. We do not know which lookup reached the proxy before the tag
+existed; the release-PR builds of #47 are where we would look first, since they name the
+unreleased version. krm-foyer fetched 0.6.0 with `GOPROXY=direct` meanwhile, and stays on
+the 0.5.0 browser bundle until 0.6.0 is on npm: its source differs only in the version
+string.
 
 ## The asks at a glance
 
@@ -223,6 +256,8 @@ decoder the host supplies, with today's text as the fallback, would cover it.
 
 ## Ask 6: refuse redirects in the Kubernetes backend
 
+*Taken in 0.6.0.*
+
 **This one is about credentials.** client-go follows redirects, and its transport adds the
 bearer token to the redirected request too. A backend built with
 `kube.NewBackendForConfig(cfg)` from a `rest.Config` holding the caller's token therefore
@@ -240,6 +275,8 @@ should say a host-built client must refuse redirects too.
 
 ## Ask 7: treat a watch that ends before it was of use as a failure
 
+*Taken in 0.6.0.*
+
 The stream loop reopens at once, on the same connection, after `ErrWatchClosed`, and
 after a `RESYNC_REQUIRED`. That is right for the API server's routine timeout, which
 comes after half an hour. But an upstream that ends every watch before its snapshot is
@@ -253,6 +290,8 @@ detail cost us a bug: `StreamError.Unwrap` returns `Cause`, so an `UPSTREAM_UNAV
 whose cause is `ErrWatchClosed` is still read by the loop as a routine close.
 
 ## Ask 8: say that client-go retries a 429 with Retry-After itself
+
+*Taken in 0.6.0, as documentation; the retries stay on, for reasons we share.*
 
 client-go asks again on its own, up to ten times, when a 429 or 5xx answer carries a
 `Retry-After` header, before the backend sees the error. The API server sets the pace, so
