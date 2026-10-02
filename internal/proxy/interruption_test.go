@@ -22,7 +22,10 @@ type interruptionCase struct {
 	creds    Credentials
 	upstream http.HandlerFunc
 	header   http.Header
-	status   int
+	// occupy holds one request of the session open first, with a concurrency limit
+	// of one per session.
+	occupy bool
+	status int
 	// page must contain these, as text a person reads.
 	page []string
 }
@@ -57,17 +60,35 @@ func interruptionCases() []interruptionCase {
 				w.Header().Set("Content-Type", "text/html")
 				_, _ = io.WriteString(w, "<script>steal()</script>")
 			}, status: http.StatusBadGateway, page: []string{"text/html"}},
+		{name: "a bound reached", target: "/k8s/api/v1/namespaces",
+			upstream: holdingHandler, occupy: true, status: http.StatusTooManyRequests,
+			page: []string{"Too many requests at once", "requests in flight"}},
 	}
 }
 
-func (tc interruptionCase) send(t *testing.T, extra http.Header) answer {
+// foyer serves the case's upstream behind a proxy, with the session's one slot
+// already taken when the case occupies it.
+func (tc interruptionCase) foyer(t *testing.T) foyer {
 	t.Helper()
 	api := newAPIServer(t, tc.upstream)
 	creds := tc.creds
 	if creds == nil {
 		creds = credentials{token: userToken}
 	}
-	f := newFoyer(t, api, creds)
+	o := frontOptions{}
+	if tc.occupy {
+		o.config = func(c *Config) { c.MaxSessionConcurrentRequests = 1 }
+	}
+	f := newFoyerWith(t, api, creds, o)
+	if tc.occupy {
+		f.open(t, "/k8s/api/v1/configmaps?watch=1")
+	}
+	return f
+}
+
+func (tc interruptionCase) send(t *testing.T, extra http.Header) answer {
+	t.Helper()
+	f := tc.foyer(t)
 	header := http.Header{}
 	for k, v := range tc.header {
 		header[k] = v
@@ -251,12 +272,7 @@ func TestSignInReturnsToTheURL(t *testing.T) {
 func TestInterruptionsAreLoggedWithThePath(t *testing.T) {
 	for _, tc := range interruptionCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			api := newAPIServer(t, tc.upstream)
-			creds := tc.creds
-			if creds == nil {
-				creds = credentials{token: userToken}
-			}
-			f := newFoyer(t, api, creds)
+			f := tc.foyer(t)
 			f.request(t, http.MethodGet, tc.target, nil, tc.header)
 			path, _, _ := strings.Cut(tc.target, "?")
 			if logs := f.logs.String(); !strings.Contains(logs, `"msg":"interruption"`) || !strings.Contains(logs, `"path":"`+path+`"`) {

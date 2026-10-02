@@ -114,14 +114,15 @@ func (i *Interruption) Write(w http.ResponseWriter) {
 
 // titles name each kind of interruption for a person.
 var titles = map[string]string{
-	"Unauthorized":       "Sign in to continue",
-	"ServiceUnavailable": "Your session could not be checked",
-	"BadRequest":         "Not a canonical path",
-	"NotFound":           "Not a Kubernetes API route",
-	"NotImplemented":     "Not supported by krm-foyer",
-	"BadGateway":         "Held back by krm-foyer",
-	"CSRFProofRequired":  "Refused by krm-foyer",
-	"CrossOriginRequest": "Refused by krm-foyer",
+	"Unauthorized":              "Sign in to continue",
+	"ServiceUnavailable":        "Your session could not be checked",
+	"BadRequest":                "Not a canonical path",
+	"NotFound":                  "Not a Kubernetes API route",
+	"NotImplemented":            "Not supported by krm-foyer",
+	"BadGateway":                "Held back by krm-foyer",
+	"CSRFProofRequired":         "Refused by krm-foyer",
+	"CrossOriginRequest":        "Refused by krm-foyer",
+	"TooManyConcurrentRequests": "Too many requests at once",
 }
 
 // page answers with the interruption as a page, for a person browsing.

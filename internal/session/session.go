@@ -195,6 +195,24 @@ func (m *Manager) Check(r *http.Request) error {
 	return err
 }
 
+// Handle names the session r's one cookie names, for the bounds kept per session:
+// an opaque string, the same for every request of that session and for no other,
+// that is neither the session ID nor the store's key. It is empty unless r carries
+// exactly one well-formed session cookie, which every request a session let through
+// does.
+func Handle(r *http.Request) string {
+	cookies := r.CookiesNamed(CookieName)
+	if len(cookies) != 1 {
+		return ""
+	}
+	key, ok := keyOf(cookies[0].Value)
+	if !ok {
+		return ""
+	}
+	h := sha256.Sum256(append([]byte("krm-foyer session handle\x00"), key[:]...))
+	return base64.RawURLEncoding.EncodeToString(h[:])
+}
+
 // ExpiresAt is when s ends however busy it is.
 func (m *Manager) ExpiresAt(s Session) time.Time { return m.end(s) }
 

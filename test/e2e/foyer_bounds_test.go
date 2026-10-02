@@ -158,4 +158,35 @@ var _ = Describe("krm-foyer's bounds", Label("foyer"), func() {
 		Expect(fx.briefMetric(reached)).To(Equal(beforeReached + 1))
 		Expect(fx.briefMetric(cut)).To(Equal(beforeCut + 1))
 	})
+
+	It("refuses a session's request past its concurrency limit with its own 429, before it reaches the API server", func(ctx SpecContext) {
+		ns := fx.namespace()
+		fx.grant(ns, aliceK8sName, "configmaps", "get", "list", "watch")
+		alice := signInBrief(ctx, alice)
+		reached := `krm_foyer_bound_reached_total{bound="session_concurrent_requests"}`
+		before := fx.briefMetric(reached)
+		Expect(fx.briefMetric(`krm_foyer_bound_limit{bound="session_concurrent_requests"}`)).To(Equal(2.0))
+
+		// The brief instance lets a session have two requests in flight.
+		path := "/api/v1/namespaces/" + ns + "/configmaps"
+		watches := []*stream{
+			alice.watch(ctx, path+"?watch=1&timeoutSeconds=600"),
+			alice.watch(ctx, path+"?watch=1&timeoutSeconds=600"),
+		}
+		for _, w := range watches {
+			Expect(w.resp.StatusCode).To(Equal(http.StatusOK))
+		}
+		refused := alice.viaFoyer(ctx, http.MethodGet, path, nil, nil)
+		Expect(refused.Code).To(Equal(http.StatusTooManyRequests), "%s", refused.Body)
+		Expect(refused.Header.Get("Krm-Foyer-Interruption")).To(Equal("TooManyConcurrentRequests"))
+		Expect(refused.Header.Values("Retry-After")).To(BeEmpty())
+		Expect(refused.status().Reason).To(Equal("TooManyConcurrentRequests"))
+		assertNeverAudited(ctx, refused.Marker)
+		Expect(fx.briefMetric(reached)).To(Equal(before + 1))
+
+		By("and lets one through again once a watch has ended")
+		_ = watches[0].resp.Body.Close()
+		eventually(ctx, func() int { return alice.viaFoyer(ctx, http.MethodGet, path, nil, nil).Code }).
+			Should(Equal(http.StatusOK))
+	})
 })

@@ -471,7 +471,7 @@ func (a *Auth) Token(r *http.Request) (proxy.Credential, *interruption.Interrupt
 	if err != nil {
 		return proxy.Credential{}, a.refusal(err)
 	}
-	return proxy.Credential{Token: s.IDToken, Live: func(ctx context.Context) bool {
+	return proxy.Credential{Token: s.IDToken, Session: session.Handle(r), Live: func(ctx context.Context) bool {
 		err := a.cfg.Sessions.Check(r.WithContext(ctx))
 		if err != nil && !errors.Is(err, session.ErrNoSession) {
 			a.logger.Warn("session store failed during a session check", "err", err)

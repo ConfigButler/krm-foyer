@@ -78,6 +78,7 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		scopes, apiServer, apiServerCA string
 		idle, absolute, checkEvery     time.Duration
 		maxDuration                    time.Duration
+		perSession, inAll              int
 	)
 	fs.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
 	fs.StringVar(&cfg.tlsCert, "tls-cert-file", "", "serve TLS with this certificate (PEM); needs -tls-key-file")
@@ -97,6 +98,10 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		"how often an open response asks whether its session is still live; it is cut short when not")
 	fs.DurationVar(&maxDuration, "max-response-duration", proxy.DefaultMaxResponseDuration,
 		"how long a response, a watch above all, may stay open; it is cut short then. Below -session-idle-timeout")
+	fs.IntVar(&perSession, "max-session-concurrent-requests", proxy.DefaultMaxSessionConcurrentRequests,
+		"how many requests, watches included, one session may have in flight; more get 429")
+	fs.IntVar(&inAll, "max-concurrent-requests", proxy.DefaultMaxConcurrentRequests,
+		"how many requests, watches included, this replica may have in flight; more get 429")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -172,6 +177,10 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		return config{}, fmt.Errorf("-max-response-duration must be positive and below -session-idle-timeout (%v), got %v", idle, maxDuration)
 	}
 	login.kubernetes.MaxResponseDuration = maxDuration
+	if perSession <= 0 || inAll <= 0 {
+		return config{}, fmt.Errorf("-max-session-concurrent-requests and -max-concurrent-requests must be positive, got %d and %d", perSession, inAll)
+	}
+	login.kubernetes.MaxSessionConcurrentRequests, login.kubernetes.MaxConcurrentRequests = perSession, inAll
 	if login.kubernetes.Server, err = url.Parse(apiServer); err != nil {
 		return config{}, fmt.Errorf("-kubernetes-server: %w", err)
 	}

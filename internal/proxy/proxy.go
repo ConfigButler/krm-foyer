@@ -38,6 +38,9 @@ type Credentials interface {
 type Credential struct {
 	// Token is the user's bearer token.
 	Token string
+	// Session names the session the token came from, for the bounds kept per
+	// session. It is opaque, and never logged or sent anywhere.
+	Session string
 	// Live reports whether the token may still be used, without counting as use:
 	// false once the session it came from has ended, and false when that cannot be
 	// told before ctx ends. Every open response asks it once per session-check
@@ -63,7 +66,17 @@ type Config struct {
 	// MaxResponseDuration is how long a response may stay open. Zero means
 	// DefaultMaxResponseDuration.
 	MaxResponseDuration time.Duration
+	// MaxSessionConcurrentRequests and MaxConcurrentRequests are how many requests
+	// may be in flight at once for one session, and for this replica. Zero means
+	// the defaults below.
+	MaxSessionConcurrentRequests, MaxConcurrentRequests int
 }
+
+// The concurrency limits when none is configured. See docs/bounds.md for why.
+const (
+	DefaultMaxSessionConcurrentRequests = 64
+	DefaultMaxConcurrentRequests        = 2000
+)
 
 // DefaultMaxResponseDuration is the response duration when none is configured: the
 // shortest time the API server keeps a watch open that names no timeoutSeconds.
@@ -81,6 +94,7 @@ type Proxy struct {
 	metrics     *metrics.Metrics
 	checkEvery  time.Duration
 	maxDuration time.Duration
+	concurrency *concurrency
 }
 
 // New returns a proxy to cfg.Server.
@@ -111,6 +125,16 @@ func New(cfg Config) (*Proxy, error) {
 		return nil, fmt.Errorf("response duration must be positive, got %v", maxDuration)
 	}
 	cfg.Metrics.BoundLimit(metrics.BoundResponseDuration, maxDuration.Seconds())
+	perSession, total := cfg.MaxSessionConcurrentRequests, cfg.MaxConcurrentRequests
+	if perSession == 0 {
+		perSession = DefaultMaxSessionConcurrentRequests
+	}
+	if total == 0 {
+		total = DefaultMaxConcurrentRequests
+	}
+	if perSession < 0 || total < 0 {
+		return nil, fmt.Errorf("concurrency limits must be positive, got %d per session and %d in all", perSession, total)
+	}
 	return &Proxy{
 		server: url.URL{Scheme: cfg.Server.Scheme, Host: cfg.Server.Host},
 		transport: &http.Transport{
@@ -130,6 +154,7 @@ func New(cfg Config) (*Proxy, error) {
 		metrics:     cfg.Metrics,
 		checkEvery:  checkEvery,
 		maxDuration: maxDuration,
+		concurrency: newConcurrency(perSession, total, cfg.Metrics),
 	}, nil
 }
 
@@ -184,6 +209,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.interrupt(w, r, refused)
 		return
 	}
+	release, refused := p.concurrency.acquire(cred.Session)
+	if refused != nil {
+		p.interrupt(w, r, refused)
+		return
+	}
+	defer release()
 
 	// From here the request may reach the API server. Its context is cancelled when
 	// krm-foyer cuts the response short, which cancels the request upstream too.

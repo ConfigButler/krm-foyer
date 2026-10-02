@@ -30,6 +30,8 @@ type credentials struct {
 	token   string
 	refused *interruption.Interruption
 	live    func(context.Context) bool
+	// session names the session; empty means "s1".
+	session string
 }
 
 func (c credentials) Token(*http.Request) (Credential, *interruption.Interruption) {
@@ -37,7 +39,11 @@ func (c credentials) Token(*http.Request) (Credential, *interruption.Interruptio
 	if live == nil {
 		live = func(context.Context) bool { return true }
 	}
-	return Credential{Token: c.token, Live: live}, c.refused
+	session := c.session
+	if session == "" {
+		session = "s1"
+	}
+	return Credential{Token: c.token, Live: live, Session: session}, c.refused
 }
 
 // apiServer stands in for the API server and records what reached it.

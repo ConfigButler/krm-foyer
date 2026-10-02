@@ -103,6 +103,11 @@ bugs are here, where they are cheap to find:
   the API server answers, one whose session check hangs, and one whose browser has
   stopped reading; a live session's response is never touched. The same holds for a
   response open longer than its duration.
+- **Concurrency bounds** ([internal/proxy](../internal/proxy)): a request past a
+  session's or the replica's limit gets a 429 naming the bound and never reaches the
+  API server, and every way a request can end (complete, the browser leaving, the
+  session ending, its duration up, an answer held back, a dropped connection) gives its
+  slot back.
 - **Login** ([internal/auth](../internal/auth)) runs against a fake issuer in the test
   that behaves like a strict one (PKCE enforced, codes single use) unless told to
   misbehave: a token for another audience or issuer, expired, signed by a stranger, with
@@ -155,7 +160,9 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   aborted when its session logs out and when it expires, and the audit log shows the API
   server completed it within a minute although it asked for `timeoutSeconds=600`: the
   cancellation reached the API server. The same is shown for a watch open longer than
-  its duration. Each was seen to fail against a build that did not cut the response.
+  its duration. Each was seen to fail against a build that did not cut the response. A
+  session's third request while two watches are open gets krm-foyer's own 429 and never
+  reaches the API server, which a build without the per-session check failed.
 - **The hello example** (label `browser`) is the claim that krm-foyer is usable, not
   only correct. Chromium ([chromedp/headless-shell](https://hub.docker.com/r/chromedp/headless-shell),
   pinned by digest, driven from Go with chromedp) runs in the network namespace of the
@@ -230,8 +237,8 @@ before it starts.
 
 Beside it runs a second, brief krm-foyer ([foyer-brief.yaml](../test/e2e/cluster/foyer-brief.yaml)):
 the same image, certificate, public URL and Dex client, but sessions that end 45
-seconds after login, a session check every second, and responses cut short after 20
-seconds. The specs that wait for a session to expire or a bound to be reached use it, on
+seconds after login, a session check every second, responses cut short after 20
+seconds, and two requests in flight per session. The specs that wait for a session to expire or a bound to be reached use it, on
 a NodePort of its own, so no other spec has to race its session.
 
 The front door is Gateway API, implemented by Traefik: the official chart, at the version

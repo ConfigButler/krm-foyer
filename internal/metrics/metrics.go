@@ -24,11 +24,14 @@ type Metrics struct {
 	boundLimit    *prometheus.GaugeVec
 	boundUsage    *prometheus.HistogramVec
 	boundReached  *prometheus.CounterVec
+	inFlight      prometheus.Gauge
 }
 
 // The bounds, as the bound label of the krm_foyer_bound_* metrics names them.
 const (
-	BoundResponseDuration = "response_duration"
+	BoundResponseDuration          = "response_duration"
+	BoundSessionConcurrentRequests = "session_concurrent_requests"
+	BoundConcurrentRequests        = "concurrent_requests"
 )
 
 // The causes of krm_foyer_responses_cut_short_total: why krm-foyer cut a response
@@ -64,6 +67,10 @@ func New() *Metrics {
 			Name: "krm_foyer_bound_reached_total",
 			Help: "Requests refused, and responses cut short, because a bound was reached.",
 		}, []string{"bound"}),
+		inFlight: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "krm_foyer_requests_in_flight",
+			Help: "Requests through /k8s open now, watches included.",
+		}),
 	}
 	m.registry.MustRegister(
 		collectors.NewGoCollector(),
@@ -73,6 +80,7 @@ func New() *Metrics {
 		m.boundLimit,
 		m.boundUsage,
 		m.boundReached,
+		m.inFlight,
 	)
 	// Every cause is there from the start, so a dashboard shows a zero rather than
 	// no data.
@@ -128,4 +136,13 @@ func (m *Metrics) BoundReached(bound string) {
 		return
 	}
 	m.boundReached.WithLabelValues(bound).Inc()
+}
+
+// InFlight counts a request through /k8s in flight; done counts it out again.
+func (m *Metrics) InFlight() (done func()) {
+	if m == nil {
+		return func() {}
+	}
+	m.inFlight.Inc()
+	return m.inFlight.Dec
 }

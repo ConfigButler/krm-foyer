@@ -149,7 +149,9 @@ Why these defaults:
 
 A refusal is an [interruption](design.md#interruptions), like every other answer
 krm-foyer gives instead of the API server's. It carries the `Krm-Foyer-Interruption`
-header, and its `Status` names the bound in `details.causes`.
+header, and its `Status` names the bound in `details.causes`: one cause with reason
+`BoundReached`, the bound as the metrics name it in `field` (such as
+`session_concurrent_requests`), and its limit in `message`.
 
 That header is what tells krm-foyer's 429 from the API server's. The API server sends
 429s of its own, from Priority and Fairness, and they pass through unchanged and without

@@ -164,6 +164,15 @@ func TestLiveFollowsTheSession(t *testing.T) {
 	if !cred.Live(t.Context()) {
 		t.Fatal("a live session's credential is not live")
 	}
+	// The session's name for bounds is stable, its own, and not its ID.
+	again, _ := h.auth.Token(cookieRequest(b))
+	other := h.browser()
+	other.login(alice, "/")
+	theirs, _ := h.auth.Token(cookieRequest(other))
+	if id := b.cookie(session.CookieName); cred.Session == "" || cred.Session != again.Session ||
+		cred.Session == theirs.Session || strings.Contains(cred.Session, id) {
+		t.Errorf("Session %q (again %q, another session %q) is not an opaque name of its own", cred.Session, again.Session, theirs.Session)
+	}
 
 	h.store.down.Store(true)
 	if cred.Live(t.Context()) {
