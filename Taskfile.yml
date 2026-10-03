@@ -7,8 +7,8 @@ vars:
   IMAGE: '{{.IMAGE | default "ghcr.io/configbutler/krm-foyer"}}'
   # The krm-stream browser bundle the hello example vendors, and npm's integrity for
   # its package. Bump both together, then `task vendor-krm-stream`.
-  KRM_STREAM_VERSION: 0.5.0
-  KRM_STREAM_INTEGRITY: sha512-qX8mwq/Ln5kJCjtTcCz/mcz2M1SUlREDFuPecV4N9UBvExjnEm2XZARyYGf2sXKb8SvTNYWTpYzx1dFdcFKmwA==
+  KRM_STREAM_VERSION: 0.6.0
+  KRM_STREAM_INTEGRITY: sha512-8vGYVE3np6Ec0bs+Bd0/Y7+PqPp4sQ2YRwbR3Y/VrPPeiIxcHyKt8GHtHa9uUqCp59YXgPALMIJwRh/RXIxhFQ==
   VERSION:
     sh: git describe --tags --always --dirty 2>/dev/null || echo dev
 
