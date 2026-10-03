@@ -10,8 +10,9 @@ tries to get past them, against a real API server and Dex, with krm-foyer's serv
 account as cluster-admin bait. Each other requirement becomes a property of krm-foyer
 when its test exists and passes, and not before. Since step 4, every
 [bound](bounds.md) is reached by a test, and an open response ends with its session.
-Since step 5, the hello example follows its notes live through krm-stream, each watch
-opened as the user, and a rehearsal holds 1800 streams of 200 identities on one replica.
+Since step 5, the hello example follows its notes live through krm-stream, and a
+rehearsal holds 1800 streams of 200 identities on one replica. Since step 5b, those
+streams share one watch per scope, with the API server asked about every user.
 
 ## Order of work
 
@@ -69,6 +70,15 @@ Each step makes pending specs real and ends with `task verify` green.
    recovery after a disconnect tested. The rehearsal with 200 identities measures what
    one replica holds, which the per-replica defaults in [bounds](bounds.md) only
    assume.
+5b. **Shared watches** (done, 2026-10-03), moved ahead of refresh, which is not needed
+   yet. For the resources configured, every stream of one scope reads one watch, opened
+   with a narrow identity of krm-foyer's own; who each user is comes from a
+   SelfSubjectReview with their token, and whether they may from SubjectAccessReviews at
+   opening and every recheck, reused briefly for exactly the same question. Metrics
+   count watches by identity, the streams on shared watches and every access decision.
+   The hello example's notes are shared, and the rehearsal runs both ways. A
+   [decision guide](watches.md) says when to share, stream per-user, or use a native
+   watch, which stays available but is not where the work goes.
 6. **Refresh and shared session storage, when the demo shows the need** (was step 5, and
    before that 2b): refresh serialized per session and bounded, a refused refresh ending
    the session, the disablement bound measured for Dex, and a shared store so more than
@@ -262,7 +272,13 @@ Security items need tests that try to get past the boundary.
       connection between browser and krm-foyer is recovered by krm-stream's client, with
       what changed meanwhile and the user's draft kept (browser spec, which a page that
       does not retry failed)
-- [ ] Shared watches with per-subscriber SubjectAccessReview and bounded rechecks
+- [x] Shared watches with per-subscriber SubjectAccessReview and bounded rechecks: one
+      watch for every user's streams of a scope, opened as the shared-watch identity and
+      never the bait (e2e, the audit log as witness); a user RBAC refuses gets nothing
+      from it; a revoked grant ends that user's stream at the next recheck and nobody
+      else's; logout leaves the watch to the others; tokens never mix; a failed review
+      is never an allow (unit tests, each checked against a build broken on purpose, and
+      e2e). Configured per resource; see [watches](watches.md)
 - [x] A stream ends when its session or its token expires, whichever comes first, and
       logout closes that session's streams: aborted, and its watch cancelled at the API
       server within the session-check interval (one replica; unit tests, and e2e with
@@ -271,7 +287,8 @@ Security items need tests that try to get past the boundary.
 - [x] A rehearsal with 200 identities, as a repeatable test, which also sets the
       per-replica defaults in [bounds](bounds.md): 1800 streams on one replica, part of
       the e2e suite, with what it measured in [bounds](bounds.md#measured-the-rehearsal).
-      Native watches through `/k8s` are not measured yet
+      Run twice, per-user and shared, the shared run also measuring the access checks.
+      Native watches through `/k8s` are not measured, by decision ([watches](watches.md))
 
 ### Seeing what happened
 

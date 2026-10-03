@@ -147,6 +147,26 @@ bugs are here, where they are cheap to find:
   again on the same stream, as the user, with a fresh snapshot of what changed in
   between, and without the wait or the warning of a failure. Each was seen to fail against a
   build broken on purpose.
+- **Shared watches** ([internal/stream](../internal/stream/shared_test.go)), against an
+  `httptest` API server that also answers SelfSubjectReviews and SubjectAccessReviews.
+  Six streams of two users on one scope are one watch, opened with the shared token, two
+  reviews per user rather than per stream, and one change reaches all six; the last
+  stream out closes the watch. A user RBAC refuses gets a terminal `FORBIDDEN` and none
+  of the notes, though another user's stream holds the watch open, and the reviews ask
+  about that user as the API server resolved them: username, UID, groups and extras. A
+  grant taken away ends that user's stream at the next recheck, and the other stream
+  carries on with the next change. A user's token goes with their SelfSubjectReview and
+  their own watches alone, the shared token with the reviews and the shared watch alone,
+  and the shared identity's name reaches no browser and no log. A token the API server
+  does not take, reviews failing or answered without a decision, and the shared identity
+  refused each end the stream without serving it. A session ending closes its own
+  streams and leaves the watch to the others. Seven builds broken on purpose (every
+  subscriber allowed, no sharing, no timed recheck, a decision key without groups,
+  errors kept, the shared identity's refusal passed on, no reuse at all) each failed.
+  `FuzzDecisionsAreTransparent` checks, from the outside, that reusing decisions never
+  changes an answer: sequences of questions that differ in one field of the subject or
+  the scope, against an oracle that knows nothing of the cache. Keys missing the UID,
+  the extras, the label selector or the resource each failed it within a second.
 - **Upstream text in the log** ([internal/proxy](../internal/proxy),
   [internal/upstream](../internal/upstream)): an API server that echoes the token in a
   malformed response, a `Content-Type` or a `Location` never gets it into krm-foyer's
@@ -210,7 +230,8 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   never refuses failed. A list the API server compresses to a few hundred bytes, but
   that decodes to 200 KiB, never passes the brief instance's 128 KiB bound as a complete
   answer, which a build without the byte bound failed.
-- **Streams** (in the `foyer` label): bob streams the notes RBAC lets him read, gets the
+- **Streams** (in the `foyer` label), of ConfigMaps, which are not shared: bob streams
+  the ConfigMaps RBAC lets him read, gets the
   snapshot and then a change made while he watches, and the audit log names bob, and
   nobody else, for every request of that stream. alice, with no grant, gets a terminal
   `FORBIDDEN` with Kubernetes' own message, and the audit log shows the API server
@@ -224,10 +245,23 @@ and Gomega, like gitops-reverser's suite. It has two parts:
   two streams open, its limit, may still open two native watches, and its third stream
   is krm-foyer's 429 and never reaches the API server; the build before stream limits
   failed it.
+- **Shared watches** (in the `foyer` label; notes are shared in the fixture, with an
+  identity of their own beside the cluster-admin bait): three streams each for alice
+  and bob are one watch at the API server, six subscriptions, every user resolved once a
+  stream and asked about less often, and one change reaches all six; the audit log shows
+  every request on the namespace's notes made by the shared identity, never the bait or
+  a user, and exactly one watch. Bob, without a grant, gets `FORBIDDEN` and none of the
+  notes alice's stream holds open, and his token went with his SelfSubjectReview alone.
+  Bob logging out ends his stream and leaves the watch to alice. On the brief instance,
+  which rechecks every 2 seconds, taking bob's grant away ends his stream within 10
+  seconds while alice's carries on.
 - **The rehearsal** (labels `foyer` and `rehearsal`) holds 1800 streams of 200 signed-in
-  identities on one replica, and fails unless one change reaches all of them, every
-  stream is aborted within the session-check interval of its logout, and streams,
-  watches at the API server and goroutines all return to where they were. What it
+  identities on one replica, twice: streams of ConfigMaps, each a watch of its user's
+  own, and streams of shared notes, one watch for all of them. It fails unless one
+  change reaches all of them, every stream is aborted within the session-check interval
+  of its logout, and streams, watches at the API server and goroutines all return to
+  where they were; the shared run also holds every stream past a recheck interval and
+  counts the access checks. What it
   measured is in [bounds](bounds.md#measured-the-rehearsal). Dex has its 200 users from
   `start-cluster.sh`, which `task demo` uses too.
 - **The hello example** (label `browser`) is the claim that krm-foyer is usable, not

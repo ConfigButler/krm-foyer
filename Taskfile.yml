@@ -42,6 +42,7 @@ tasks:
       - go test -run '^$' -fuzz '^FuzzCheckResponse$' -fuzztime 10s ./internal/proxy/
       - go test -run '^$' -fuzz '^FuzzCheckMutation$' -fuzztime 10s ./internal/session/
       - go test -run '^$' -fuzz '^FuzzLocalPath$' -fuzztime 10s ./internal/auth/
+      - go test -run '^$' -fuzz '^FuzzDecisionsAreTransparent$' -fuzztime 10s ./internal/stream/
       # The browser helper, /_foyer/foyer.js, with Node's own test runner: no npm, no build.
       - node --test 'internal/pages/*.test.js'
 

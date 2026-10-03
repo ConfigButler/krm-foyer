@@ -573,7 +573,7 @@ func TestACutStreamAbortsWithoutTheWriteDeadline(t *testing.T) {
 	s.ServeHTTP(w, r)
 }
 
-// gauge reads one unlabelled gauge from m, as scraped.
+// gauge reads one series from m, as scraped: a name, with its labels if it has any.
 func gauge(t *testing.T, m *metrics.Metrics, name string) string {
 	t.Helper()
 	w := httptest.NewRecorder()
@@ -606,22 +606,23 @@ func TestStreamsHaveLimitsOfTheirOwn(t *testing.T) {
 }
 
 // The streams open, and the watches they hold at the API server, are counted apart:
-// one each while a stream is open, none once it has ended.
+// one each while a stream is open, none once it has ended. A user's own watch is
+// counted as one.
 func TestStreamsAndTheirWatchesAreCounted(t *testing.T) {
 	api := newAPIServer(t, nil)
 	m := metrics.New()
 	f := newFoyer(t, api, credentials{token: userToken}, func(_ *Config, g *gate.Config) { g.Metrics = m })
 	ctx, cancel := context.WithCancel(t.Context())
 	f.open(ctx, t, notes, nil).until(t, "synced")
-	if s, w := gauge(t, m, "krm_foyer_streams_open"), gauge(t, m, "krm_foyer_upstream_watches_open"); s != "1" || w != "1" {
+	if s, w := gauge(t, m, "krm_foyer_streams_open"), gauge(t, m, userWatches); s != "1" || w != "1" {
 		t.Errorf("while open: %s streams and %s watches, want 1 and 1", s, w)
 	}
 	cancel()
 	deadline := time.Now().Add(within)
-	for gauge(t, m, "krm_foyer_streams_open") != "0" || gauge(t, m, "krm_foyer_upstream_watches_open") != "0" {
+	for gauge(t, m, "krm_foyer_streams_open") != "0" || gauge(t, m, userWatches) != "0" {
 		if time.Now().After(deadline) {
 			t.Fatalf("after the browser left: %s streams and %s watches, want none",
-				gauge(t, m, "krm_foyer_streams_open"), gauge(t, m, "krm_foyer_upstream_watches_open"))
+				gauge(t, m, "krm_foyer_streams_open"), gauge(t, m, userWatches))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -629,6 +630,9 @@ func TestStreamsAndTheirWatchesAreCounted(t *testing.T) {
 		t.Errorf("a stream counted as %s requests in flight", n)
 	}
 }
+
+// userWatches is the series of the watches opened with a user's own token.
+const userWatches = `krm_foyer_upstream_watches_open{identity="user"}`
 
 // texts returns the text of each note in events, by name, as the last event said.
 func texts(t *testing.T, events []event) map[string]string {
