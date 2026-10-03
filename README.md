@@ -38,15 +38,18 @@ all. A fixture made by an older version of the scripts is refused with a message
 so; run `task e2e-down` once, then `task demo` again.
 
 The example is one HTML file and one script with no backend of its own: it follows the
-notes live through `/stream` and changes them through `/k8s`, both as the signed-in user,
-and the 403 and 409 it shows are Kubernetes' own answers. Open it in two tabs to see a
+notes live through `/stream`, one [shared watch](docs/watches.md) for every user that
+RBAC allows, and changes them through `/k8s` as the signed-in user; the 403 and 409 it
+shows are Kubernetes' own answers. Open it in two tabs to see a
 change in one appear in the other, and a conflict when both edit the same note.
 
 ## Principles
 
 - **The issuer decides who you are; Kubernetes decides what you may do.** Every request
   reaches the API server with the user's own OIDC token, and RBAC and admission answer it.
-  No impersonation, and no fallback to krm-foyer's service account.
+  No impersonation, and no fallback to krm-foyer's service account. A
+  [shared watch](docs/watches.md), where configured, is opened once with an identity of
+  its own, and the API server is asked about every user who reads it.
 - **Tokens stay on the server.** The browser holds only an opaque session ID in a Secure,
   HttpOnly cookie. Frontend code never sees a token. The session ID is itself a bearer
   credential, and is guarded like one.

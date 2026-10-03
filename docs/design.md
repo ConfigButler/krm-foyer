@@ -264,7 +264,10 @@ What krm-foyer still does on every request, none of it an access decision:
   determined user, who can open another session; the API server's Priority and Fairness
   limits each user. There is no bound on page size, because it would not bound anything
   ([why](bounds.md#left-out-a-bound-on-page-size)).
-- **Never a privileged service account** as a fallback for a user's request.
+- **Never a privileged service account** as a fallback for a user's request. The one
+  identity of krm-foyer's own is the optional [shared-watch identity](#shared-watches):
+  given explicitly, used for shared watches and the reviews that guard them alone, and
+  never the pod's service account unless pointed at it.
 
 ### What may I do
 
@@ -440,10 +443,11 @@ not undo writes Kubernetes already accepted.
 
 krm-foyer hosts krm-stream's gateway on `/stream/v1` and supplies what the gateway asks
 its host for: who the caller is, an authorization decision, a backend, and the
-resources it may stream. **What a user may watch is what RBAC lets them watch.** Every
-stream opens its watch with the user's own token, built for that stream alone with
-nothing from the environment: no kubeconfig, no in-cluster service account, no proxy.
-So krm-foyer's authorizer allows every scope, and the API server decides, as for `/k8s`.
+resources it may stream. **What a user may watch is what RBAC lets them watch.** A
+stream of a resource that is not [shared](#shared-watches) opens its watch with the
+user's own token, built for that stream alone with nothing from the environment: no
+kubeconfig, no in-cluster service account, no proxy. So krm-foyer's authorizer allows
+every such scope, and the API server decides, as for `/k8s`.
 krm-stream asks its host for a list of resources; krm-foyer keeps none, and admits the
 one resource asked for. The gateway still checks the request itself, and ends any
 scope it will not serve with a terminal `SCOPE_INVALID`: an API-server address or a
@@ -475,14 +479,39 @@ krm-foyer logs through krm-stream's diagnostics hook ([feedback](investigations/
 requested: none hides anything from a user who can read the whole object through `/k8s`
 (see below).
 
-Which resources use a shared watch is configuration for efficiency, not for access.
-Native watches through `/k8s` stay available beside it, bounded like every other
-request; krm-stream is the path for live views ([why both](bounds.md#native-watches)).
-Optional shared watches, later, use a narrowly scoped service account,
-Kubernetes-resolved identities and per-subscriber SubjectAccessReview checks. Bound
-reauthorization and session expiry; logout closes that session's streams without
-disrupting others. Measure authorization load as well as watch savings. Disable stream
-buffering and propagate cancellation through the proxy.
+Native watches through `/k8s` stay available beside streams, bounded like every other
+request; krm-stream is the path for live views ([which to use](watches.md),
+[why both](bounds.md#native-watches)).
+
+### Shared watches
+
+Which resources use a shared watch is configuration for efficiency, not for access
+(`-shared-watch-resources`; [how to choose and set up](watches.md)). Every stream of one
+scope of such a resource reads from one watch at the API server, opened with a narrowly
+scoped identity given by token file, never implicitly the pod's service account. That
+identity reads more than any one user, so the API server is asked about each user:
+
+- **Who the user is** comes from a SelfSubjectReview sent with the user's own token:
+  the username, groups, UID and extras as the API server resolves them, never a claim
+  krm-foyer reads or anything the browser sends.
+- **Whether they may** comes from two SubjectAccessReviews, `list` and `watch` on the
+  scope, sent by the shared-watch identity, before the stream is served from the shared
+  watch, at every new snapshot, and every `-shared-watch-recheck-interval`. A denial
+  ends that user's stream with `FORBIDDEN` and nobody else's; a review that cannot be
+  completed is never an allow. A decision is reused for `-shared-watch-decision-ttl`
+  for exactly the same subject and scope, never after an error.
+- **Revocation** reaches an open shared stream within the recheck interval plus the
+  decision's lifetime plus one check: 50 seconds at the defaults. Logout and session
+  expiry end it within the session-check interval, as every stream, without disturbing
+  the other streams of its watch; the last stream out closes the watch.
+- **The shared-watch identity refused** by the API server is krm-foyer's configuration
+  falling short, not the user's permissions: a terminal `INTERNAL` without the API
+  server's message, which would name the identity, logged by kind.
+
+Writes never use the shared-watch identity. Metrics count the watches by whose identity
+opened them, the streams reading shared watches, and every access decision by source
+and result, so the authorization load is measured beside the watch savings
+([metrics](watches.md#metrics)).
 
 A stream projection is a view transformation. It cannot protect confidential fields if the
 same user can GET the full resource through `/k8s`. Restrict raw routes or separate the

@@ -34,7 +34,10 @@ The application and krm-foyer share one origin. In the e2e fixture, a Gateway
 a file server for these files and `/auth`, `/k8s`, `/stream` and `/_foyer` to krm-foyer.
 Any ingress or gateway that routes by path can do the same.
 
-`app.js` reads through `/stream` and writes through `/k8s`:
+`app.js` reads through `/stream` and writes through `/k8s`. In the fixture, notes are
+[shared](../../docs/watches.md): every open page reads one watch at the API server, and
+krm-foyer asks the API server whether each user may. The page cannot tell, and does not
+change either way.
 
 ```js
 import { session, login, k8s } from '/_foyer/foyer.js';
@@ -43,7 +46,7 @@ import { LiveResourceStore, connectManagedResourceStream, resourceStreamURL } fr
 const s = await session();          // {authenticated, email, ...}; never a token
 if (!s.authenticated) login();      // to the issuer, and back to this page
 
-// The notes as they are, and as they change: a krm-stream watched as the user.
+// The notes as they are, and as they change, for what RBAC lets this user see.
 const store = new LiveResourceStore();
 connectManagedResourceStream(resourceStreamURL('/stream/v1',
   { group: 'hello.krm-foyer.example', version: 'v1', resource: 'notes', namespace: 'hello' }), store);

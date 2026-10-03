@@ -69,6 +69,8 @@ type loginConfig struct {
 	sessions   session.Config
 	gate       gate.Config
 	kubernetes proxy.Config
+	// shared is nil without shared watches.
+	shared *stream.SharedConfig
 }
 
 func parseConfig(args []string, readFile func(string) ([]byte, error), output io.Writer) (config, error) {
@@ -85,6 +87,8 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		sessionStreams, allStreams     int
 		perSecond                      float64
 		maxBytes                       int64
+		sharedResources, sharedToken   string
+		recheck, decisionTTL           time.Duration
 	)
 	fs.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
 	fs.StringVar(&cfg.tlsCert, "tls-cert-file", "", "serve TLS with this certificate (PEM); needs -tls-key-file")
@@ -118,6 +122,16 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		"how many requests one session may send at once")
 	fs.Int64Var(&maxBytes, "max-response-bytes", proxy.DefaultMaxResponseBytes,
 		"the most decoded bytes a response may have; past it, 502 if known in advance, otherwise it is cut short")
+	fs.StringVar(&sharedResources, "shared-watch-resources", "",
+		"resources whose streams share one watch per scope, as kubectl names them, comma-separated "+
+			"(notes.hello.krm-foyer.example,configmaps); needs -shared-watch-token-file. See docs/watches.md")
+	fs.StringVar(&sharedToken, "shared-watch-token-file", "",
+		"the token of the identity shared watches are opened with: a service account that may list and watch "+
+			"the shared resources and create subjectaccessreviews, and nothing else")
+	fs.DurationVar(&recheck, "shared-watch-recheck-interval", stream.DefaultRecheckInterval,
+		"how often the API server is asked again whether each user of a shared watch may still list and watch it")
+	fs.DurationVar(&decisionTTL, "shared-watch-decision-ttl", stream.DefaultDecisionTTL,
+		"how long one user's access decision for one scope is reused by their other streams and rechecks")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -140,8 +154,8 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	}
 	switch {
 	case len(missing) == len(required):
-		if issuerCAFile != "" || apiServerCA != "" {
-			return config{}, errors.New("-oidc-ca-file and -kubernetes-ca-file need the sign-in flags too")
+		if issuerCAFile != "" || apiServerCA != "" || sharedResources != "" || sharedToken != "" {
+			return config{}, errors.New("-oidc-ca-file, -kubernetes-ca-file and the -shared-watch flags need the sign-in flags too")
 		}
 		return cfg, nil // no sign-in and no API proxy: the start page and probes only
 	case len(missing) > 0:
@@ -220,6 +234,26 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 			return config{}, err
 		}
 	}
+
+	// Shared watches, for the resources named: off unless both flags are given.
+	if (sharedResources == "") != (sharedToken == "") {
+		return config{}, errors.New("-shared-watch-resources and -shared-watch-token-file go together")
+	}
+	if sharedResources != "" {
+		resources, err := stream.ParseResources(sharedResources)
+		if err != nil {
+			return config{}, fmt.Errorf("-shared-watch-resources: %w", err)
+		}
+		if len(resources) == 0 {
+			return config{}, errors.New("-shared-watch-resources names no resource")
+		}
+		if recheck <= 0 || decisionTTL <= 0 || decisionTTL > recheck {
+			return config{}, fmt.Errorf("-shared-watch-recheck-interval and -shared-watch-decision-ttl must be positive, "+
+				"the lifetime no longer than the interval; got %v and %v", recheck, decisionTTL)
+		}
+		login.shared = &stream.SharedConfig{TokenFile: sharedToken, Resources: resources,
+			RecheckInterval: recheck, DecisionTTL: decisionTTL}
+	}
 	cfg.login = login
 	return cfg, nil
 }
@@ -252,8 +286,10 @@ func handler(cfg config, logger *slog.Logger, m *metrics.Metrics) (http.Handler,
 	if err != nil {
 		return nil, nil, err
 	}
-	// Login is the API half's only credential source: there is no other way to give
-	// krm-foyer a token, and no service-account fallback.
+	// Login is the API half's only credential source for what a user does: there is no
+	// other way to give krm-foyer a token, and no service-account fallback. Shared
+	// watches, when configured, hold an identity of their own for the watches alone,
+	// and ask the API server about every user who reads them.
 	l.gate.Credentials, l.gate.Logger, l.gate.Metrics = login, logger, m
 	g, err := gate.New(l.gate)
 	if err != nil {
@@ -264,7 +300,9 @@ func handler(cfg config, logger *slog.Logger, m *metrics.Metrics) (http.Handler,
 	if err != nil {
 		return nil, nil, err
 	}
-	streams, err := stream.New(stream.Config{Server: l.kubernetes.Server, RootCAs: l.kubernetes.RootCAs, Gate: g})
+	streams, err := stream.New(stream.Config{
+		Server: l.kubernetes.Server, RootCAs: l.kubernetes.RootCAs, Gate: g, Shared: l.shared,
+	})
 	if err != nil {
 		return nil, nil, err
 	}

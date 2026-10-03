@@ -1,7 +1,9 @@
 // Package stream is krm-foyer's /stream: live Kubernetes resources for the browser,
-// served by krm-stream's gateway (github.com/ConfigButler/krm-stream). Every watch
-// is opened as the signed-in user, so Kubernetes decides what a user may watch, as
-// it does for /k8s; krm-foyer keeps no list of resources of its own.
+// served by krm-stream's gateway (github.com/ConfigButler/krm-stream). A watch is
+// opened as the signed-in user, so Kubernetes decides what a user may watch, as it
+// does for /k8s; krm-foyer keeps no list of resources of its own. Resources
+// configured for it share one watch per scope instead (see shared.go), and the API
+// server still decides, by a SubjectAccessReview for each user.
 package stream
 
 import (
@@ -23,6 +25,7 @@ import (
 
 	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
+	"github.com/ConfigButler/krm-foyer/internal/metrics"
 	upstreamerr "github.com/ConfigButler/krm-foyer/internal/upstream"
 )
 
@@ -36,6 +39,9 @@ type Config struct {
 	// request and response is held to. A stream is cut short by it like any other
 	// response.
 	Gate *gate.Gate
+	// Shared turns shared watches on for some resources. Nil streams every
+	// resource with the user's own token.
+	Shared *SharedConfig
 }
 
 // Streams serves /stream/v1. Create it with New.
@@ -44,6 +50,8 @@ type Streams struct {
 	transport http.RoundTripper
 	gate      *gate.Gate
 	logger    *slog.Logger
+	// shared is nil without shared watches.
+	shared *shared
 }
 
 // New returns streams from cfg.Server.
@@ -55,7 +63,7 @@ func New(cfg Config) (*Streams, error) {
 	if cfg.Gate == nil {
 		return nil, errors.New("no gate")
 	}
-	return &Streams{
+	s := &Streams{
 		server: url.URL{Scheme: cfg.Server.Scheme, Host: cfg.Server.Host},
 		// The same pinned transport as the proxy's. The user's token is added per
 		// request by client-go, from the rest.Config built for that user alone.
@@ -71,7 +79,15 @@ func New(cfg Config) (*Streams, error) {
 		},
 		gate:   cfg.Gate,
 		logger: cfg.Gate.Logger(),
-	}, nil
+	}
+	if cfg.Shared != nil {
+		sh, err := newShared(*cfg.Shared, s)
+		if err != nil {
+			return nil, err
+		}
+		s.shared = sh
+	}
+	return s, nil
 }
 
 func (s *Streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +106,7 @@ func (s *Streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r = a.Request
 
 	u := &upstream{streams: s, userAgent: r.UserAgent()}
-	gateway.Handler(gateway.Options{
+	opts := gateway.Options{
 		// The gate has found the user; the gateway only carries the credential back
 		// to Clients.
 		Principal: func(*http.Request) (gateway.Principal, error) { return a.Credential, nil },
@@ -106,7 +122,23 @@ func (s *Streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Scopes:      gateway.ScopePolicy{Targets: []string{""}, AnyResource: true, AllowLabelSelector: true},
 		Projections: gateway.ProjectionPolicyFunc(project),
 		Diagnostics: s.diagnose,
-	}).ServeHTTP(w, r)
+	}
+	// A scope the gateway refuses goes the user's way, and is refused there.
+	if scope, err := gateway.ScopeFromQuery(r.URL.Query()); err == nil && s.shared.serves(scope) {
+		sh := s.shared
+		// The user is found again, as Kubernetes knows them, for the reviews.
+		opts.Principal = func(r *http.Request) (gateway.Principal, error) { return u.principal(r.Context(), a.Credential) }
+		// The shared watch is opened with krm-foyer's own identity, so the API server
+		// is asked whether this user may list and watch the scope: before the stream
+		// is served from it, at each new snapshot, and every recheck interval.
+		opts.Authorizer = sh.authorize
+		opts.ReauthorizationInterval, opts.ReauthorizationTimeout = sh.interval, CheckTimeout
+		opts.Clients = func(context.Context, string, gateway.Principal) (gateway.Backend, error) { return sh.backend, nil }
+		// Only the shared resources, never any resource: the shared identity may watch
+		// those alone.
+		opts.Scopes = gateway.ScopePolicy{Targets: []string{""}, Resources: sh.resources, AllowLabelSelector: true}
+	}
+	gateway.Handler(opts).ServeHTTP(w, r)
 
 	if gate.CutShort(r.Context()) {
 		// The gateway returns quietly when its context ends. A stream the gate cut
@@ -162,22 +194,25 @@ func (u *upstream) backend(_ context.Context, _ string, p gateway.Principal) (ga
 	if !ok || cred.Token == "" {
 		return nil, gateway.Unauthenticated("not signed in")
 	}
-	// Built by hand, with nothing from the environment: no kubeconfig, no in-cluster
-	// service account, no proxy. The token is the user's and only the user's, and goes
-	// to the configured API server alone: client-go would follow a redirect and send
-	// the token along, so krm-stream's client refuses every redirect, as /k8s does, and
-	// ends the stream.
-	cfg := &rest.Config{
+	kb, err := kube.NewBackendForConfig(u.userConfig(cred))
+	if err != nil {
+		return nil, err
+	}
+	return &backend{streams: u.streams, kube: kb}, nil
+}
+
+// userConfig reaches the API server as the user behind cred. Built by hand, with
+// nothing from the environment: no kubeconfig, no in-cluster service account, no
+// proxy. The token is the user's and only the user's, and goes to the configured API
+// server alone: client-go would follow a redirect and send the token along, so
+// krm-stream's client refuses every redirect, as /k8s does, and ends the stream.
+func (u *upstream) userConfig(cred gate.Credential) *rest.Config {
+	return &rest.Config{
 		Host:        u.streams.server.String(),
 		BearerToken: cred.Token,
 		Transport:   u.streams.transport,
 		UserAgent:   u.userAgent,
 	}
-	kb, err := kube.NewBackendForConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return &backend{streams: u.streams, kube: kb}, nil
 }
 
 // backend is krm-stream's Kubernetes backend, counting the watches open at the API
@@ -192,7 +227,7 @@ func (b *backend) Watch(ctx context.Context, scope gateway.Scope) (gateway.Watch
 	if err != nil {
 		return nil, err
 	}
-	return &watcher{Watcher: w, done: b.streams.gate.Metrics().UpstreamWatch()}, nil
+	return &watcher{Watcher: w, done: b.streams.gate.Metrics().UpstreamWatch(metrics.IdentityUser)}, nil
 }
 
 // watcher passes on an open watch's events, and counts the watch while it is open.

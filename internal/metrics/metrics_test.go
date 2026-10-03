@@ -41,7 +41,18 @@ func TestNamesAsScraped(t *testing.T) {
 	m.StreamOpen()
 	closed := m.StreamOpen()
 	closed()
-	m.UpstreamWatch()
+	m.UpstreamWatch(IdentityUser)
+	m.UpstreamWatch(IdentityShared)()
+	m.SharedSubscriptionOpened()
+	m.SharedSubscriptionOpened()
+	m.SharedSubscriptionOpened()
+	m.SharedSubscriptionClosed()
+	m.SharedOverflow()
+	m.AccessCheck(SourceAPIServer, ResultAllowed, 0.02)
+	m.AccessCheck(SourceCache, ResultAllowed, 0)
+	m.AccessCheck(SourceCache, ResultAllowed, 0)
+	m.AccessCheck(SourceAPIServer, ResultDenied, 0.03)
+	m.SubjectReview(SubjectResolved)
 	m.BoundLimit(BoundResponseDuration, 1800)
 	m.BoundUsage(BoundResponseDuration, 0.2)
 	m.BoundUsage(BoundResponseDuration, 3) // past the limit is all of it
@@ -63,7 +74,23 @@ func TestNamesAsScraped(t *testing.T) {
 		"# TYPE krm_foyer_streams_open gauge",
 		"krm_foyer_streams_open 1",
 		"# TYPE krm_foyer_upstream_watches_open gauge",
-		"krm_foyer_upstream_watches_open 1",
+		`krm_foyer_upstream_watches_open{identity="user"} 1`,
+		`krm_foyer_upstream_watches_open{identity="shared"} 0`,
+		"# TYPE krm_foyer_shared_subscriptions_open gauge",
+		"krm_foyer_shared_subscriptions_open 2",
+		"# TYPE krm_foyer_shared_overflows_total counter",
+		"krm_foyer_shared_overflows_total 1",
+		"# TYPE krm_foyer_access_checks_total counter",
+		`krm_foyer_access_checks_total{result="allowed",source="api_server"} 1`,
+		`krm_foyer_access_checks_total{result="allowed",source="cache"} 2`,
+		`krm_foyer_access_checks_total{result="denied",source="api_server"} 1`,
+		`krm_foyer_access_checks_total{result="error",source="api_server"} 0`,
+		"# TYPE krm_foyer_access_check_duration_seconds histogram",
+		`krm_foyer_access_check_duration_seconds_bucket{le="0.025"} 1`,
+		"krm_foyer_access_check_duration_seconds_count 2",
+		"# TYPE krm_foyer_subject_reviews_total counter",
+		`krm_foyer_subject_reviews_total{result="resolved"} 1`,
+		`krm_foyer_subject_reviews_total{result="refused"} 0`,
 		"# TYPE krm_foyer_bound_reached_total counter",
 		`krm_foyer_bound_reached_total{bound="response_duration"} 1`,
 		// The Go runtime's and the process's come along: a leaked response shows
@@ -86,5 +113,10 @@ func TestNilRecordsNothing(t *testing.T) {
 	m.BoundUsage(BoundResponseDuration, 1)
 	m.BoundReached(BoundResponseDuration)
 	m.StreamOpen()()
-	m.UpstreamWatch()()
+	m.UpstreamWatch(IdentityUser)()
+	m.SharedSubscriptionOpened()
+	m.SharedSubscriptionClosed()
+	m.SharedOverflow()
+	m.AccessCheck(SourceAPIServer, ResultAllowed, 1)
+	m.SubjectReview(SubjectResolved)
 }

@@ -79,5 +79,6 @@ FOYER_ADDR=$server_ip:$NODE_PORT
 FOYER_BRIEF_ADDR=$server_ip:$BRIEF_NODE_PORT
 FOYER_NAMESPACE=krm-foyer
 FOYER_SERVICE_ACCOUNT=system:serviceaccount:krm-foyer:krm-foyer
+FOYER_SHARED_ACCOUNT=system:serviceaccount:krm-foyer:krm-foyer-shared
 EOF
 echo "krm-foyer ready at $FOYER_URL ($server_ip:$NODE_PORT)"

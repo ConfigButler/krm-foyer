@@ -294,10 +294,14 @@ apart again:
 - **The response-byte bound does not apply.** It bounds one answer, and a stream is not
   one: it is many snapshots and changes over half an hour. The size of a snapshot is
   the size of a list, which the API server answers the same way through `/k8s`.
-- **Upstream watches are counted, not bounded.** Every stream holds at most one watch at
-  the API server, opened as its user, so the stream limits bound them too. They are
-  counted apart (`krm_foyer_upstream_watches_open`) because shared watches, later, will
-  make them differ: several streams on one watch. A bound of their own comes with that.
+- **Upstream watches are counted, not bounded.** A per-user stream holds one watch at the
+  API server, opened as its user; a [shared](watches.md) stream holds none of its own,
+  and its scope's shared watch stays open only while some stream reads it. So there are
+  never more upstream watches than streams, and the stream limits bound them. A bound of
+  their own was planned for shared watches, and left out (2026-10-03) for that reason:
+  it could only be reached by first reaching a stream limit. They are counted apart, by
+  whose identity opened them (`krm_foyer_upstream_watches_open{identity}`), because with
+  sharing the two counts differ: the reuse is their ratio.
 
 What is not bounded yet: a tab that stops reading. A native watch through `/k8s` holds
 its slot then until the response duration ends it, and a stream does the same.
@@ -328,15 +332,37 @@ one replica, the suite and the cluster on one devcontainer host):
 | Resident memory | 30 MiB idle, 34 MiB with 200 sessions, 235 to 267 MiB with 1800 streams: about 110 to 130 KiB per stream, for this workload |
 | Watches at the API server | one per stream, 1800, all released at logout |
 
-Every stream watches the same scope: one small note. So the memory figures describe
+One run each on 2026-10-03, after shared watches came (krm-stream 0.6.0, otherwise the
+same fixture), now that the rehearsal runs twice: streams of ConfigMaps, each a watch
+of its user's own, and streams of shared notes, all on one watch:
+
+| Measured | Per-user (ConfigMaps) | Shared (notes) |
+| --- | --- | --- |
+| Opening 1800 streams at once, until every snapshot was complete | 0.6 seconds | 2.2 seconds: a SelfSubjectReview for each stream, and the access checks, come first |
+| One change reaching all 1800, the slowest | 84 ms | 47 ms |
+| Logout to stream aborted, the slowest | 4.4 seconds | 1.6 seconds |
+| Goroutines per open stream | 6 | 5 |
+| Resident memory with 1800 streams | 326 MiB, about 164 KiB per stream | 220 MiB, about 103 KiB per stream |
+| Watches at the API server | 1800 | 1 |
+| Access checks while opening | none | 200 asked the API server (two SubjectAccessReviews each), 1600 reused |
+| Access checks while held for 31 seconds | none | 200 asked, 12.9 reviews a second; 1600 reused |
+
+With sharing, the API server holds one watch instead of 1800, and is asked about each
+identity once per recheck rather than about each stream: 12.9 reviews a second for 200
+identities at the 30-second default, the rate krm-stream's own estimate gives. The
+ConfigMap snapshot holds two objects (the namespace's `kube-root-ca.crt` beside the
+one created), the note snapshot one, so the memory columns are not a like-for-like
+comparison of the two paths.
+
+Every stream watches the same scope: one small object. So the memory figures describe
 that workload, not a stream in general. krm-stream keeps per-object bookkeeping for each
 stream, and its list-then-watch fallback holds a whole snapshot while it lists, so
 larger scopes, larger objects and frequent changes cost more, possibly much more.
 Resident memory is measured in a fresh process, where it only grows over a run this
 short; the garbage collector made smaller measurements too noisy to use. What the
 rehearsal does not cover: representative scopes and objects, sustained change, native
-watches through `/k8s`, many replicas, shared watches, a slow or distant API server, and
-the browser's side. A real cluster's
+watches through `/k8s`, many replicas, many scopes per shared resource, a slow or
+distant API server, and the browser's side. A real cluster's
 numbers belong next to these when someone measures them.
 
 ## Left out: a bound on page size
@@ -423,7 +449,12 @@ Names as scraped:
 | `krm_foyer_bound_reached_total` | counter | `bound` | Requests refused, and responses cut short, because a bound was reached |
 | `krm_foyer_requests_in_flight` | gauge | | Requests through `/k8s` open now, watches included |
 | `krm_foyer_streams_open` | gauge | | Streams through `/stream` open now |
-| `krm_foyer_upstream_watches_open` | gauge | | Watches the streams hold open at the API server now; at most one per stream |
+| `krm_foyer_upstream_watches_open` | gauge | `identity` | Watches open at the API server now: `user`, one per per-user stream, or `shared`, one per scope in use by [shared](watches.md) streams |
+| `krm_foyer_shared_subscriptions_open` | gauge | | Streams reading from a shared watch now |
+| `krm_foyer_shared_overflows_total` | counter | | Streams that fell behind their shared watch and got a fresh snapshot from its cache |
+| `krm_foyer_access_checks_total` | counter | `source`, `result` | Access decisions for shared streams: `api_server` or `cache`, and `allowed`, `denied` or `error` |
+| `krm_foyer_access_check_duration_seconds` | histogram | | How long a decision that asked the API server took (two SubjectAccessReviews) |
+| `krm_foyer_subject_reviews_total` | counter | `result` | SelfSubjectReviews before a shared stream: `resolved`, `refused` or `error` |
 | `krm_foyer_responses_cut_short_total` | counter | `cause` | Responses krm-foyer cut short, by why |
 | `krm_foyer_interruptions_total` | counter | `reason` | Answers krm-foyer gave instead of the API server's, by the reason in the `Krm-Foyer-Interruption` header |
 
