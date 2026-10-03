@@ -48,9 +48,10 @@ gateway/v0.6.0` for some time after the tag was pushed, so `go get` of 0.6.0 fai
 everyone, and the npm publish after that job did not run. 0.5.0 released through the
 same flow without it. We do not know which lookup reached the proxy before the tag
 existed; the release-PR builds of #47 are where we would look first, since they name the
-unreleased version. krm-foyer fetched 0.6.0 with `GOPROXY=direct` meanwhile, and stays on
-the 0.5.0 browser bundle until 0.6.0 is on npm: its source differs only in the version
-string.
+unreleased version. krm-foyer fetched 0.6.0 with `GOPROXY=direct` meanwhile; within about
+a quarter of an hour the proxy and `sum.golang.org` served it, with the same hashes. The
+npm package followed the next day (krm-stream #49), and krm-foyer's bundle moved to it: it
+differs from 0.5.0's only in the version string.
 
 ## The asks at a glance
 

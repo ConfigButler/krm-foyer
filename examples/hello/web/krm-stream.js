@@ -1108,7 +1108,7 @@ function resourceStreamURL(base, scope) {
 }
 
 // dist/version.js
-var VERSION = "0.5.0";
+var VERSION = "0.6.0";
 var PROTOCOL_VERSION = 1;
 export {
   DEFAULT_EDITABLE_REGIONS,
