@@ -6,6 +6,7 @@ With `sharedWatches.resources` set, it also creates the
 [shared-watch identity](../../docs/watches.md) and its grants.
 
 ```bash
+kubectl create namespace krm-foyer
 kubectl -n krm-foyer create secret generic krm-foyer-oidc --from-literal=client-secret=...
 kubectl -n krm-foyer create secret tls krm-foyer-tls --cert tls.crt --key tls.key
 helm install krm-foyer oci://ghcr.io/configbutler/charts/krm-foyer --version <release> \
