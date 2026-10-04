@@ -1,0 +1,31 @@
+# krm-foyer in the e2e fixture, installed with the chart (charts/krm-foyer).
+# deploy-foyer.sh sets the image and the config hash, and creates the Secrets and the
+# ConfigMap named here.
+publicURL: https://foyer.localhost:8443
+oidc:
+  issuer: https://dex.localhost:5556
+  clientID: krm-foyer
+  clientSecret:
+    secretName: krm-foyer-oidc
+  caConfigMap:
+    name: krm-foyer-issuer-ca
+tls:
+  secretName: krm-foyer-tls
+# Notes share one watch per scope: the hello example's, and the rehearsal's.
+sharedWatches:
+  resources: [notes.hello.krm-foyer.example]
+# The bait (foyer-bait.yaml): the pod's account is cluster-admin, and its token is
+# mounted, so a fallback to it would turn a 401 or a 403 into a 200: loud, where a
+# fallback to a weak account would be silent. The suite checks the bait is in place
+# before trusting any spec that relies on it.
+serviceAccount:
+  automountToken: true
+image:
+  # Imported with k3d image import; never pulled.
+  pullPolicy: Never
+# The suite reaches krm-foyer on the node's address on the fixture's Docker network.
+# A NodePort is not published on the host. Metrics stay on their own ClusterIP Service,
+# which the suite scrapes through the API server's service proxy, as admin.
+service:
+  type: NodePort
+  nodePort: 30443

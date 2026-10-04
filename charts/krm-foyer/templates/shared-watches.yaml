@@ -1,0 +1,68 @@
+{{- if and .Values.sharedWatches.resources .Values.sharedWatches.serviceAccount.create }}
+{{- $name := include "krm-foyer.sharedAccountName" . }}
+# The shared-watch identity (docs/watches.md): it may list and watch the shared
+# resources, and ask the API server whether a user may (system:auth-delegator: create
+# subjectaccessreviews), and nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "krm-foyer.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+# Its token, for the pod to mount. Kubernetes fills this Secret in.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}-token
+  labels:
+    {{- include "krm-foyer.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/service-account.name: {{ $name }}
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-watches
+  labels:
+    {{- include "krm-foyer.labels" . | nindent 4 }}
+rules:
+  {{- range .Values.sharedWatches.resources }}
+  {{- $parts := splitn "." 2 . }}
+  - apiGroups: [{{ $parts._1 | default "" | quote }}]
+    resources: [{{ $parts._0 | quote }}]
+    verbs: [list, watch]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-watches
+  labels:
+    {{- include "krm-foyer.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}-watches
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-reviews
+  labels:
+    {{- include "krm-foyer.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

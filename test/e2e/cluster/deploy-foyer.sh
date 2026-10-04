@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Deploys krm-foyer into the e2e fixture that start-cluster.sh brought up. Safe to rerun:
-# the Deployment rolls only when the image, the certificate or a secret changed.
+# Deploys krm-foyer into the e2e fixture that start-cluster.sh brought up, with the chart
+# (charts/krm-foyer), as two releases: krm-foyer (foyer-values.yaml) and krm-foyer-brief
+# (foyer-brief-values.yaml on top). Safe to rerun: a Deployment rolls only when the
+# image, the chart, the certificate or a secret changed.
 #
 # IMAGE is the image to deploy, as `task image` built it. It is imported into the
 # cluster with `k3d image import` under a tag derived from its ID, so a rebuilt image is
@@ -16,11 +18,12 @@ FOYER_HOST="foyer.localhost"
 # part of the public URL; the suite goes to the NodePort directly, under the same name.
 FOYER_URL="https://$FOYER_HOST:8443"
 NODE_PORT=30443
-# A second krm-foyer whose sessions end within a minute (foyer-brief.yaml).
+# A second krm-foyer whose sessions end within a minute (foyer-brief-values.yaml).
 BRIEF_NODE_PORT=30444
 
 here="$(cd "$(dirname "$0")" && pwd)"
-E2E_DIR="${E2E_DIR:-$(cd "$here/../../.." && pwd)/.e2e}"
+repo="$(cd "$here/../../.." && pwd)"
+E2E_DIR="${E2E_DIR:-$repo/.e2e}"
 [ -f "$E2E_DIR/env" ] || { echo "no fixture; run task e2e-up first" >&2; exit 1; }
 # shellcheck source=/dev/null
 . "$E2E_DIR/env"
@@ -54,22 +57,43 @@ kind: Namespace
 metadata:
   name: krm-foyer
 EOF
+# A fixture from before the chart has the same objects, applied with kubectl, which Helm
+# refuses to take over. Remove them once.
+if kubectl -n krm-foyer get deployment krm-foyer >/dev/null 2>&1 \
+  && [ "$(kubectl -n krm-foyer get deployment krm-foyer -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}')" != Helm ]; then
+  echo "removing the krm-foyer applied before the chart"
+  kubectl -n krm-foyer delete deployment,service --all >/dev/null
+  kubectl -n krm-foyer delete serviceaccount krm-foyer krm-foyer-shared --ignore-not-found >/dev/null
+  kubectl -n krm-foyer delete secret krm-foyer-shared-token --ignore-not-found >/dev/null
+  kubectl delete clusterrole krm-foyer-shared-watches --ignore-not-found >/dev/null
+  kubectl delete clusterrolebinding krm-foyer-shared-watches krm-foyer-shared-reviews --ignore-not-found >/dev/null
+fi
 apply() { kubectl -n krm-foyer "$@" --dry-run=client -o yaml | kubectl apply -f - >/dev/null; }
 apply create secret tls krm-foyer-tls --cert "$E2E_DIR/foyer/tls.crt" --key "$E2E_DIR/foyer/tls.key"
 # The client secret of the static client in dex.yaml.
 apply create secret generic krm-foyer-oidc --from-literal=client-secret=krm-foyer-e2e-secret
 apply create configmap krm-foyer-issuer-ca --from-file=ca.crt="$E2E_DIR/ca.crt"
+kubectl apply -f "$here/foyer-bait.yaml" >/dev/null
 config_hash="$(cat "$E2E_DIR/foyer/tls.crt" "$E2E_DIR/ca.crt" | sha256sum | cut -c1-16)"
-for manifest in foyer.yaml foyer-brief.yaml; do
-  sed -e "s|IMAGE|$tag|" -e "s|CONFIG_HASH|$config_hash|" "$here/$manifest" | kubectl apply -f - >/dev/null
-done
-for deployment in krm-foyer krm-foyer-brief; do
-  if ! kubectl -n krm-foyer rollout status "deployment/$deployment" --timeout=120s; then
-    kubectl -n krm-foyer describe pods >&2
-    kubectl -n krm-foyer logs "deployment/$deployment" --tail=50 >&2 || true
+# install RELEASE VALUES...: the chart, with the image imported above. A new certificate
+# or secret changes the config hash, which restarts the pod.
+install() {
+  local release="$1"
+  shift
+  local values=()
+  for v in "$@"; do values+=(-f "$here/$v"); done
+  helm upgrade --install "$release" "$repo/charts/krm-foyer" --namespace krm-foyer "${values[@]}" \
+    --set-string image.repository="${tag%:*}" --set-string image.tag="${tag#*:}" \
+    --set-string "podAnnotations.krm-foyer\.test/config-hash=$config_hash" >/dev/null
+  if ! kubectl -n krm-foyer rollout status "deployment/$release" --timeout=120s; then
+    kubectl -n krm-foyer describe pods -l "app.kubernetes.io/instance=$release" >&2
+    kubectl -n krm-foyer logs "deployment/$release" --tail=50 >&2 || true
     exit 1
   fi
-done
+}
+# The brief release uses the main release's service accounts, so it goes second.
+install krm-foyer foyer-values.yaml
+install krm-foyer-brief foyer-values.yaml foyer-brief-values.yaml
 
 server_ip="${API_SERVER#https://}"
 server_ip="${server_ip%:*}"

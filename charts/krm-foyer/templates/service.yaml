@@ -1,0 +1,37 @@
+{{- $tls := ne .Values.tls.secretName "" }}
+{{- $scheme := ternary "https" "http" $tls }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "krm-foyer.fullname" . }}
+  labels:
+    {{- include "krm-foyer.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "krm-foyer.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: {{ $scheme }}
+      port: {{ ternary 443 80 $tls }}
+      targetPort: {{ $scheme }}
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePort }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
+{{- if .Values.metrics.enabled }}
+---
+# Metrics are served apart from the origin, on a Service of their own, so a route to
+# krm-foyer never reaches them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "krm-foyer.fullname" . }}-metrics
+  labels:
+    {{- include "krm-foyer.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "krm-foyer.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+{{- end }}

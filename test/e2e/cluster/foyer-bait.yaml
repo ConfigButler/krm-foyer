@@ -1,0 +1,16 @@
+# The bait. krm-foyer never needs its own identity for a user's request, so the chart
+# gives its account no grants and does not mount its token. Here it is cluster-admin and
+# its token is in the pod (foyer-values.yaml), so a fallback to it would turn a 401 or a
+# 403 into a 200. Kept out of the chart: no real deployment should ever have it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: krm-foyer-e2e-bait
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: krm-foyer
+    namespace: krm-foyer

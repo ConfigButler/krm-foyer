@@ -1,0 +1,193 @@
+{{- $tls := ne .Values.tls.secretName "" }}
+{{- $scheme := ternary "https" "http" $tls }}
+{{- $shared := gt (len .Values.sharedWatches.resources) 0 }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "krm-foyer.fullname" . }}
+  labels:
+    {{- include "krm-foyer.labels" . | nindent 4 }}
+spec:
+  # Sessions live in memory, so one replica, replaced on update rather than run beside
+  # its successor: a browser sent to the other pod would find no session.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "krm-foyer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "krm-foyer.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "krm-foyer.serviceAccountName" . }}
+      # krm-foyer never sends a request as its pod. See serviceAccount in values.yaml.
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: krm-foyer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - {{ printf "-listen=:%d" (ternary 8443 8080 $tls) | quote }}
+            {{- if $tls }}
+            - -tls-cert-file=/etc/krm-foyer/tls/tls.crt
+            - -tls-key-file=/etc/krm-foyer/tls/tls.key
+            {{- end }}
+            - {{ printf "-metrics-listen=%s" (ternary ":9090" "" .Values.metrics.enabled) | quote }}
+            - {{ printf "-public-url=%s" .Values.publicURL | quote }}
+            - {{ printf "-oidc-issuer=%s" .Values.oidc.issuer | quote }}
+            - {{ printf "-oidc-client-id=%s" .Values.oidc.clientID | quote }}
+            - -oidc-client-secret-file=/etc/krm-foyer/oidc/client-secret
+            {{- with .Values.oidc.scopes }}
+            - {{ printf "-oidc-scopes=%s" (join "," .) | quote }}
+            {{- end }}
+            {{- if .Values.oidc.caConfigMap.name }}
+            - -oidc-ca-file=/etc/krm-foyer/issuer-ca/ca.crt
+            {{- end }}
+            - {{ printf "-kubernetes-server=%s" .Values.kubernetes.server | quote }}
+            {{- if .Values.kubernetes.caConfigMap.name }}
+            - -kubernetes-ca-file=/etc/krm-foyer/kubernetes-ca/ca.crt
+            {{- end }}
+            {{- with include "krm-foyer.flags" (list .Values.bounds (list
+                (list "sessionIdleTimeout" "session-idle-timeout")
+                (list "sessionAbsoluteTimeout" "session-absolute-timeout")
+                (list "sessionCheckInterval" "session-check-interval")
+                (list "maxResponseDuration" "max-response-duration")
+                (list "maxSessionConcurrentRequests" "max-session-concurrent-requests")
+                (list "maxConcurrentRequests" "max-concurrent-requests")
+                (list "maxSessionStreams" "max-session-streams")
+                (list "maxStreams" "max-streams")
+                (list "sessionRequestRate" "session-request-rate")
+                (list "sessionRequestBurst" "session-request-burst")
+                (list "maxResponseBytes" "max-response-bytes")
+                (list "streamWriteTimeout" "stream-write-timeout"))) }}
+            {{- . | trim | nindent 12 }}
+            {{- end }}
+            {{- if $shared }}
+            - {{ printf "-shared-watch-resources=%s" (join "," .Values.sharedWatches.resources) | quote }}
+            - -shared-watch-token-file=/etc/krm-foyer/shared-watch/token
+            {{- with include "krm-foyer.flags" (list .Values.sharedWatches.tuning (list
+                (list "recheckInterval" "shared-watch-recheck-interval")
+                (list "decisionTTL" "shared-watch-decision-ttl")
+                (list "qps" "shared-watch-qps"))) }}
+            {{- . | trim | nindent 12 }}
+            {{- end }}
+            {{- end }}
+          ports:
+            - name: {{ $scheme }}
+              containerPort: {{ ternary 8443 8080 $tls }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: 9090
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ $scheme }}
+              scheme: {{ upper $scheme }}
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $scheme }}
+              scheme: {{ upper $scheme }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            {{- if $tls }}
+            - name: tls
+              mountPath: /etc/krm-foyer/tls
+              readOnly: true
+            {{- end }}
+            - name: oidc
+              mountPath: /etc/krm-foyer/oidc
+              readOnly: true
+            {{- if .Values.oidc.caConfigMap.name }}
+            - name: issuer-ca
+              mountPath: /etc/krm-foyer/issuer-ca
+              readOnly: true
+            {{- end }}
+            {{- if .Values.kubernetes.caConfigMap.name }}
+            - name: kubernetes-ca
+              mountPath: /etc/krm-foyer/kubernetes-ca
+              readOnly: true
+            {{- end }}
+            {{- if $shared }}
+            - name: shared-watch
+              mountPath: /etc/krm-foyer/shared-watch
+              readOnly: true
+            {{- end }}
+      volumes:
+        {{- if $tls }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+        {{- end }}
+        - name: oidc
+          secret:
+            secretName: {{ .Values.oidc.clientSecret.secretName }}
+            items:
+              - key: {{ .Values.oidc.clientSecret.key }}
+                path: client-secret
+        {{- with .Values.oidc.caConfigMap }}
+        {{- if .name }}
+        - name: issuer-ca
+          configMap:
+            name: {{ .name }}
+            items:
+              - key: {{ .key }}
+                path: ca.crt
+        {{- end }}
+        {{- end }}
+        {{- with .Values.kubernetes.caConfigMap }}
+        {{- if .name }}
+        - name: kubernetes-ca
+          configMap:
+            name: {{ .name }}
+            items:
+              - key: {{ .key }}
+                path: ca.crt
+        {{- end }}
+        {{- end }}
+        {{- if $shared }}
+        # A Secret, not a projected token: a projected token is only ever the pod's own
+        # account's, and that account is never the shared-watch identity.
+        - name: shared-watch
+          secret:
+            secretName: {{ include "krm-foyer.sharedAccountName" . }}-token
+            items:
+              - key: token
+                path: token
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

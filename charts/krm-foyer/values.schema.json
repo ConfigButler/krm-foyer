@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "krm-foyer values",
+  "description": "Helm checks these on template, lint, install and upgrade. Objects the chart owns are closed (additionalProperties: false), so a misspelt key fails the install instead of doing nothing; Kubernetes pass-through objects (resources, affinity, ...) stay open, because their shape is Kubernetes', not this chart's.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["publicURL", "oidc"],
+  "$defs": {
+    "duration": {
+      "type": "string",
+      "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+      "description": "A Go duration, such as 30s, 10m or 8h."
+    },
+    "positiveInteger": { "type": "integer", "minimum": 1 },
+    "positiveNumber": { "type": "number", "exclusiveMinimum": 0 },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$",
+      "maxLength": 253
+    },
+    "configMapRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "anyOf": [{ "const": "" }, { "$ref": "#/$defs/name" }] },
+        "key": { "type": "string", "minLength": 1 }
+      }
+    },
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    }
+  },
+  "properties": {
+    "global": {
+      "type": "object",
+      "description": "Helm's values shared across charts. This chart reads none of it, but a parent chart may set it."
+    },
+
+    "publicURL": {
+      "type": "string",
+      "pattern": "^https?://[^/?#]+$",
+      "description": "krm-foyer's origin as browsers reach it: scheme and host, no path."
+    },
+
+    "oidc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "clientID", "clientSecret"],
+      "properties": {
+        "issuer": { "type": "string", "pattern": "^https://" },
+        "clientID": { "type": "string", "minLength": 1 },
+        "clientSecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["secretName", "key"],
+          "properties": {
+            "secretName": { "$ref": "#/$defs/name" },
+            "key": { "type": "string", "minLength": 1 }
+          }
+        },
+        "scopes": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[^\\s,]+$" }
+        },
+        "caConfigMap": { "$ref": "#/$defs/configMapRef" }
+      }
+    },
+
+    "kubernetes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "server": { "type": "string", "pattern": "^https://" },
+        "caConfigMap": { "$ref": "#/$defs/configMapRef" }
+      }
+    },
+
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "secretName": { "anyOf": [{ "const": "" }, { "$ref": "#/$defs/name" }] }
+      }
+    },
+
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sessionIdleTimeout": { "$ref": "#/$defs/duration" },
+        "sessionAbsoluteTimeout": { "$ref": "#/$defs/duration" },
+        "sessionCheckInterval": { "$ref": "#/$defs/duration" },
+        "maxResponseDuration": { "$ref": "#/$defs/duration" },
+        "streamWriteTimeout": { "$ref": "#/$defs/duration" },
+        "maxSessionConcurrentRequests": { "$ref": "#/$defs/positiveInteger" },
+        "maxConcurrentRequests": { "$ref": "#/$defs/positiveInteger" },
+        "maxSessionStreams": { "$ref": "#/$defs/positiveInteger" },
+        "maxStreams": { "$ref": "#/$defs/positiveInteger" },
+        "sessionRequestBurst": { "$ref": "#/$defs/positiveInteger" },
+        "maxResponseBytes": { "$ref": "#/$defs/positiveInteger" },
+        "sessionRequestRate": { "$ref": "#/$defs/positiveNumber" }
+      }
+    },
+
+    "sharedWatches": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resources": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+(\\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$",
+            "description": "A resource as kubectl names it: plural, then the group if it has one."
+          }
+        },
+        "serviceAccount": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "create": { "type": "boolean" },
+            "name": { "anyOf": [{ "const": "" }, { "$ref": "#/$defs/name" }] }
+          },
+          "if": { "properties": { "create": { "const": false } }, "required": ["create"] },
+          "then": { "required": ["name"], "properties": { "name": { "$ref": "#/$defs/name" } } }
+        },
+        "tuning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "recheckInterval": { "$ref": "#/$defs/duration" },
+            "decisionTTL": { "$ref": "#/$defs/duration" },
+            "qps": { "$ref": "#/$defs/positiveNumber" }
+          }
+        }
+      }
+    },
+
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": { "name": { "$ref": "#/$defs/name" } }
+      }
+    },
+
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "anyOf": [{ "const": "" }, { "$ref": "#/$defs/name" }] },
+        "annotations": { "$ref": "#/$defs/stringMap" },
+        "automountToken": { "type": "boolean" }
+      },
+      "if": { "properties": { "create": { "const": false } }, "required": ["create"] },
+      "then": { "required": ["name"], "properties": { "name": { "$ref": "#/$defs/name" } } }
+    },
+
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["ClusterIP", "NodePort"] },
+        "nodePort": {
+          "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 1, "maximum": 65535 }]
+        }
+      }
+    },
+
+    "podAnnotations": { "$ref": "#/$defs/stringMap" },
+    "resources": { "type": "object" },
+    "nodeSelector": { "$ref": "#/$defs/stringMap" },
+    "tolerations": { "type": "array", "items": { "type": "object" } },
+    "affinity": { "type": "object" },
+
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" }
+  }
+}

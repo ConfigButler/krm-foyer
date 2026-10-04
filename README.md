@@ -123,6 +123,22 @@ task image
 docker run --rm -p 8080:8080 ghcr.io/configbutler/krm-foyer:$(git describe --tags --always)
 ```
 
+Or in a cluster, with the [Helm chart](charts/krm-foyer), which the e2e suite installs
+too. Each release publishes it beside the image (from a checkout, `charts/krm-foyer`
+works in its place). The client secret and the TLS certificate are Secrets you create
+first:
+
+```bash
+kubectl create namespace krm-foyer
+kubectl -n krm-foyer create secret generic krm-foyer-oidc --from-literal=client-secret=...
+kubectl -n krm-foyer create secret tls krm-foyer-tls --cert tls.crt --key tls.key
+helm install krm-foyer oci://ghcr.io/configbutler/charts/krm-foyer --version <release> \
+  --namespace krm-foyer \
+  --set publicURL=https://app.example.com \
+  --set oidc.issuer=https://issuer.example.com,oidc.clientID=krm-foyer \
+  --set oidc.clientSecret.secretName=krm-foyer-oidc,tls.secretName=krm-foyer-tls
+```
+
 The repository comes with a devcontainer that has Go, Task, the linters CI runs, and
 k3d/kubectl for testing against a real API server. See [CONTRIBUTING.md](CONTRIBUTING.md).
 

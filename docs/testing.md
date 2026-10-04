@@ -353,18 +353,20 @@ them. The devcontainer joins the network, and a CI runner is the Docker host, so
 the API server the same way. k3d always publishes the API server's port; it is bound to
 loopback, and the script fails if anything is published on another interface.
 
-[deploy-foyer.sh](../test/e2e/cluster/deploy-foyer.sh) deploys krm-foyer from
-[foyer.yaml](../test/e2e/cluster/foyer.yaml). The image `task image` built is imported
-with `k3d image import` under a tag derived from its ID, so the Deployment rolls exactly
-when the binary changes. krm-foyer serves TLS for `foyer.localhost` with a
+[deploy-foyer.sh](../test/e2e/cluster/deploy-foyer.sh) installs krm-foyer with the
+[Helm chart](../charts/krm-foyer) and [foyer-values.yaml](../test/e2e/cluster/foyer-values.yaml),
+so every spec also tests the chart a user installs. The image `task image` built is
+imported with `k3d image import` under a tag derived from its ID, so the Deployment rolls
+exactly when the binary changes. krm-foyer serves TLS for `foyer.localhost` with a
 certificate from the fixture CA, trusts Dex through the same CA, and reaches the API
 server at `kubernetes.default.svc`. The suite reaches it through a NodePort on the node's
 address on the Docker network: the `foyer` specs test krm-foyer, not the front door. Its
-service account is cluster-admin and its token is mounted, as bait; the suite checks both
-before it starts.
+service account is cluster-admin ([foyer-bait.yaml](../test/e2e/cluster/foyer-bait.yaml),
+kept out of the chart) and its token is mounted, as bait; the suite checks both before it
+starts.
 
-Beside it runs a second, brief krm-foyer ([foyer-brief.yaml](../test/e2e/cluster/foyer-brief.yaml)):
-the same image, certificate, public URL and Dex client, but sessions that end 45
+Beside it runs a second, brief krm-foyer, a second release of the chart with
+[foyer-brief-values.yaml](../test/e2e/cluster/foyer-brief-values.yaml) on top: the same image, certificate, public URL and Dex client, but sessions that end 45
 seconds after login, a session check every second, responses cut short after 20
 seconds, and per session two requests in flight and ten at once, then one a second. The specs that wait for a session to expire or a bound to be reached use it, on
 a NodePort of its own, so no other spec has to race its session.

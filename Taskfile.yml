@@ -103,8 +103,8 @@ tasks:
       - test/e2e/cluster/stop-cluster.sh
 
   lint:
-    desc: "Vet and lint the Go code, the workflows and the Dockerfiles."
-    deps: [lint-go, lint-actions, lint-dockerfiles]
+    desc: "Vet and lint the Go code, the workflows, the Dockerfiles and the Helm chart."
+    deps: [lint-go, lint-actions, lint-dockerfiles, lint-helm]
 
   lint-go:
     cmds:
@@ -119,6 +119,13 @@ tasks:
   lint-dockerfiles:
     cmds:
       - hadolint Dockerfile .devcontainer/Dockerfile
+
+  lint-helm:
+    desc: "helm lint, with the e2e fixture's values: the chart's defaults leave its required values empty."
+    cmds:
+      # The schema and the rendered arguments are tested in cmd/krm-foyer/chart_test.go.
+      - helm lint --strict charts/krm-foyer -f test/e2e/cluster/foyer-values.yaml
+      - helm lint --strict charts/krm-foyer -f test/e2e/cluster/foyer-values.yaml -f test/e2e/cluster/foyer-brief-values.yaml
 
   fmt:
     desc: "Format the Go code."
