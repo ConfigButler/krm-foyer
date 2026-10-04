@@ -63,6 +63,24 @@ func (f foyer) openAs(ctx context.Context, t *testing.T, session, target string)
 
 const watchTarget = "/k8s/api/v1/configmaps?watch=1"
 
+// endsAborted opens target as session and checks that the response is aborted:
+// before its head, when it was cut short before the API server answered, or while
+// its body is read. A response that ends cleanly fails.
+func (f foyer) endsAborted(t *testing.T, session, target string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, f.url+target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(sessionHeader, session)
+	resp, err := f.client.RoundTrip(req)
+	if err != nil {
+		return // aborted before the head
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	readsAborted(t, resp.Body)
+}
+
 // assertTooMany checks a refusal for concurrency: a 429 interruption naming the
 // bound and its limit, with no Retry-After, since nobody knows when a slot frees.
 func assertTooMany(t *testing.T, resp opened, bound string, limit int) {
@@ -189,16 +207,12 @@ func TestEverySlotIsReleased(t *testing.T) {
 			upstream: holdingHandler,
 			creds:    endedSession{},
 			config:   func(c *testConfig) { c.SessionCheckInterval = checkEvery },
-			end: func(t *testing.T, f foyer) {
-				readsAborted(t, f.openAs(t.Context(), t, "a", watchTarget).Body)
-			},
+			end: func(t *testing.T, f foyer) { f.endsAborted(t, "a", watchTarget) },
 		},
 		"the response duration is up": {
 			upstream: holdingHandler,
 			config:   func(c *testConfig) { c.MaxResponseDuration = 50 * time.Millisecond },
-			end: func(t *testing.T, f foyer) {
-				readsAborted(t, f.openAs(t.Context(), t, "a", watchTarget).Body)
-			},
+			end: func(t *testing.T, f foyer) { f.endsAborted(t, "a", watchTarget) },
 		},
 		"the answer is held back": {
 			upstream: func(w http.ResponseWriter, _ *http.Request) {
