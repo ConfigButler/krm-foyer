@@ -51,6 +51,9 @@ type fixture struct {
 	// foyerURL is krm-foyer's public URL, deployed by deploy-foyer.sh, and
 	// foyerAccount the service account it runs as: cluster-admin, as bait.
 	foyerURL, foyerNamespace, foyerAccount string
+	// sharedAccount is the identity shared watches are opened with: narrow, and not
+	// the bait.
+	sharedAccount string
 	// briefTransport reaches the brief krm-foyer, whose sessions end within a minute,
 	// instead of the main one.
 	briefTransport http.RoundTripper
@@ -120,6 +123,9 @@ func loadFixture() *fixture {
 	Expect(err).NotTo(HaveOccurred())
 	rehearsalUsers, err := strconv.Atoi(env["REHEARSAL_USERS"])
 	Expect(err).NotTo(HaveOccurred(), "REHEARSAL_USERS in the fixture's env (an older fixture? run task e2e-up)")
+	// Every string contains the empty one: a missing account would pass assertions
+	// that it never appears.
+	Expect(env["FOYER_SHARED_ACCOUNT"]).NotTo(BeEmpty(), "FOYER_SHARED_ACCOUNT in foyer-env (an older deployment? run task e2e-deploy)")
 	foyer, err := url.Parse(env["FOYER_URL"])
 
 	Expect(err).NotTo(HaveOccurred())
@@ -156,6 +162,7 @@ func loadFixture() *fixture {
 		foyerURL:        env["FOYER_URL"],
 		foyerNamespace:  env["FOYER_NAMESPACE"],
 		foyerAccount:    env["FOYER_SERVICE_ACCOUNT"],
+		sharedAccount:   env["FOYER_SHARED_ACCOUNT"],
 		briefTransport:  transportTo(env["FOYER_BRIEF_ADDR"]),
 		rehearsalUsers:  rehearsalUsers,
 		client: &http.Client{

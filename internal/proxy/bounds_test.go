@@ -19,10 +19,18 @@ func scrape(t *testing.T, m *metrics.Metrics) string {
 	return w.Body.String()
 }
 
+// assertMetric checks that m has sample. Some samples are recorded as a handler
+// finishes, which may be after the browser has read the whole response, so it waits
+// for the sample a while before failing.
 func assertMetric(t *testing.T, m *metrics.Metrics, sample string) {
 	t.Helper()
-	if got := scrape(t, m); !strings.Contains(got, sample+"\n") {
-		t.Errorf("metrics lack %q", sample)
+	deadline := time.Now().Add(within)
+	for !strings.Contains(scrape(t, m), sample+"\n") {
+		if time.Now().After(deadline) {
+			t.Errorf("metrics lack %q", sample)
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

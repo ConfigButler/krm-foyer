@@ -29,6 +29,10 @@ we treat the following as security bugs:
   rejected.
 - **A request made with the wrong credential.** Another user's, or the service's own
   service account standing in for a user.
+- **A shared watch read without the API server's say.** A stream served from a shared
+  watch to a user the API server did not allow `list` and `watch` on that scope, a
+  decision reused for a different subject or scope, or the shared-watch identity used
+  for anything but shared watches and their reviews.
 - **Session and login flaws.** Session fixation, a missing CSRF check on a mutation or
   logout, an open redirect through the login return path, or a callback accepted without
   state, nonce or PKCE validation.

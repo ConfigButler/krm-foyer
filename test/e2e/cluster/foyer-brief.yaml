@@ -56,6 +56,11 @@ spec:
             - -session-request-burst=10
             - -session-request-rate=1
             - -max-response-bytes=131072
+            # Shared notes, rechecked often, so a revoked grant shows within seconds.
+            - -shared-watch-resources=notes.hello.krm-foyer.example
+            - -shared-watch-token-file=/etc/krm-foyer/shared-watch/token
+            - -shared-watch-recheck-interval=2s
+            - -shared-watch-decision-ttl=1s
           ports:
             - name: https
               containerPort: 8443
@@ -85,6 +90,9 @@ spec:
             - name: kubernetes-ca
               mountPath: /etc/krm-foyer/kubernetes-ca
               readOnly: true
+            - name: shared-watch
+              mountPath: /etc/krm-foyer/shared-watch
+              readOnly: true
       volumes:
         - name: tls
           secret:
@@ -98,6 +106,12 @@ spec:
         - name: kubernetes-ca
           configMap:
             name: kube-root-ca.crt
+        - name: shared-watch
+          secret:
+            secretName: krm-foyer-shared-token
+            items:
+              - key: token
+                path: token
 ---
 apiVersion: v1
 kind: Service

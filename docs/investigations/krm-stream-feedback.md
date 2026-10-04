@@ -18,6 +18,9 @@ krm-foyer's own mapping, status capture and backoff are gone.
 Reviewing krm-foyer's integration found three more, below the original asks as
 [asks 6 to 8](#ask-6-refuse-redirects-in-the-kubernetes-backend).
 
+Asks 9 to 13, about shared watches, are in a note of their own:
+[shared watches](krm-stream-shared-watches.md).
+
 ## Status (2026-10-02): asks 6 to 8 are in krm-stream 0.6.0
 
 krm-stream 0.6.0 took all three (krm-stream #42), and krm-foyer moved to it. It helped:

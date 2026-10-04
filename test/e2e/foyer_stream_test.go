@@ -15,11 +15,27 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// noteStream is the /stream/v1 target for the notes of namespace ns.
+// noteStream is the /stream/v1 target for the notes of namespace ns. Notes are
+// shared in the fixture: their streams share one watch per namespace.
 func noteStream(ns string) string {
 	return fx.foyerURL + "/stream/v1?" + url.Values{
 		"group": {"hello.krm-foyer.example"}, "version": {"v1"}, "resource": {"notes"}, "namespace": {ns},
 	}.Encode()
+}
+
+// configMapStream is the /stream/v1 target for the ConfigMaps of namespace ns, which
+// are not shared: each of their streams is a watch of the user's own.
+func configMapStream(ns string) string {
+	return fx.foyerURL + "/stream/v1?" + url.Values{"version": {"v1"}, "resource": {"configmaps"}, "namespace": {ns}}.Encode()
+}
+
+// createConfigMaps creates ConfigMaps with the given names in ns, as the fixture's
+// admin.
+func createConfigMaps(ns string, names ...string) {
+	GinkgoHelper()
+	for _, name := range names {
+		fx.kubectl("-n", ns, "create", "configmap", name, "--from-literal=text=configmap "+name)
+	}
 }
 
 // createNotes creates notes with the given names in ns, as the fixture's admin.
@@ -35,17 +51,17 @@ func createNotes(ns string, names ...string) {
 	fx.kubectl("create", "-f", file)
 }
 
-// /stream: krm-stream's resource streams, each watch opened as the signed-in user.
-// Kubernetes decides what a user may watch, exactly as for /k8s, and krm-foyer's
-// service account is never used.
+// /stream: krm-stream's resource streams. A resource that is not shared (ConfigMaps
+// here) has each watch opened as the signed-in user: Kubernetes decides what a user
+// may watch, exactly as for /k8s, and krm-foyer's service account is never used.
 var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 	It("streams what RBAC lets the user watch, live, as the user", func(ctx SpecContext) {
 		ns := fx.namespace()
-		fx.grant(ns, bobK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch")
-		createNotes(ns, "first", "second")
+		fx.grant(ns, bobK8sName, "configmaps", "get", "list", "watch")
+		createConfigMaps(ns, "first", "second")
 		bob := signIn(ctx, bob)
 
-		s := bob.open(ctx, noteStream(ns))
+		s := bob.open(ctx, configMapStream(ns))
 		Expect(s.resp.StatusCode).To(Equal(http.StatusOK))
 		Expect(s.resp.Header.Get("Content-Type")).To(HavePrefix("text/event-stream"))
 		snapshot := s.until("synced")
@@ -56,14 +72,14 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 			}
 		}
 		Expect(snapshot[0].Type).To(Equal("reset"))
-		Expect(names).To(ConsistOf("first", "second"))
+		Expect(names).To(ContainElements("first", "second")) // and the namespace's kube-root-ca.crt
 
 		By("following a change made elsewhere while the stream is open")
-		fx.kubectl("-n", ns, "patch", "notes.hello.krm-foyer.example", "first", "--type=merge",
-			"-p", `{"spec":{"text":"changed while bob watched"}}`)
+		fx.kubectl("-n", ns, "patch", "configmap", "first", "--type=merge",
+			"-p", `{"data":{"text":"changed while bob watched"}}`)
 		changed := s.until("modified")
 		Expect(changed[len(changed)-1].Object.Metadata.Name).To(Equal("first"))
-		Expect(changed[len(changed)-1].Object.Spec).To(HaveKeyWithValue("text", "changed while bob watched"))
+		Expect(changed[len(changed)-1].Object.Data).To(HaveKeyWithValue("text", "changed while bob watched"))
 
 		By("as bob, and nobody else, according to the API server")
 		_ = s.resp.Body.Close()
@@ -73,7 +89,7 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 		for _, e := range events {
 			Expect(e.User.Username).To(Equal(bobK8sName), "%s %s", e.Verb, e.RequestURI)
 			Expect(e.ImpersonatedUser).To(BeNil())
-			Expect(e.RequestURI).To(HavePrefix("/apis/hello.krm-foyer.example/v1/namespaces/" + ns + "/notes?"))
+			Expect(e.RequestURI).To(HavePrefix("/api/v1/namespaces/" + ns + "/configmaps?"))
 		}
 		Expect(events[0].Verb).To(Equal("watch"))
 	})
@@ -81,13 +97,13 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 	It("ends with Kubernetes' own refusal what RBAC does not let the user watch", func(ctx SpecContext) {
 		ns := fx.namespace() // no grant for alice here
 		alice := signIn(ctx, alice)
-		s := alice.open(ctx, noteStream(ns))
+		s := alice.open(ctx, configMapStream(ns))
 		Expect(s.resp.StatusCode).To(Equal(http.StatusOK), "krm-stream answers a refusal as an event")
 		e := s.krmEvent()
 		Expect(e.Type).To(Equal("error"))
 		Expect(e.Code).To(Equal("FORBIDDEN"))
 		Expect(e.Terminal).To(BeTrue())
-		Expect(e.Message).To(ContainSubstring(`User "` + aliceK8sName + `" cannot watch resource "notes"`))
+		Expect(e.Message).To(ContainSubstring(`User "` + aliceK8sName + `" cannot watch resource "configmaps"`))
 		_, err := s.end(10 * time.Second)
 		Expect(err).NotTo(HaveOccurred(), "a terminal event ends the stream cleanly")
 
@@ -101,7 +117,7 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 	})
 
 	It("opens no stream without a session, and asks the API server nothing", func(ctx SpecContext) {
-		s := user{b: fx.browser()}.open(ctx, noteStream("hello"))
+		s := user{b: fx.browser()}.open(ctx, configMapStream("hello"))
 		Expect(s.resp.StatusCode).To(Equal(http.StatusUnauthorized))
 		Expect(s.resp.Header.Get("Krm-Foyer-Interruption")).To(Equal("Unauthorized"))
 		_, _ = s.end(10 * time.Second)
@@ -115,11 +131,10 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 	Context("end with their session", func() {
 		It("aborts a stream when its session logs out, and cancels its watch at the API server", func(ctx SpecContext) {
 			ns := fx.namespace()
-			fx.grant(ns, aliceK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch")
-			createNotes(ns, "first")
+			fx.grant(ns, aliceK8sName, "configmaps", "get", "list", "watch")
 			alice := signIn(ctx, alice)
 			before := fx.metric(cutForSessionEnded)
-			s := alice.open(ctx, noteStream(ns))
+			s := alice.open(ctx, configMapStream(ns))
 			s.until("synced")
 
 			out := alice.b.do(ctx, http.MethodPost, "/auth/logout", nil, alice.proof())
@@ -136,7 +151,7 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 			Expect(fx.metric(cutForSessionEnded)).To(Equal(before + 1))
 
 			By("and the stream, opened again, gets the 401 interruption")
-			again := alice.open(ctx, noteStream(ns))
+			again := alice.open(ctx, configMapStream(ns))
 			Expect(again.resp.StatusCode).To(Equal(http.StatusUnauthorized))
 			Expect(again.resp.Header.Get("Krm-Foyer-Interruption")).To(Equal("Unauthorized"))
 			_, _ = again.end(10 * time.Second)
@@ -144,8 +159,7 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 
 		It("aborts a stream when its session expires, and cancels its watch at the API server", func(ctx SpecContext) {
 			ns := fx.namespace()
-			fx.grant(ns, aliceK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch")
-			createNotes(ns, "first")
+			fx.grant(ns, aliceK8sName, "configmaps", "get", "list", "watch")
 			// The brief instance ends a session 45 seconds after login, checks open
 			// responses every second, and cuts one short after 20 seconds.
 			beforeLogin := time.Now()
@@ -159,7 +173,7 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 			case <-ctx.Done():
 				Fail("interrupted")
 			}
-			s := alice.open(ctx, noteStream(ns))
+			s := alice.open(ctx, configMapStream(ns))
 			s.until("synced")
 
 			at, err := s.end(45 * time.Second)
@@ -171,7 +185,7 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 			Expect(fx.briefMetric(cutForSessionEnded)).To(Equal(before + 1))
 
 			By("and the stream, opened again, gets the 401 interruption")
-			again := alice.open(ctx, noteStream(ns))
+			again := alice.open(ctx, configMapStream(ns))
 			Expect(again.resp.StatusCode).To(Equal(http.StatusUnauthorized))
 			_, _ = again.end(10 * time.Second)
 		})
@@ -179,16 +193,14 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 
 	It("bounds a session's streams apart from its requests", func(ctx SpecContext) {
 		ns := fx.namespace()
-		fx.grant(ns, aliceK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch")
 		fx.grant(ns, aliceK8sName, "configmaps", "get", "list", "watch")
-		createNotes(ns, "first")
 		// The brief instance allows a session two streams and two requests at once.
 		alice := signInBrief(ctx, alice)
-		before := fx.briefMetric("krm_foyer_upstream_watches_open")
+		before := fx.briefMetric(userWatches)
 		for range 2 {
-			alice.open(ctx, noteStream(ns)).until("synced")
+			alice.open(ctx, configMapStream(ns)).until("synced")
 		}
-		Expect(fx.briefMetric("krm_foyer_upstream_watches_open")).To(BeNumerically(">=", before+2))
+		Expect(fx.briefMetric(userWatches)).To(BeNumerically(">=", before+2))
 
 		By("its requests are not counted with its streams")
 		for range 2 {
@@ -197,7 +209,7 @@ var _ = Describe("krm-foyer's streams", Label("foyer"), func() {
 		}
 
 		By("a third stream is krm-foyer's 429, and never reaches the API server")
-		third := alice.open(ctx, noteStream(ns))
+		third := alice.open(ctx, configMapStream(ns))
 		Expect(third.resp.StatusCode).To(Equal(http.StatusTooManyRequests))
 		Expect(third.resp.Header.Get("Krm-Foyer-Interruption")).To(Equal("TooManyStreams"))
 		_, _ = third.end(10 * time.Second)
