@@ -12,7 +12,7 @@ A *bound* is something krm-foyer limits, such as how long a response may stay op
 
 - **Native watches stay open, and are not a special case.** Every bound applies to every
   request through `/k8s`, so krm-foyer never has to tell a watch from any other request.
-  Live views in applications belong to krm-stream ([roadmap step 5](roadmap.md#order-of-work));
+  Live views in applications belong to krm-stream ([watches](watches.md));
   the native watch stays available underneath it. See [native watches](#native-watches).
 - **Five bounds**, each configurable with a documented default: the request rate per
   session, concurrent requests per session and per replica, how long a response may
@@ -55,7 +55,7 @@ They are not three other things:
 
 **Every bound is per replica.** krm-foyer keeps no shared counters. With one replica, as
 today, that is the whole deployment. Once there are several
-([step 6](roadmap.md#order-of-work)), a session whose requests reach N replicas gets up
+([shared storage on the roadmap](roadmap.md#order-of-work)), a session whose requests reach N replicas gets up
 to N times its per-session limits, and the per-replica limits are what hold.
 
 The per-replica bounds on concurrent requests are the ones that protect krm-foyer itself,
@@ -72,8 +72,8 @@ stream into events, reconnect when it ends, and resume from the last `resourceVe
 without losing or repeating a change.
 
 krm-stream does that work once, for every application. It is the path krm-foyer
-recommends for live views ([step 5](roadmap.md#order-of-work)), and the hello example
-moves to it. So the question was whether native watches through `/k8s` should stay at
+recommends for live views ([watches](watches.md)), and the hello example
+uses it. So the question was whether native watches through `/k8s` should stay at
 all. **They stay**, for three reasons:
 
 - **Refusing them would be an access rule.** RBAC already says who may watch what.
@@ -82,7 +82,7 @@ all. **They stay**, for three reasons:
 - **They work today**, against the real API server, and a spec proves it.
 - **They cost almost nothing extra.** What they need, an end when the session ends and
   cancellation at the API server, every long response needs too: a followed log, or a
-  slow list open at logout. krm-stream's user-authenticated watches will need the same.
+  slow list open at logout. krm-stream's per-user streams use the same gate.
 
 What is not offered: a watch client in the [browser helper](frontend.md), or an example
 that reads native watches. That would be a second, lesser krm-stream.
@@ -230,8 +230,9 @@ within one interval of its session ending, plus at most one more for a check tha
 5 seconds normally, 10 at worst, with the defaults.
 
 Each open response reads the store once per interval: nothing for the memory store, and
-some 400 reads a second at the per-replica limit of 2000 once the store is shared
-([step 6](roadmap.md#order-of-work)).
+up to about 800 reads a second when both the 2000-request and 2000-stream limits
+are occupied, once the store is shared
+([shared storage on the roadmap](roadmap.md#order-of-work)).
 
 ### Response bytes
 
@@ -311,8 +312,19 @@ apart again:
   blocked write would also hold off the recheck that applies a revoked grant. A test
   stops reading, fills the buffers, revokes the grant and sees the stream end.
 
-What is not bounded yet: a native watch through `/k8s` whose tab stops reading holds
-its slot until the response duration ends it.
+What is not bounded yet:
+
+- A native watch through `/k8s` whose tab stops reading has no separate write timeout;
+  its session ending or response duration still cuts it short.
+- Snapshot size, per-stream object bookkeeping and shared-cache bytes have no foyer
+  limit. `-max-response-bytes` applies only to `/k8s`; it does not protect `/stream`.
+  A few large scopes can therefore exhaust memory below the stream-count limit.
+- Active sessions have no count limit. The 10,000 pending-login cap bounds login
+  transaction storage, but is not a rate limit on anonymous login/callback traffic.
+  The API gate's per-session rate applies to `/k8s` and `/stream`, not `/auth`.
+
+These are capacity/admission questions for the [next work](roadmap.md#order-of-work),
+not guarantees established by the small-snapshot rehearsal.
 
 ## Measured: the rehearsal
 
@@ -432,8 +444,8 @@ What is left out on purpose:
 - **No automatic HTTP instrumentation.** Middleware of that kind labels requests by
   route, and under `/k8s` the path names namespaces and objects: unbounded label values,
   and a record of what each user looks at, kept outside the audit log. krm-foyer's
-  metrics are labelled only by bound, cause and interruption reason, fixed sets known in
-  advance. Details of a single request belong in its log line.
+  metrics use fixed label sets: bound, cause, interruption reason, watch identity
+  class, access-check source and result. They never label a series with a user or scope. Details of a single request belong in its log line.
 - **No tracing yet.** Tracing is where OpenTelemetry is the right choice, and it would
   come with its tracing SDK only, not its metrics. But the API server accepts a W3C
   `traceparent`, and forwarding the browser's would let a page write into the cluster's
@@ -534,6 +546,7 @@ Rules of thumb for tuning:
 - **Lower a limit when the 99th percentile stays far below it** for weeks: the room
   above it serves only runaway pages.
 - **Expect `session_ended` at logout and at expiry**, one for each response the tab had
-  open. Idle expiry cannot cause it, since reconnects renew the session; the absolute
-  timeout and the token's expiry can. Far more of them than sessions ending means
-  something else: a session store that does not answer the check in time.
+  open. Ordinary reconnects renew idle time, but failed or refused reconnects need not;
+  idle, absolute and token expiry can all end a session. One session can own many
+  responses, so compare against open-response counts rather than expecting one cut
+  per logout. Store checks that fail or time out are another cause.

@@ -471,7 +471,11 @@ func (a *Auth) Token(r *http.Request) (gate.Credential, *interruption.Interrupti
 	if err != nil {
 		return gate.Credential{}, a.refusal(err)
 	}
-	return gate.Credential{Token: s.IDToken, Session: session.Handle(r), Live: func(ctx context.Context) bool {
+	user := s.Email
+	if user == "" {
+		user = s.Subject
+	}
+	return gate.Credential{Token: s.IDToken, User: user, Session: session.Handle(r), Live: func(ctx context.Context) bool {
 		err := a.cfg.Sessions.Check(r.WithContext(ctx))
 		if err != nil && !errors.Is(err, session.ErrNoSession) {
 			a.logger.Warn("session store failed during a session check", "err", err)

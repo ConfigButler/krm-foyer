@@ -1,11 +1,14 @@
 # krm-stream feedback from krm-foyer
 
-krm-foyer is about to host the krm-stream gateway with user-authenticated watches
-([roadmap step 5](../roadmap.md#order-of-work)). This note asks for five changes, most
-important first. None of them blocks us: for each we say what krm-foyer does meanwhile.
-Everything was checked against krm-stream v0.4.0 (`gateway`, `gateway/kube` and
-`@configbutler/krm-stream`) on 2026-10-02, by reading the source and, for the error
-output below, by running the gateway.
+**Historical investigation, 2026-10-02.** All asks 1–8 below were addressed in
+krm-stream 0.5.0 and 0.6.0. The current integration uses 0.7.0 (see `go.mod` and
+`Taskfile.yml`); its behavior is documented in [design](../design.md#streams-and-editing)
+and [watches](../watches.md). The problem descriptions and “meanwhile” workarounds
+below describe the versions investigated, not defects or code still present today.
+
+The original review covered krm-stream 0.4.0 (`gateway`, `gateway/kube` and the browser
+package), by reading its source and running the gateway. Asks 6–8 came from the
+subsequent integration review.
 
 ## Status (2026-10-02): asks 1 to 5 are in krm-stream 0.5.0
 
@@ -45,20 +48,9 @@ the watches open at the API server.
   and a reconnect would cost every browser a fresh snapshot. That reasoning holds for
   krm-foyer too, and we leave it there.
 
-One thing we noticed while moving: the 0.6.0 release job failed at "a stranger can `go
-get` this". `sum.golang.org` and `proxy.golang.org` answered `unknown revision
-gateway/v0.6.0` for some time after the tag was pushed, so `go get` of 0.6.0 failed for
-everyone, and the npm publish after that job did not run. 0.5.0 released through the
-same flow without it. We do not know which lookup reached the proxy before the tag
-existed; the release-PR builds of #47 are where we would look first, since they name the
-unreleased version. krm-foyer fetched 0.6.0 with `GOPROXY=direct` meanwhile; within about
-a quarter of an hour the proxy and `sum.golang.org` served it, with the same hashes. The
-npm package followed the next day (krm-stream #49), and krm-foyer's bundle moved to it: it
-differs from 0.5.0's only in the version string.
-
 ## The asks at a glance
 
-| # | Ask | Priority | What krm-foyer does meanwhile |
+| # | Original ask | Original priority | Workaround at the time (superseded) |
 | --- | --- | --- | --- |
 | 1 | Map Kubernetes errors to the spec's codes, and recover from the retryable ones with backoff | High | Wraps `kube.Backend` and maps errors itself |
 | 2 | Send a generic message with an unexpected `INTERNAL`, and give the detail to a diagnostic hook | High | The same wrapper keeps raw errors from reaching the gateway |
@@ -66,7 +58,7 @@ differs from 0.5.0's only in the version string.
 | 4 | Let `Principal` say why it failed, so a missing credential is `UNAUTHENTICATED` | Low | Answers before the gateway runs, so it never sees this |
 | 5 | Honour retry hints at the layer that retries | Low | Nothing needed for now |
 
-## How krm-foyer uses krm-stream
+## How krm-foyer used krm-stream 0.4.0
 
 krm-foyer is a backend for frontend: it signs users in with OIDC, keeps their ID token
 server-side behind a session cookie, and proxies `/k8s` to the API server with that
@@ -86,7 +78,7 @@ So krm-foyer uses the gateway in per-user mode:
 - **When the session ends,** krm-foyer cancels the request context. That aborts the
   stream and cancels the upstream watch; the managed connector then gets a 401 and stops.
 
-Shared watches come later. Everything below is about per-user mode unless it says
+At the time of this investigation, shared watches were still planned. Everything below is about per-user mode unless it says
 otherwise.
 
 ## Ask 1: map Kubernetes errors, and recover from them with backoff

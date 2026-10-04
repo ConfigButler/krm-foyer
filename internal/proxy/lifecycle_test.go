@@ -280,5 +280,5 @@ func TestUpstreamErrorAfterACutAborts(t *testing.T) {
 			t.Errorf("something was written before the abort: %d %q", w.Code, w.Body)
 		}
 	}()
-	p.upstreamError(w, r, context.Canceled)
+	_ = p.upstreamError(r, context.Canceled)
 }

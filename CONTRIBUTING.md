@@ -3,14 +3,14 @@
 ## Prerequisites
 
 Open the repository in its devcontainer. It provides Go, Task, golangci-lint, actionlint,
-hadolint, `kubectl` and `k3d`, at the versions CI uses.
+hadolint, Node, Helm, `kubectl` and `k3d`, at the versions CI uses.
 
 ```bash
 task          # list every task
-task test     # go test -race ./...
+task test     # Go race tests, short fuzz runs, and Node tests for the browser helper
 task lint     # go vet, golangci-lint, actionlint, hadolint
 task test-e2e # a real API server trusting a real Dex; see docs/testing.md
-task verify   # the whole gate, in CI's order; if this passes, CI passes
+task verify   # the local gate: the same checks CI runs in separate jobs
 ```
 
 ## Design rules

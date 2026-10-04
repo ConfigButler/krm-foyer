@@ -18,7 +18,7 @@ Voter settled several questions that krm-foyer's design now takes as given:
 | --- | --- |
 | The first design (March 2026) used an auth service with `Impersonate-User`. It was removed: impersonation lets the application write its own audit provenance | Requests go to Kubernetes with the user's own credential. There is no impersonation and no service-account fallback |
 | Tokens stay server-side. JavaScript receives identity and a CSRF token from `/auth/session`, never a bearer token | [Login and sessions](design.md#login-and-sessions) |
-| `/auth/whoami` (SelfSubjectReview) is the first thing to check when Kubernetes answers 403 | [/auth/whoami](frontend.md#what-ships-in-the-binary) |
+| `/auth/whoami` (SelfSubjectReview) is the first thing to check when Kubernetes answers 403 | Planned [/auth/whoami](frontend.md#what-ships-in-the-binary) |
 | One shared watch can serve two hundred browsers, if each subscriber is re-checked with a SubjectAccessReview | [Streams and editing](design.md#streams-and-editing) |
 | A 30-second SubjectAccessReview recheck covers RBAC for the captured subject. It does not cover identity-provider changes, and must not be described as revocation | [Session lifecycle](design.md#session-lifecycle) |
 
@@ -61,7 +61,8 @@ means inheriting its semantics exactly, not approximately.*
 [krm-stream](https://github.com/ConfigButler/krm-stream) owns the watch-to-browser protocol,
 shared watches, projections, drafts and reconciliation. Voter was its first real consumer, at
 0.4.0, and krm-foyer its second: krm-stream 0.5.0 and 0.6.0 took its
-[feedback](investigations/krm-stream-feedback.md). krm-foyer hosts krm-stream; it does not
+[initial feedback](investigations/krm-stream-feedback.md), and 0.7.0 took the
+[shared-watch fixes](investigations/krm-stream-shared-watches.md). krm-foyer hosts krm-stream; it does not
 reimplement any of it. Problems found while building on it are reported to krm-stream, the
 way Voter did in its consumer feedback notes.
 

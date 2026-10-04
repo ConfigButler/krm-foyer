@@ -21,6 +21,7 @@ import (
 
 	"github.com/ConfigButler/krm-stream/gateway"
 	"github.com/ConfigButler/krm-stream/gateway/kube"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/rest"
 
 	"github.com/ConfigButler/krm-foyer/internal/gate"
@@ -136,7 +137,7 @@ func (s *Streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// unnamed target, the one cluster, exists.
 		Scopes:      gateway.ScopePolicy{Targets: []string{""}, AnyResource: true, AllowLabelSelector: true},
 		Projections: gateway.ProjectionPolicyFunc(project),
-		Diagnostics: s.diagnose,
+		Diagnostics: func(d gateway.Diagnostic) { s.diagnose(a, d) },
 		// Every write to the browser is bounded, so one that stopped reading ends its
 		// stream rather than holding it, and a shared stream's rechecks, which wait
 		// for the write in progress.
@@ -181,10 +182,26 @@ func project(_ context.Context, _ gateway.Principal, _ gateway.Scope, requested 
 
 // diagnose logs what went wrong behind an error the browser was sent: its code and
 // the kind of failure, never its text, which the API server or whatever answered
-// instead wrote (see package upstream). A recovered resync is routine.
-func (s *Streams) diagnose(d gateway.Diagnostic) {
-	if d.Code == gateway.CodeResyncRequired {
+// instead wrote (see package upstream). A refusal is logged as every refusal is: by
+// Kubernetes when it did not let the user list and watch, or did not accept their
+// token; by krm-foyer when the scope is not one it serves. A recovered resync is
+// routine.
+func (s *Streams) diagnose(a *gate.Admission, d gateway.Diagnostic) {
+	switch d.Code {
+	case gateway.CodeResyncRequired:
 		s.logger.Debug("stream resynchronised", "cause", class(d.Err))
+		return
+	case gateway.CodeForbidden, gateway.CodeUnauthenticated, gateway.CodeScopeInvalid:
+		// FORBIDDEN and UNAUTHENTICATED are Kubernetes' answers: a 403 or 401, or a
+		// SubjectAccessReview's denial. SCOPE_INVALID is the API server's only when it
+		// does not serve the resource; otherwise the gateway refused the scope.
+		var status apierrors.APIStatus
+		by := gate.ByFoyer
+		if d.Code != gateway.CodeScopeInvalid || errors.As(d.Err, &status) {
+			by = gate.ByKubernetes
+		}
+		a.Refused(by, "code", string(d.Code), "group", d.Scope.Group, "resource", d.Scope.Resource,
+			"namespace", d.Scope.Namespace, "name", d.Scope.Name)
 		return
 	}
 	s.logger.Warn("API server could not serve a stream", "code", string(d.Code), "terminal", d.Terminal,

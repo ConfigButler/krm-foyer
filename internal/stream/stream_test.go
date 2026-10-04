@@ -51,8 +51,11 @@ func (c credentials) Token(*http.Request) (gate.Credential, *interruption.Interr
 	if session == "" {
 		session = "s1"
 	}
-	return gate.Credential{Token: c.token, Session: session, Live: live}, c.refused
+	return gate.Credential{Token: c.token, User: testUser, Session: session, Live: live}, c.refused
 }
+
+// testUser is who the issuer says every test user is.
+const testUser = "alice@example.test"
 
 // byHeader hands each request the token named by its Test-Token header, as if each
 // came from a session of its own.
@@ -468,6 +471,33 @@ func TestScopesTheGatewayRefuses(t *testing.T) {
 	if n := len(api.received()); n != 0 {
 		t.Errorf("%d requests reached the API server", n)
 	}
+	refusals := logLines(f.logs.String(), map[string]any{"msg": "refused", "by": gate.ByFoyer,
+		"code": "SCOPE_INVALID", "user": testUser, "route": "/stream", "path": "/stream/v1"})
+	if len(refusals) != 7 {
+		t.Errorf("%d refusals logged by krm-foyer, want 7:\n%s", len(refusals), f.logs.String())
+	}
+}
+
+// logLines is what krm-foyer logged, a line at a time, for those that match all of
+// want.
+func logLines(logs string, want map[string]any) []map[string]any {
+	var found []map[string]any
+	for line := range strings.Lines(logs) {
+		var l map[string]any
+		if json.Unmarshal([]byte(line), &l) != nil {
+			continue
+		}
+		matches := true
+		for k, v := range want {
+			if l[k] != v {
+				matches = false
+			}
+		}
+		if matches {
+			found = append(found, l)
+		}
+	}
+	return found
 }
 
 // Each built-in projection may be asked for: a projection hides nothing from a
@@ -518,6 +548,12 @@ func TestKubernetesRefusalsKeepTheirMeaning(t *testing.T) {
 			_ = s.rest(t)
 			if host := strings.TrimPrefix(api.URL, "https://"); strings.Contains(s.raw.String(), host) {
 				t.Errorf("the API server's address reached the browser: %s", s.raw.String())
+			}
+			// Logged once, as every refusal is: Kubernetes' own, and what was asked for.
+			want := map[string]any{"msg": "refused", "by": gate.ByKubernetes, "code": tc.code, "user": testUser,
+				"route": "/stream", "group": "hello.krm-foyer.example", "resource": "notes", "namespace": "hello"}
+			if n := len(logLines(f.logs.String(), want)); n != 1 || len(logLines(f.logs.String(), map[string]any{"msg": "refused"})) != 1 {
+				t.Errorf("want one line like %v; logged:\n%s", want, f.logs.String())
 			}
 		})
 	}

@@ -21,6 +21,7 @@ import (
 	"github.com/ConfigButler/krm-stream/gateway/kube"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/util/flowcontrol"
 
 	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
@@ -254,6 +255,69 @@ func eventuallyEqual(t *testing.T, what string, got func() string, want string) 
 	}
 }
 
+// Reviews and watch openings must share the configured budget, even though they
+// use different client-go clients. The user's SelfSubjectReview is separate.
+func TestSharedReviewsAndWatchesUseOneRateBudget(t *testing.T) {
+	api := newSharedAPI(t)
+	opened := make(chan time.Time, 1)
+	api.watch = func(w http.ResponseWriter, r *http.Request) {
+		opened <- time.Now()
+		api.serveWatch(w, r)
+	}
+	f := sharedFoyer(t, api, byHeader{}, metrics.New(), time.Minute, func(c *Config) {
+		c.Shared.QPS = 1 // A burst of two: the list and watch reviews spend it.
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), within)
+	defer cancel()
+	start := time.Now()
+	s := f.open(ctx, t, notes, as(userToken))
+	s.until(t, "synced")
+	select {
+	case at := <-opened:
+		if elapsed := at.Sub(start); elapsed < 800*time.Millisecond {
+			t.Fatalf("two reviews and a watch reached the API server in %v; the watch bypassed the shared rate budget", elapsed)
+		}
+	case <-ctx.Done():
+		t.Fatal("the shared watch never opened after the rate budget refilled")
+	}
+}
+
+// Cancelling a request waiting for the shared budget must release its body and
+// reach no API server, as any failed RoundTrip must.
+func TestSharedRateWaitHonorsCancellation(t *testing.T) {
+	api := newSharedAPI(t)
+	limiter := flowcontrol.NewTokenBucketRateLimiter(1, 1)
+	limiter.TryAccept() // Spend the burst, so the next request must wait.
+	transport := sharedTransport{next: api.Client().Transport, rate: limiter}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	body := &closeTrackedBody{Reader: strings.NewReader("{}")}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, api.URL, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := transport.RoundTrip(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if resp != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled request: response %v, error %v", resp, err)
+	}
+	if !body.closed || len(api.received()) != 0 {
+		t.Fatalf("body closed: %v; upstream requests: %d", body.closed, len(api.received()))
+	}
+}
+
+type closeTrackedBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *closeTrackedBody) Close() error {
+	b.closed = true
+	return nil
+}
+
 // Streams of one scope share one watch at the API server, whoever opens them: three
 // for alice and three for bob are one watch, opened with the shared identity's
 // token. Each user is asked about once, not once a stream, and one change reaches
@@ -334,6 +398,9 @@ func TestASharedStreamAsksAboutEachUser(t *testing.T) {
 	if strings.Contains(carol.raw.String(), "note first") {
 		t.Errorf("carol was sent the shared watch's notes: %s", carol.raw.String())
 	}
+	if refusals := logLines(f.logs.String(), map[string]any{"msg": "refused", "by": gate.ByKubernetes, "code": "FORBIDDEN"}); len(refusals) != 1 {
+		t.Errorf("carol's refusal logged %d times as Kubernetes':\n%s", len(refusals), f.logs.String())
+	}
 
 	var carols []authorizationv1.SubjectAccessReviewSpec
 	for _, spec := range api.subjectReviews() {
@@ -360,8 +427,9 @@ func TestASharedStreamAsksAboutEachUser(t *testing.T) {
 }
 
 // Decisions are reused across label selectors because the reviews ask about none
-// (see decisions.Authorize). This fails if they start to, for a stream that asks for
-// a selector: the key must then take it.
+// (see decisions.Authorize). krm-stream documents that since 0.7.0 and announces a
+// change to it; this fails if one comes anyway, for a stream that asks for a
+// selector: the key must then take it.
 func TestTheReviewsAskAboutNoSelector(t *testing.T) {
 	api := newSharedAPI(t)
 	f := sharedFoyer(t, api, byHeader{}, nil, time.Minute)
@@ -373,9 +441,9 @@ func TestTheReviewsAskAboutNoSelector(t *testing.T) {
 			t.Fatalf("a review without resource attributes: %+v", spec)
 		}
 		verbs[attrs.Verb] = true
-		if attrs.LabelSelector != nil || attrs.FieldSelector != nil {
-			t.Errorf("the %s review asks about selectors (%+v, %+v): key decisions on them",
-				attrs.Verb, attrs.LabelSelector, attrs.FieldSelector)
+		if attrs.LabelSelector != nil || attrs.FieldSelector != nil || attrs.Subresource != "" {
+			t.Errorf("the %s review asks about selectors or a subresource (%+v, %+v, %q): key decisions on them",
+				attrs.Verb, attrs.LabelSelector, attrs.FieldSelector, attrs.Subresource)
 		}
 	}
 	if !verbs["list"] || !verbs["watch"] {
@@ -774,8 +842,13 @@ func TestAStuckOpeningHoldsUpNoOtherScope(t *testing.T) {
 			return
 		}
 		stuck <- struct{}{}
-		<-r.Context().Done() // no answer, not even headers, until krm-foyer gives up
-		released <- struct{}{}
+		// No answer, not even headers, until krm-foyer gives up; or until the test
+		// ends, so a krm-foyer that never gives up fails it rather than hangs it.
+		select {
+		case <-r.Context().Done():
+			released <- struct{}{}
+		case <-t.Context().Done():
+		}
 	}
 	m := metrics.New()
 	f := sharedFoyer(t, api, byHeader{}, m, time.Minute)

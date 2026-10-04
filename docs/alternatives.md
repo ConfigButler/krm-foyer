@@ -24,10 +24,14 @@ Use it when all of these hold:
 
 - **The user is in a browser**, in an application you build, not in `kubectl` or a
   dashboard someone else built.
-- **Kubernetes should decide with the user's identity.** No service account acts for
-  the user, and nothing impersonates them.
-- **No token reaches the browser.** A script injected into the page can act as the user
-  while the page is open. It cannot carry a credential away.
+- **Kubernetes should decide with the user's identity.** API requests use the user's
+  token. Opt-in shared watches use a separate identity and API-server reviews of every
+  subscriber; no service account substitutes for a user's API request, and nothing
+  impersonates them.
+- **Login tokens stay on the server.** A script injected into the page can still act as
+  the user and read anything their grants allow, including Secrets or token-issuing
+  APIs if granted. HttpOnly protects the session cookie; it does not narrow Kubernetes
+  access. See [application scope](application-scope.md).
 - **Your API server trusts an OIDC issuer**, or you can make it trust one.
 
 It is weaker when you want a ready-made UI, a CLI, or a cluster whose API server you
@@ -114,8 +118,10 @@ header per change, in a browser with no Node polyfills.
   paths (no token, a proof on every change, a resend only of krm-foyer's own
   [refusal](design.md#interruptions)) stay short enough to audit, and they are tested
   under `node --test` ([foyer.test.js](../internal/pages/foyer.test.js)).
-- **Watches need no library.** A `fetch` whose body is read line by line, resumed from
-  the last `resourceVersion` and re-listed on 410 Gone, is about 40 lines.
+- **Live views use krm-stream.** The helper handles sessions and API calls; the
+  [hello example](../examples/hello) uses krm-stream for snapshots, recovery and drafts.
+  Native watches remain available for clients that already implement that protocol;
+  see [which watch to use](watches.md).
 - **For types, use `kubernetes-models` with `import type`.** It costs nothing at run
   time, is current, and covers CRDs. client-node's model classes do not fit, because they
   turn timestamps into `Date` objects and no longer match the JSON.

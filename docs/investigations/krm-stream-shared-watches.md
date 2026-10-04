@@ -1,23 +1,41 @@
 # krm-stream feedback from krm-foyer: shared watches
 
-krm-foyer now hosts `SharedBackend` with `kube.SubjectAccessReviewAuthorizer`
-([roadmap step 5b](../roadmap.md#order-of-work), [watches](../watches.md)). This note asks
-for five changes, numbered on from the [first feedback](krm-stream-feedback.md), whose
-asks 1 to 8 krm-stream 0.5.0 and 0.6.0 took. Two (9 and 10) are about guarantees that
-do not hold today in a failure case; three (11 to 13) would cut the authorization load
-that sharing costs. For each we say what krm-foyer does meanwhile. Everything was
-checked against krm-stream main at `5ca19ed` (gateway 0.6.0) on 2026-10-04, by reading
-the source and by tests in krm-foyer that reproduce each problem.
+**Historical findings with two deferred requests.** Asks 9, 10 and the documentation
+part of 13 were addressed in krm-stream 0.7.0, which krm-foyer now uses. Asks 11 and 12
+remain deferred. Current setup and guarantees are in [watches](../watches.md).
+
+The original investigation checked krm-stream `5ca19ed` (gateway 0.6.0) on 2026-10-04,
+by reading the source and reproducing the failures in krm-foyer tests. The problem
+and workaround descriptions below are that historical record; in particular, the
+lazy-open workaround under ask 9 has been removed.
+
+## Status (2026-10-04): asks 9, 10 and 13 are in krm-stream 0.7.0
+
+krm-stream took ask 9, the "require a write timeout" form of ask 10, and the documentation
+part of ask 13 ([its proposal 0008](https://github.com/ConfigButler/krm-stream/blob/main/docs/proposals/0008-shared-watch-hardening.md)),
+and krm-foyer moved to 0.7.0:
+
+- **Ask 9:** krm-foyer's upstream backend opens the shared watch in `Watch` again; the
+  workaround that opened it on the first `Next` is gone. The test that reproduced the
+  problem stays, and fails against 0.6.0.
+- **Ask 10:** nothing changed in krm-foyer, which always set a write timeout. A test now
+  checks that every route in front of a stream lets it flush and set write deadlines.
+- **Ask 13:** the decision cache's key cites krm-stream's documented review attributes; the
+  test that fails if a review starts carrying a selector stays, since the key is
+  krm-foyer's to get right.
+
+Asks 11 and 12 are deferred, with what would reopen them recorded in the proposal.
+krm-foyer keeps rechecking on the timer and reusing decisions in its own authorizer.
 
 ## The asks at a glance
 
-| # | Ask | Priority | What krm-foyer does meanwhile |
+| # | Ask | Status | Current integration |
 | --- | --- | --- | --- |
-| 9 | Open a shared watch without holding the backend-wide lock, and cancel an opening nobody waits for | High | Its upstream backend returns at once and opens the watch on the first `Next` |
-| 10 | Make timed rechecks independent of a blocked write, or require a write timeout with them | High | Sets `WriteTimeout` on every stream, and counts it in its revocation bound |
-| 11 | Let a host trigger a recheck | Medium | Rechecks on the timer only |
-| 12 | Recheck once per principal and scope, not once per subscriber | Medium | Reuses decisions for a short time in its own authorizer |
-| 13 | Say which attributes the SubjectAccessReview asks about | Low | Keys its decisions on them, with a test that fails if they change |
+| 9 | Open a shared watch without holding the backend-wide lock, and cancel an opening nobody waits for | Fixed in 0.7.0 | Opens normally in `Watch`; the regression test remains |
+| 10 | Make timed rechecks independent of a blocked write, or require a write timeout with them | Fixed in 0.7.0 | Sets `WriteTimeout` on every stream, and counts it in its revocation bound |
+| 11 | Let a host trigger a recheck | Deferred | Rechecks on the timer only |
+| 12 | Recheck once per principal and scope, not once per subscriber | Deferred | Reuses decisions for a short time in its own authorizer |
+| 13 | Say which attributes the SubjectAccessReview asks about | Documented in 0.7.0 | Keys its decisions on them, with a test that fails if they change |
 
 ## Ask 9: open a shared watch without holding the backend-wide lock
 
@@ -43,7 +61,7 @@ without the lock. Give the opening a context that its waiting subscribers can ca
 together: when the last one leaves before the watch opened, cancel the opening and
 drop the entry. The backoff bookkeeping can stay under the lock.
 
-**What krm-foyer does meanwhile.** Its upstream backend's `Watch` returns a watcher at
+**Historical workaround (removed in 0.7.0).** Its upstream backend's `Watch` returns a watcher at
 once, and opens the real watch on the first `Next`, with the context `Watch` was given.
 `pump` calls `Next` without the lock, and `leave` cancels that context when the last
 subscriber goes, so the opening is the scope's alone and ends with it. An opening

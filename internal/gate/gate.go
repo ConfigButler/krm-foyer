@@ -33,6 +33,10 @@ type Credentials interface {
 type Credential struct {
 	// Token is the user's bearer token.
 	Token string
+	// User is who the issuer says the user is, for log lines: their email, or their
+	// subject when the issuer gave none. The API server decides who the token
+	// belongs to.
+	User string
 	// Session names the session the token came from, for the bounds kept per
 	// session. It is opaque, and never logged or sent anywhere.
 	Session string
@@ -186,11 +190,57 @@ func (g *Gate) Metrics() *metrics.Metrics { return g.metrics }
 
 // Interrupt answers r with i, instead of the API server, and logs and counts it.
 func (g *Gate) Interrupt(w http.ResponseWriter, r *http.Request, i *interruption.Interruption) {
-	path, _, _ := strings.Cut(r.RequestURI, "?")
-	g.logger.Info("interruption", "status", i.Status, "reason", i.Reason, "message", i.Message,
-		"method", r.Method, "path", path)
+	g.interrupt(w, r, "", i)
+}
+
+// Interrupt answers a's request with i, as Gate.Interrupt does, and logs its user.
+func (a *Admission) Interrupt(w http.ResponseWriter, i *interruption.Interruption) {
+	a.gate.interrupt(w, a.Request, a.User, i)
+}
+
+// An interruption below 500 is krm-foyer refusing the request, and is logged as a
+// refusal; one from 500 is a failure, which the browser may try again.
+func (g *Gate) interrupt(w http.ResponseWriter, r *http.Request, user string, i *interruption.Interruption) {
+	attrs := []any{"status", i.Status, "reason", i.Reason, "message", i.Message}
+	if i.Status < http.StatusInternalServerError {
+		g.refused(r, ByFoyer, user, attrs...)
+	} else {
+		g.logger.Info("interruption", append(attrs, request(r, user)...)...)
+	}
 	g.metrics.Interruption(i.Reason)
 	i.Serve(w, r)
+}
+
+// Who refused a request.
+const (
+	ByFoyer      = "krm-foyer"
+	ByKubernetes = "kubernetes"
+)
+
+// Refused logs that a's request was refused by, for the reason attrs give. Every
+// refusal is one line, whoever refused: an operator finds who was refused what,
+// and by whom, in one place.
+func (a *Admission) Refused(by string, attrs ...any) {
+	a.gate.refused(a.Request, by, a.User, attrs...)
+}
+
+func (g *Gate) refused(r *http.Request, by, user string, attrs ...any) {
+	g.logger.Info("refused", append(append([]any{"by", by}, attrs...), request(r, user)...)...)
+}
+
+// request is what a log line says about r: its method, path and route, and its
+// user once known. The query is left out, as it may name anything.
+func request(r *http.Request, user string) []any {
+	path, _, _ := strings.Cut(r.RequestURI, "?")
+	route := "/"
+	if first, _, _ := strings.Cut(strings.TrimPrefix(path, "/"), "/"); first != "" {
+		route += first
+	}
+	attrs := []any{"method", r.Method, "path", path, "route", route}
+	if user != "" {
+		attrs = append(attrs, "user", user)
+	}
+	return attrs
 }
 
 // Admission is a request the gate let through. Close it when the response has
@@ -233,12 +283,12 @@ func (g *Gate) admit(w http.ResponseWriter, r *http.Request, slots *concurrency)
 		return nil
 	}
 	if ok, wait := g.rate.allow(cred.Session); !ok {
-		g.Interrupt(w, r, g.rate.refuse(wait))
+		g.interrupt(w, r, cred.User, g.rate.refuse(wait))
 		return nil
 	}
 	release, refused := slots.acquire(cred.Session)
 	if refused != nil {
-		g.Interrupt(w, r, refused)
+		g.interrupt(w, r, cred.User, refused)
 		return nil
 	}
 

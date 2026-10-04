@@ -6,7 +6,8 @@ krm-foyer is a backend for frontend (BFF) for browser applications built on Kube
 APIs. It owns OIDC login and server-side sessions, proxies Kubernetes API requests with
 the user's own credential, and hosts
 [krm-stream](https://github.com/ConfigButler/krm-stream) resource streams on the same
-origin as your frontend. The browser never holds a cluster credential.
+origin as your frontend. krm-foyer keeps its login and upstream credentials on the
+server; the browser receives an opaque session cookie.
 
 KRM is the [Kubernetes Resource Model](https://github.com/kubernetes/design-proposals-archive/blob/main/architecture/resource-management.md):
 the idea that everything is a declarative resource with a spec and a status. krm-foyer is
@@ -15,10 +16,12 @@ for applications whose domain is modelled that way.
 > **Status: a working prototype, not yet for a cluster that matters.** Sign-in through
 > OIDC, server-side sessions and the API proxy work, and e2e specs against a real API
 > server and Dex try to get past each security boundary. `task demo` runs an example
-> application against them in your browser. Still missing: the bounds on request rate and
-> response size that make it safe in front of a real cluster, token refresh, more than
-> one replica, and streams. The [roadmap](docs/roadmap.md) tracks which of the principles
-> below have tests.
+> application against them in your browser. Request and response bounds, live streams
+> and opt-in shared watches are implemented and tested. Sessions still live in memory:
+> run one replica, expect a new login after a restart or ID-token expiry, and do not
+> treat the e2e manifests as a production deployment. Certificate reload, token refresh,
+> and shared session storage remain to be built; a Helm chart is being developed separately.
+> The [roadmap](docs/roadmap.md) gives the next priorities and their required evidence.
 
 ## Try it
 
@@ -45,13 +48,13 @@ change in one appear in the other, and a conflict when both edit the same note.
 
 ## Principles
 
-- **The issuer decides who you are; Kubernetes decides what you may do.** Every request
-  reaches the API server with the user's own OIDC token, and RBAC and admission answer it.
+- **The issuer decides who you are; Kubernetes decides what you may do.** Proxied API
+  requests and per-user watches use the user's own OIDC token; RBAC and admission answer them.
   No impersonation, and no fallback to krm-foyer's service account. A
   [shared watch](docs/watches.md), where configured, is opened once with an identity of
   its own, and the API server is asked about every user who reads it.
-- **Tokens stay on the server.** The browser holds only an opaque session ID in a Secure,
-  HttpOnly cookie. Frontend code never sees a token. The session ID is itself a bearer
+- **Login tokens stay on the server.** The browser holds an opaque session ID in a Secure,
+  HttpOnly cookie. Frontend code never receives those tokens. The session ID is itself a bearer
   credential, and is guarded like one.
 - **One domain is one trust boundary.** The application, krm-foyer and any domain backend
   share an origin, routed by path. Everything on that domain can act as the signed-in
@@ -62,7 +65,7 @@ change in one appear in the other, and a conflict when both edit the same note.
   user's full Kubernetes access; give users grants that match the application.
   [Why, and what a scope would add](docs/application-scope.md)
 - **Kubernetes semantics, exactly.** Status codes, errors, patch types and conflicts pass
-  through unchanged, and nothing is retried on the user's behalf.
+  through unchanged. A mutation that reached Kubernetes is never automatically replayed.
   [Why](docs/heritage.md#what-broke-on-stage)
 
 ## Documentation
@@ -73,6 +76,8 @@ change in one appear in the other, and a conflict when both edit the same note.
 | [docs/design.md](docs/design.md) | The contract: routes, access, sessions, upstream responses, streams and release criteria |
 | [docs/application-scope.md](docs/application-scope.md) | Why a browser application might be limited beyond RBAC, what that would block, and why krm-foyer starts without it |
 | [docs/roadmap.md](docs/roadmap.md) | What exists, what is next, and in what order |
+| [docs/bounds.md](docs/bounds.md) | Limits, defaults, metrics and the scope of the capacity measurements |
+| [docs/watches.md](docs/watches.md) | Choosing per-user streams, shared streams or native watches, and configuring sharing |
 | [docs/bff-choice.md](docs/bff-choice.md) | Whether your application should use a universal BFF like this one, a domain backend, or both |
 | [docs/ingress.md](docs/ingress.md) | Terminating TLS itself or behind an ingress, sharing one domain with other services, and the login gate for an ingress |
 | [docs/frontend.md](docs/frontend.md) | Which pages krm-foyer serves itself, and why it ships no single-page application |
@@ -90,7 +95,7 @@ task verify       # everything CI checks, including e2e against k3d and Dex
 ```
 
 Without flags, krm-foyer serves its start page and probes only. Sign-in and the API
-proxy come together, and need:
+proxy and streams come together, and need:
 
 | Flag | |
 | --- | --- |
@@ -104,7 +109,12 @@ Optional: `-oidc-ca-file` and `-kubernetes-ca-file` (CAs to trust), `-oidc-scope
 [bounds](docs/bounds.md) each have a flag and a documented default: the request rate and
 concurrent requests per session, concurrent requests per replica, how long a response
 may stay open, its size, and how often an open response checks its session. Sessions
-live in memory: run one replica.
+live in memory: run one replica. Shared watches are opt-in; see their
+[configuration and identity requirements](docs/watches.md#setting-up-shared-watches).
+The OIDC redirect URI to register is `<public-url>/auth/callback`. The public URL,
+issuer and Kubernetes server must use HTTPS. Mounted TLS certificates, CA bundles and
+the OIDC client secret are read at startup; restart after changing them. The explicitly
+configured shared-watch token file is reread by client-go for rotation.
 
 Or as a container:
 

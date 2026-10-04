@@ -22,7 +22,7 @@ its source.
   work.** krm-foyer has no Dex-specific code.
 - **Several issuers need token refresh, which krm-foyer does not do yet.** Pinniped and
   OpenUnison issue tokens that last minutes. Today a krm-foyer session ends when its ID
-  token expires. Refresh is [roadmap step 6](../roadmap.md#order-of-work), and krm-foyer
+  token expires. Refresh is [roadmap](../roadmap.md#order-of-work), and krm-foyer
   must support it before those issuers are a comfortable choice.
 
 ## What krm-foyer needs from an issuer
@@ -49,11 +49,11 @@ its source.
 | Issuer | What it is | State it keeps | Fit for krm-foyer today |
 | --- | --- | --- | --- |
 | Dex | A small OIDC issuer, with its own users or in front of LDAP, GitHub, SAML or another OIDC provider | Kubernetes custom resources with `storage: type: kubernetes`; no volume | Tested. Used by the tests and the demo |
-| Pinniped | Kubernetes login: a Supervisor that federates an upstream provider, and a Concierge for clusters you cannot configure | Kubernetes Secrets; no volume. Needs an upstream provider | Works, with sessions of 30 minutes at most until refresh lands |
+| Pinniped | Kubernetes login: a Supervisor that federates an upstream provider, and a Concierge for clusters you cannot configure | Kubernetes Secrets; no volume. Needs an upstream provider | Untested; direct API-server trust should fit, with sessions of 30 minutes at most until refresh lands |
 | Keycloak | Full identity management: users, roles, brokering, OIDC and SAML | A relational database. Its built-in `dev-file` database is not for production | Should work. Raise the token lifespan for krm-foyer's client until refresh lands |
 | authentik | Authentication flows and application integrations; documents Kubernetes CLI login | PostgreSQL (Redis is no longer needed since 2025.10). Uploaded files need a volume or S3 | Should work, once `email_verified` is fixed (see below) |
 | Authelia | Reverse-proxy authentication with an OIDC provider; documents kubelogin | SQLite, PostgreSQL or MySQL. Several replicas also need Redis for sessions | Should work |
-| OpenUnison | Kubernetes login portal for kubectl and dashboards, with optional access provisioning | The login portal keeps sessions as Kubernetes custom resources; some provisioning features add a database | Works with short tokens only until refresh lands |
+| OpenUnison | Kubernetes login portal for kubectl and dashboards, with optional access provisioning | The login portal keeps sessions as Kubernetes custom resources; some provisioning features add a database | Untested; short tokens would limit sessions until refresh lands |
 
 If you want no database at all, Dex, Pinniped and OpenUnison's login portal keep their
 state in the cluster. Keycloak, authentik and Authelia each bring a database to run, back
@@ -66,7 +66,7 @@ and Pinniped leave to an upstream provider.
 | --- | --- | --- |
 | Users without an outside service | `staticPasswords`, in the same container | Pinniped and OpenUnison need an upstream provider. Keycloak, authentik and Authelia have users, but also a database |
 | A user's token without a browser | The password grant. The suite asks the API server directly what each user may do and compares that with krm-foyer's answer | A registered Pinniped web client may use only `authorization_code`, `refresh_token` and token exchange |
-| A session longer than the ID token, without refresh | ID token lifetime is set in `expiry` | Pinniped: 2 minutes by default, 30 at most. OpenUnison: about a minute in its examples |
+| A useful session lifetime without refresh | ID token lifetime is configurable in `expiry`; the session never outlives it | Pinniped: 2 minutes by default, 30 at most. OpenUnison: about a minute in its examples |
 | Parts to install | One Deployment | Pinniped and OpenUnison: the issuer plus an upstream provider. The others: the issuer plus its database |
 
 The security boundaries krm-foyer tests are the same with any issuer: the token stays on
@@ -81,10 +81,14 @@ whatever the issuer is. Today it is in memory, so krm-foyer runs one replica.
 
 Pinniped and OpenUnison show an approach worth copying: keep sessions in the cluster.
 Pinniped's Supervisor keeps them as Secrets and removes expired ones with a garbage
-collector (`internal/fositestorage` in its source). A store like that would let krm-foyer
+collector (`internal/fositestorage` in its source). A store like that could let krm-foyer
 run several replicas with no Redis or database. Two things need care: how often it writes
 to etcd (not on every request), and who can read Secrets in its namespace. Keying sessions
-by a hash of the ID, as krm-foyer already does, helps with the second.
+by a hash of the ID, as krm-foyer already does, prevents recovery of usable session
+IDs. It does not protect the raw ID tokens, or future refresh tokens, held in each
+record. Store access and encryption still need their own design. The current manager
+touches the store per request and reads it per open response every check interval; a
+Kubernetes-backed store is an option to measure, not a storage decision already made.
 
 ## Notes per issuer
 
@@ -101,9 +105,12 @@ These notes were checked against Pinniped's `main` branch of August 2026.
 
 **The API server must trust the Supervisor directly.** Add the FederationDomain's issuer to
 the API server's `AuthenticationConfiguration` with krm-foyer's `OIDCClient` name as the
-audience. A Concierge `JWTAuthenticator` with the same issuer and audience also works.
+audience. A Concierge `JWTAuthenticator` alone does not configure the API server to
+accept that token directly. Its credential-exchange and impersonation-proxy paths are
+different integrations, not drop-in replacements for this configuration.
 
-Pinniped's guide for web applications describes a different path:
+Pinniped's [web-application guide](https://pinniped.dev/docs/howto/configure-auth-for-webapps/)
+describes a different path:
 
 1. Exchange the token for one scoped to a single cluster (RFC 8693).
 2. Trade that token for a short-lived mTLS client certificate through the Concierge's
@@ -130,8 +137,9 @@ documented 401 and must sign in again.
   [session lifecycle](../design.md#session-lifecycle) table leaves to the issuer.
 - **Group changes that arrive on their own.** A refresh picks up new memberships.
 - **Several upstream providers and identity transformations** in one FederationDomain.
-- **Managed clusters** whose API server flags you cannot set. The Concierge's impersonation
-  proxy can accept Supervisor tokens there. krm-foyer has not been tested against it.
+- **Managed clusters** whose API server flags you cannot set. The Concierge offers credential exchange and an impersonation
+  proxy for that use. This is outside krm-foyer's tested direct-token integration and
+  its no-impersonation contract; refresh alone does not make it supported.
 
 ### Keycloak
 
@@ -166,7 +174,7 @@ Its tokens are short-lived, so it needs refresh, as Pinniped does.
 
 None of these is scheduled. They would follow refresh:
 
-- [ ] Refresh and shared session storage ([roadmap step 6](../roadmap.md#order-of-work))
+- [ ] Refresh and shared session storage ([roadmap](../roadmap.md#order-of-work))
 - [ ] An e2e fixture for the issuer, running the login, refresh and logout journeys with
   its default token lifetimes. For Pinniped or OpenUnison, Dex can be the upstream
 - [ ] The disablement bound measured for that issuer: disable the user, then time how long

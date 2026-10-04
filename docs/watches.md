@@ -2,7 +2,7 @@
 
 A page that shows live Kubernetes state can get it three ways through krm-foyer. This
 page helps you choose one, then explains how to set up the one that needs setting up:
-shared watches. In short: **use a stream for anything live in a page, share it when
+shared watches. **Use a stream for anything live in a page, share it when
 many users watch the same thing, and treat native watches as a fallback.**
 
 ## The three kinds
@@ -76,9 +76,12 @@ The token file holds a service account's token. That account needs:
 
 - `list` and `watch` on each shared resource, wherever users will watch it: usually a
   ClusterRole bound with a ClusterRoleBinding;
-- `create` on `subjectaccessreviews`, which the built-in `system:auth-delegator`
-  ClusterRole grants;
+- `create` on `subjectaccessreviews` in `authorization.k8s.io`;
 - nothing else.
+
+The fixture binds `system:auth-delegator` for the reviews. That built-in role also
+grants `create` on `tokenreviews`, which krm-foyer does not need. A deployment can use
+a narrower ClusterRole containing only the SubjectAccessReview grant.
 
 krm-foyer reads the file again as it changes, so a rotating token works. It never uses
 the pod's own service account by itself: if you want that account to be the
@@ -126,10 +129,15 @@ A grant taken away ends a shared stream within:
 The last line is there because krm-stream delivers events and rechecks one at a time:
 a recheck waits for the write in progress. Without a bound on writes, a browser that
 stopped reading would hold its stream open, unchecked, until the 30-minute response
-duration. With it, the write fails and the stream ends.
+duration. With it, the write fails and the stream ends. Since 0.7.0 krm-stream refuses
+timed rechecks without a write timeout, and its
+[revocation budget](https://github.com/ConfigButler/krm-stream/blob/main/docs/auth.md#revocation-budget)
+breaks down the same parts.
 
 Logout and session expiry are not affected: they end every stream within the
-session-check interval, as before.
+session-check interval, as before. These access reviews use the subject captured by
+the SelfSubjectReview when the stream opened. They do not refresh the OIDC token or
+learn new issuer group membership; the RBAC bound is not an issuer-disablement bound.
 
 ### What the browser gets when something fails
 
@@ -167,7 +175,9 @@ in-memory evaluation, with no storage. With a webhook authorizer in the chain, i
 a blocking HTTP call to that webhook, so the load lands there too, at the webhook's
 latency; measure it with `krm_foyer_access_check_duration_seconds`. The shared-watch
 identity's client sends at most `-shared-watch-qps` (100) requests a second, bursts
-twice that, and the API server's priority and fairness applies on top. Reviews that
+twice that (at least one request). Reviews, watch openings, fallback lists and retries
+share one transport budget; SelfSubjectReviews use each user's separate client. The
+API server's priority and fairness applies on top. Reviews that
 cannot be sent in time show as `error` results and `UPSTREAM_UNAVAILABLE` streams,
 never as streams served without a check.
 
@@ -192,9 +202,10 @@ Kubernetes sends no notice that what a user may do has changed, so there is noth
 wait for. One could watch RBAC's Roles and Bindings and recheck when they change, but:
 
 - **RBAC is not all of authorization.** A webhook authorizer, the Node authorizer, or
-  group membership, which comes from the issuer and changes with no Kubernetes object,
-  can change an answer with nothing to watch. A periodic recheck stays as the safety
-  net either way.
+  an external policy service can change an answer with no RBAC object to watch.
+  Periodic reviews cover those changes for the captured subject. Issuer group changes
+  also have no RBAC event, but require fresh identity resolution and a new token;
+  repeating a SubjectAccessReview alone does not pick them up.
 - **The shared-watch identity would read every Role and Binding** in the cluster: the
   whole access policy, a broader grant than it has now.
 - **krm-stream rechecks on its own timer,** per stream; a host cannot ask it to

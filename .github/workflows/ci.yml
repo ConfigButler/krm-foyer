@@ -106,11 +106,11 @@ jobs:
       # for the whole job.
       - name: Load CI image
         run: docker load -i "$RUNNER_TEMP/ci-image.tar" && rm -f "$RUNNER_TEMP/ci-image.tar"
-      # go mod tidy, go vet, golangci-lint, actionlint and hadolint.
-      - name: task tidy-check lint
+      # Module and browser-bundle integrity, then the linters, as in task verify.
+      - name: task tidy-check vendor-check lint
         run: |
           docker run --rm -v "$GITHUB_WORKSPACE:$CI_WORKDIR" -w "$CI_WORKDIR" \
-            "$CI_IMAGE" bash -lc 'git config --global --add safe.directory "$PWD" && task tidy-check lint'
+            "$CI_IMAGE" bash -lc 'git config --global --add safe.directory "$PWD" && task tidy-check vendor-check lint'
 
   test:
     name: Unit tests

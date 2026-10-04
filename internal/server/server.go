@@ -109,8 +109,8 @@ func plain(body string) http.HandlerFunc {
 }
 
 // securityHeaders applies to every response. krm-foyer's own pages load nothing
-// but same-origin stylesheets, so the policy can be this strict; application
-// pages will need their own policy once static hosting exists.
+// but same-origin stylesheets, so the policy can be this strict. Application
+// pages are served separately and need their own policy.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()

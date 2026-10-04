@@ -24,6 +24,9 @@ import (
 
 const userToken = "user-token-4f1c9a" //nolint:gosec // a marker to search for, not a credential
 
+// testUser is who the issuer says the test's user is.
+const testUser = "alice@example.test"
+
 // credentials is the test's session: it hands the proxy a fixed answer. It exists
 // only in this test file; the binary has no way to be given a token but a session.
 // Its session stays live unless live says otherwise.
@@ -44,7 +47,30 @@ func (c credentials) Token(*http.Request) (gate.Credential, *interruption.Interr
 	if session == "" {
 		session = "s1"
 	}
-	return gate.Credential{Token: c.token, Live: live, Session: session}, c.refused
+	return gate.Credential{Token: c.token, User: testUser, Live: live, Session: session}, c.refused
+}
+
+// logLines is what krm-foyer logged, a line at a time, for those that match all of
+// want.
+func logLines(t *testing.T, logs string, want map[string]any) []map[string]any {
+	t.Helper()
+	var found []map[string]any
+	for line := range strings.Lines(logs) {
+		var l map[string]any
+		if err := json.Unmarshal([]byte(line), &l); err != nil {
+			continue // not krm-foyer's: Go's own, in plain text
+		}
+		matches := true
+		for k, v := range want {
+			if got, ok := l[k]; !ok || got != v {
+				matches = false
+			}
+		}
+		if matches {
+			found = append(found, l)
+		}
+	}
+	return found
 }
 
 // apiServer stands in for the API server and records what reached it.
@@ -865,8 +891,8 @@ func TestTokenNeverLeaves(t *testing.T) {
 	if strings.Contains(f.logs.String(), userToken) {
 		t.Error("the token is in krm-foyer's logs")
 	}
-	if !strings.Contains(f.logs.String(), `"msg":"interruption"`) {
-		t.Error("interruptions are not logged")
+	if !strings.Contains(f.logs.String(), `"msg":"refused"`) || !strings.Contains(f.logs.String(), `"msg":"interruption"`) {
+		t.Error("refusals and interruptions are not logged")
 	}
 }
 

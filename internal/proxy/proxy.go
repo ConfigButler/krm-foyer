@@ -165,13 +165,28 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err := checkResponse(resp); err != nil {
 				return err
 			}
+			if refusals[resp.StatusCode] {
+				a.Refused(gate.ByKubernetes, "status", resp.StatusCode, "reason", http.StatusText(resp.StatusCode))
+			}
 			return p.limitBytes(a, resp)
 		},
 		// ReverseProxy hands its error handler the outgoing request, whose headers
 		// are the allowlisted ones. How to answer depends on the browser's request.
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) { p.upstreamError(w, r, err) },
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			if refused := p.upstreamError(r, err); refused != nil {
+				a.Interrupt(w, refused)
+			}
+		},
 	}
 	rp.ServeHTTP(&headWriter{ResponseWriter: w}, r)
+}
+
+// refusals are the API server's answers that refuse the user, rather than fail:
+// not signed in, not allowed, in conflict, or invalid. Each is logged, as
+// krm-foyer's own refusals are.
+var refusals = map[int]bool{
+	http.StatusUnauthorized: true, http.StatusForbidden: true,
+	http.StatusConflict: true, http.StatusUnprocessableEntity: true,
 }
 
 // checkResponse applies the upstream response rules (docs/design.md). An error it
@@ -253,24 +268,26 @@ func heldBack(field, value string) *interruption.Interruption {
 	}
 }
 
-func (p *Proxy) upstreamError(w http.ResponseWriter, r *http.Request, err error) {
+// upstreamError is the interruption to answer r with for err, or nil when nobody
+// is left to answer. It panics with http.ErrAbortHandler when the gate cut r short.
+func (p *Proxy) upstreamError(r *http.Request, err error) *interruption.Interruption {
 	var refused *interruption.Interruption
-	if !errors.As(err, &refused) {
-		if gate.CutShort(r.Context()) {
-			// The request may have reached Kubernetes, so no interruption may say it
-			// did not, and an empty answer would pass for a complete one.
-			panic(http.ErrAbortHandler)
-		}
-		if r.Context().Err() != nil {
-			return // the browser went away; nobody is left to answer
-		}
-		p.logger.Warn("API server unreachable", "cause", upstream.Class(err))
-		refused = &interruption.Interruption{
-			Status: http.StatusBadGateway, Reason: "BadGateway",
-			Message: "the API server could not be reached",
-		}
+	if errors.As(err, &refused) {
+		return refused
 	}
-	p.interrupt(w, r, refused)
+	if gate.CutShort(r.Context()) {
+		// The request may have reached Kubernetes, so no interruption may say it
+		// did not, and an empty answer would pass for a complete one.
+		panic(http.ErrAbortHandler)
+	}
+	if r.Context().Err() != nil {
+		return nil // the browser went away; nobody is left to answer
+	}
+	p.logger.Warn("API server unreachable", "cause", upstream.Class(err))
+	return &interruption.Interruption{
+		Status: http.StatusBadGateway, Reason: "BadGateway",
+		Message: "the API server could not be reached",
+	}
 }
 
 func (p *Proxy) interrupt(w http.ResponseWriter, r *http.Request, i *interruption.Interruption) {
