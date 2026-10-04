@@ -1,4 +1,4 @@
-# Versions and the published image.
+# Versions, and the published image and Helm chart.
 #
 # On every push to main, release-please keeps a release pull request up to date from the
 # conventional-commit messages: `fix:` is a patch, and `feat:` and `feat!:` are both a minor
@@ -92,4 +92,65 @@ jobs:
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  # The Helm chart, as an OCI artifact beside the image, as gitops-reverser publishes its
+  # own: helm install krm-foyer oci://ghcr.io/configbutler/charts/krm-foyer --version X.
+  # After the image, because the chart's default image tag is its appVersion: a chart is
+  # never published before the image it points at. Helm comes from the CI image, like
+  # every other tool; it is the same artifact the ci job built for this commit.
+  chart:
+    name: publish the Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [release-please, ci, image]
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # keyless signing of the build provenance
+      attestations: write
+    env:
+      CHART: ghcr.io/configbutler/charts/krm-foyer
+      VERSION: ${{ needs.release-please.outputs.version }}
+      CI_IMAGE: krm-foyer-ci:local
+      CI_WORKDIR: /workspaces/krm-foyer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Download CI image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-image
+          path: ${{ runner.temp }}
+      - name: Load CI image
+        run: docker load -i "$RUNNER_TEMP/ci-image.tar" && rm -f "$RUNNER_TEMP/ci-image.tar"
+      # release-please sets the chart's version and appVersion in the release pull request
+      # (release-please-config.json); a chart that disagrees with the tag is not pushed.
+      - id: push
+        name: package and push the chart
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:$CI_WORKDIR" -w "$CI_WORKDIR" \
+            -e GITHUB_TOKEN -e GITHUB_ACTOR -e VERSION -e CHART "$CI_IMAGE" bash -lc '
+              set -euo pipefail
+              chart="$(helm show chart charts/krm-foyer)"
+              for field in version appVersion; do
+                grep -qx "$field: $VERSION" <<<"$chart" \
+                  || { echo "charts/krm-foyer/Chart.yaml: $field is not $VERSION" >&2; exit 1; }
+              done
+              helm package charts/krm-foyer -d /tmp/chart
+              echo "$GITHUB_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+              helm push "/tmp/chart/krm-foyer-$VERSION.tgz" "oci://${CHART%/*}"
+            ' 2>&1 | tee "$RUNNER_TEMP/push.log"
+          digest="$(awk '/^Digest:/ { print $2 }' "$RUNNER_TEMP/push.log")"
+          [ -n "$digest" ] || { echo "no digest in helm push's output" >&2; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.CHART }}
+          subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
