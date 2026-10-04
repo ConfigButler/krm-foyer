@@ -160,13 +160,20 @@ bugs are here, where they are cheap to find:
   and the shared identity's name reaches no browser and no log. A token the API server
   does not take, reviews failing or answered without a decision, and the shared identity
   refused each end the stream without serving it. A session ending closes its own
-  streams and leaves the watch to the others. Seven builds broken on purpose (every
+  streams and leaves the watch to the others. A browser that stops reading, with the
+  buffers between full, cannot hold off the recheck of a revoked grant: the write
+  timeout ends its stream within the bound. A shared watch stuck opening, before even
+  its headers, holds up no other scope, and is cancelled at the API server once the
+  stream that asked for it leaves, freeing its slot. Both failed before their fixes,
+  as a review found them. Seven builds broken on purpose (every
   subscriber allowed, no sharing, no timed recheck, a decision key without groups,
   errors kept, the shared identity's refusal passed on, no reuse at all) each failed.
   `FuzzDecisionsAreTransparent` checks, from the outside, that reusing decisions never
   changes an answer: sequences of questions that differ in one field of the subject or
   the scope, against an oracle that knows nothing of the cache. Keys missing the UID,
-  the extras, the label selector or the resource each failed it within a second.
+  the extras, the name, the version or the group each failed it within a second; the
+  label selector is left out on purpose, as the reviews do not ask about it, and a test
+  fails if they start to.
 - **Upstream text in the log** ([internal/proxy](../internal/proxy),
   [internal/upstream](../internal/upstream)): an API server that echoes the token in a
   malformed response, a `Content-Type` or a `Location` never gets it into krm-foyer's

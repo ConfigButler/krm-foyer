@@ -71,6 +71,8 @@ type loginConfig struct {
 	kubernetes proxy.Config
 	// shared is nil without shared watches.
 	shared *stream.SharedConfig
+	// streamWrites bounds each write of a stream to the browser.
+	streamWrites time.Duration
 }
 
 func parseConfig(args []string, readFile func(string) ([]byte, error), output io.Writer) (config, error) {
@@ -89,6 +91,8 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		maxBytes                       int64
 		sharedResources, sharedToken   string
 		recheck, decisionTTL           time.Duration
+		streamWrites                   time.Duration
+		sharedQPS                      float64
 	)
 	fs.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
 	fs.StringVar(&cfg.tlsCert, "tls-cert-file", "", "serve TLS with this certificate (PEM); needs -tls-key-file")
@@ -132,6 +136,10 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		"how often the API server is asked again whether each user of a shared watch may still list and watch it")
 	fs.DurationVar(&decisionTTL, "shared-watch-decision-ttl", stream.DefaultDecisionTTL,
 		"how long one user's access decision for one scope is reused by their other streams and rechecks")
+	fs.Float64Var(&sharedQPS, "shared-watch-qps", stream.DefaultSharedQPS,
+		"how many requests a second the shared-watch identity may send, reviews and watches for every user; bursts are twice as many")
+	fs.DurationVar(&streamWrites, "stream-write-timeout", stream.DefaultWriteTimeout,
+		"how long one write of a stream to the browser may take; a browser that stops reading ends its stream then")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -219,6 +227,10 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		return config{}, fmt.Errorf("-session-request-rate and -session-request-burst must be positive, got %v and %d", perSecond, burst)
 	}
 	login.gate.SessionRequestRate, login.gate.SessionRequestBurst = perSecond, burst
+	if streamWrites <= 0 {
+		return config{}, fmt.Errorf("-stream-write-timeout must be positive, got %v", streamWrites)
+	}
+	login.streamWrites = streamWrites
 
 	// The API proxy.
 	if maxBytes <= 0 {
@@ -247,12 +259,15 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		if len(resources) == 0 {
 			return config{}, errors.New("-shared-watch-resources names no resource")
 		}
+		if sharedQPS <= 0 {
+			return config{}, fmt.Errorf("-shared-watch-qps must be positive, got %v", sharedQPS)
+		}
 		if recheck <= 0 || decisionTTL <= 0 || decisionTTL > recheck {
 			return config{}, fmt.Errorf("-shared-watch-recheck-interval and -shared-watch-decision-ttl must be positive, "+
 				"the lifetime no longer than the interval; got %v and %v", recheck, decisionTTL)
 		}
 		login.shared = &stream.SharedConfig{TokenFile: sharedToken, Resources: resources,
-			RecheckInterval: recheck, DecisionTTL: decisionTTL}
+			RecheckInterval: recheck, DecisionTTL: decisionTTL, QPS: float32(sharedQPS)}
 	}
 	cfg.login = login
 	return cfg, nil
@@ -302,6 +317,7 @@ func handler(cfg config, logger *slog.Logger, m *metrics.Metrics) (http.Handler,
 	}
 	streams, err := stream.New(stream.Config{
 		Server: l.kubernetes.Server, RootCAs: l.kubernetes.RootCAs, Gate: g, Shared: l.shared,
+		WriteTimeout: l.streamWrites,
 	})
 	if err != nil {
 		return nil, nil, err

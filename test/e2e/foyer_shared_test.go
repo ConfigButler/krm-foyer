@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -153,7 +154,11 @@ var _ = Describe("krm-foyer's shared watches", Label("foyer"), func() {
 		alice, bob := signInBrief(ctx, alice), signInBrief(ctx, bob)
 		staying := alice.open(ctx, noteStream(ns))
 		staying.until("synced")
-		revoked := bob.open(ctx, noteStream(ns))
+		// Bob's stream has a deadline, so a stream that outlives the revocation fails
+		// the spec rather than hanging it.
+		bobCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		revoked := bob.open(bobCtx, noteStream(ns))
 		revoked.until("synced")
 
 		revoke()

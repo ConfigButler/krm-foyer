@@ -499,9 +499,12 @@ identity reads more than any one user, so the API server is asked about each use
   watch, at every new snapshot, and every `-shared-watch-recheck-interval`. A denial
   ends that user's stream with `FORBIDDEN` and nobody else's; a review that cannot be
   completed is never an allow. A decision is reused for `-shared-watch-decision-ttl`
-  for exactly the same subject and scope, never after an error.
+  for exactly the question the reviews ask (the subject; the scope but its label
+  selector, which RBAC cannot grant by), never after an error.
 - **Revocation** reaches an open shared stream within the recheck interval plus the
-  decision's lifetime plus one check: 50 seconds at the defaults. Logout and session
+  decision's lifetime plus one check plus one write to the browser
+  (`-stream-write-timeout`, which bounds every stream's writes, so a browser that stops
+  reading cannot hold a recheck off): 60 seconds at the defaults. Logout and session
   expiry end it within the session-check interval, as every stream, without disturbing
   the other streams of its watch; the last stream out closes the watch.
 - **The shared-watch identity refused** by the API server is krm-foyer's configuration

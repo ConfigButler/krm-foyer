@@ -42,7 +42,14 @@ type Config struct {
 	// Shared turns shared watches on for some resources. Nil streams every
 	// resource with the user's own token.
 	Shared *SharedConfig
+	// WriteTimeout bounds each write to the browser. A browser that stops reading
+	// ends its stream within it, instead of holding the stream, and its rechecks,
+	// until the response duration is up. Zero means DefaultWriteTimeout.
+	WriteTimeout time.Duration
 }
+
+// DefaultWriteTimeout is the WriteTimeout when none is configured.
+const DefaultWriteTimeout = 10 * time.Second
 
 // Streams serves /stream/v1. Create it with New.
 type Streams struct {
@@ -50,6 +57,7 @@ type Streams struct {
 	transport http.RoundTripper
 	gate      *gate.Gate
 	logger    *slog.Logger
+	writes    time.Duration
 	// shared is nil without shared watches.
 	shared *shared
 }
@@ -79,6 +87,13 @@ func New(cfg Config) (*Streams, error) {
 		},
 		gate:   cfg.Gate,
 		logger: cfg.Gate.Logger(),
+		writes: cfg.WriteTimeout,
+	}
+	if s.writes == 0 {
+		s.writes = DefaultWriteTimeout
+	}
+	if s.writes < 0 {
+		return nil, fmt.Errorf("the write timeout must be positive, got %v", s.writes)
 	}
 	if cfg.Shared != nil {
 		sh, err := newShared(*cfg.Shared, s)
@@ -122,6 +137,10 @@ func (s *Streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Scopes:      gateway.ScopePolicy{Targets: []string{""}, AnyResource: true, AllowLabelSelector: true},
 		Projections: gateway.ProjectionPolicyFunc(project),
 		Diagnostics: s.diagnose,
+		// Every write to the browser is bounded, so one that stopped reading ends its
+		// stream rather than holding it, and a shared stream's rechecks, which wait
+		// for the write in progress.
+		WriteTimeout: s.writes,
 	}
 	// A scope the gateway refuses goes the user's way, and is refused there.
 	if scope, err := gateway.ScopeFromQuery(r.URL.Query()); err == nil && s.shared.serves(scope) {

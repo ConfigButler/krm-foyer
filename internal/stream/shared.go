@@ -48,8 +48,12 @@ type SharedConfig struct {
 	// DecisionTTL is how long one user's access decision for one scope is reused,
 	// by the user's other streams of it and by their rechecks. Zero means
 	// DefaultDecisionTTL. A revoked grant ends a shared stream within
-	// RecheckInterval + DecisionTTL + CheckTimeout.
+	// RecheckInterval + DecisionTTL + CheckTimeout, plus the write timeout.
 	DecisionTTL time.Duration
+	// QPS is how many requests a second the shared-watch identity's client sends:
+	// every review and every shared watch, for every user. Bursts are twice as many.
+	// Zero means DefaultSharedQPS.
+	QPS float32
 }
 
 const (
@@ -61,11 +65,11 @@ const (
 	CheckTimeout = 10 * time.Second
 	// subjectTimeout bounds the SelfSubjectReview that finds who a user is.
 	subjectTimeout = 10 * time.Second
-	// The shared-watch identity's client sends every SubjectAccessReview and opens
-	// every shared watch, for every user: client-go's default of 5 a second, burst
-	// 10, would queue them. The API server's own priority and fairness still applies.
-	sharedQPS   = 100
-	sharedBurst = 200
+	// DefaultSharedQPS is the QPS when none is configured. The shared-watch
+	// identity's client sends every SubjectAccessReview and opens every shared watch,
+	// for every user: client-go's default of 5 a second would queue them. The API
+	// server's own priority and fairness applies on top.
+	DefaultSharedQPS = 100
 )
 
 // ParseResources reads resources as kubectl writes them, comma-separated:
@@ -116,7 +120,11 @@ func newShared(cfg SharedConfig, s *Streams) (*shared, error) {
 	if ttl == 0 {
 		ttl = DefaultDecisionTTL
 	}
-	if interval < 0 || ttl < 0 {
+	qps := cfg.QPS
+	if qps == 0 {
+		qps = DefaultSharedQPS
+	}
+	if interval < 0 || ttl < 0 || qps < 0 {
 		return nil, fmt.Errorf("the recheck interval and the decision lifetime must be positive, got %v and %v", interval, ttl)
 	}
 	// Checked now, so a missing or empty token stops krm-foyer at startup rather than
@@ -134,8 +142,8 @@ func newShared(cfg SharedConfig, s *Streams) (*shared, error) {
 		BearerTokenFile: cfg.TokenFile,
 		Transport:       s.transport,
 		UserAgent:       "krm-foyer shared watches",
-		QPS:             sharedQPS,
-		Burst:           sharedBurst,
+		QPS:             qps,
+		Burst:           int(2 * qps),
 	}
 	httpClient, err := kube.HTTPClientFor(rc)
 	if err != nil {
@@ -284,10 +292,15 @@ func (d *decisions) Authorize(ctx context.Context, p gateway.Principal, scope ga
 	if err != nil {
 		return gateway.Unauthenticated("not authenticated")
 	}
+	// The question is what the reviews ask: the subject, and the group, version,
+	// resource, namespace and name of the scope. A label selector is not part of it
+	// (RBAC cannot grant by label, and the reviews do not send one), so streams that
+	// differ only in their selector share a decision. TestASharedStreamAsksAboutEachUser
+	// fails if the reviews start sending one.
 	key, err := json.Marshal(struct {
-		Subject kube.Subject
-		Scope   gateway.Scope
-	}{subject, scope})
+		Subject                                   kube.Subject
+		Group, Version, Resource, Namespace, Name string
+	}{subject, scope.Group, scope.Version, scope.Resource, scope.Namespace, scope.Name})
 	if err != nil {
 		return err
 	}
@@ -380,24 +393,64 @@ type sharedUpstream struct {
 	metrics *metrics.Metrics
 }
 
+// Watch returns at once, and the watch is opened on the first Next. krm-stream calls
+// Watch holding a lock every shared scope takes, and with a context nobody cancels
+// but the scope's own: opened here, one API server slow to answer would hold up the
+// streams of every other scope, and a stream that gave up waiting could not end the
+// request. Opened in Next, it is the scope's alone, and its last stream leaving
+// cancels it (docs/investigations/krm-stream-shared-watches.md, ask 9).
 func (b *sharedUpstream) Watch(ctx context.Context, scope gateway.Scope) (gateway.Watcher, error) {
-	w, err := b.kube.Watch(ctx, scope)
-	if err != nil {
-		return nil, ownRefusal(err)
-	}
-	return &sharedWatcher{watcher: watcher{Watcher: w, done: b.metrics.UpstreamWatch(metrics.IdentityShared)}}, nil
+	return &sharedWatcher{upstream: b, ctx: ctx, scope: scope}, nil
 }
 
 type sharedWatcher struct {
-	watcher
+	upstream *sharedUpstream
+	ctx      context.Context // the scope's: cancelled when its last stream leaves
+	scope    gateway.Scope
+
+	mu      sync.Mutex
+	open    gateway.Watcher // nil until opened
+	done    func()
+	stopped bool
 }
 
 func (w *sharedWatcher) Next(ctx context.Context) (gateway.WatchEvent, error) {
-	ev, err := w.Watcher.Next(ctx)
+	w.mu.Lock()
+	open := w.open
+	w.mu.Unlock()
+	if open == nil {
+		opened, err := w.upstream.kube.Watch(w.ctx, w.scope)
+		if err != nil {
+			return gateway.WatchEvent{}, ownRefusal(err)
+		}
+		w.mu.Lock()
+		if w.stopped {
+			w.mu.Unlock()
+			opened.Stop()
+			return gateway.WatchEvent{}, context.Canceled
+		}
+		w.open, w.done = opened, w.upstream.metrics.UpstreamWatch(metrics.IdentityShared)
+		open = opened
+		w.mu.Unlock()
+	}
+	ev, err := open.Next(ctx)
 	if ev.Type == gateway.WatchError {
 		ev.Err = ownRefusal(ev.Err)
 	}
 	return ev, ownRefusal(err)
+}
+
+func (w *sharedWatcher) Stop() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopped {
+		return
+	}
+	w.stopped = true
+	if w.open != nil {
+		w.open.Stop()
+		w.done()
+	}
 }
 
 // errSharedRefused is the cause of an INTERNAL sent for the shared identity being

@@ -46,7 +46,7 @@ type sharedAPI struct {
 	mu      sync.Mutex
 	allowed map[string]bool // username -> may list and watch notes
 	reviews []authorizationv1.SubjectAccessReviewSpec
-	watches map[http.ResponseWriter]chan string
+	watches map[http.ResponseWriter]openWatch
 	rv      int
 	// sar answers a SubjectAccessReview instead, when set.
 	sar http.HandlerFunc
@@ -62,7 +62,7 @@ func newSharedAPI(t *testing.T) *sharedAPI {
 			"carol-token": "oidc:carol@example.com", sharedToken: sharedName,
 		},
 		allowed: map[string]bool{"oidc:alice@example.com": true, "oidc:bob@example.com": true},
-		watches: map[http.ResponseWriter]chan string{},
+		watches: map[http.ResponseWriter]openWatch{},
 		rv:      100,
 	}
 	a.apiServer = newAPIServer(t, a.serve)
@@ -128,9 +128,26 @@ func (a *sharedAPI) serve(w http.ResponseWriter, r *http.Request) {
 			watch(w, r)
 			return
 		}
-		changes := make(chan string, 16)
+		a.serveWatch(w, r)
+	default:
+		status(http.StatusNotFound, "NotFound", "not here")(w, r)
+	}
+}
+
+// openWatch is a watch the fake is serving: where its changes go, and closed once
+// it has ended.
+type openWatch struct {
+	changes chan string
+	ended   chan struct{}
+}
+
+// serveWatch serves a watch of notes: the snapshot, then every change.
+func (a *sharedAPI) serveWatch(w http.ResponseWriter, r *http.Request) {
+	{
+		changes, ended := make(chan string, 16), make(chan struct{})
+		defer close(ended)
 		a.mu.Lock()
-		a.watches[w] = changes
+		a.watches[w] = openWatch{changes, ended}
 		a.mu.Unlock()
 		defer func() {
 			a.mu.Lock()
@@ -147,15 +164,12 @@ func (a *sharedAPI) serve(w http.ResponseWriter, r *http.Request) {
 				_ = http.NewResponseController(w).Flush()
 			}
 		}
-	default:
-		status(http.StatusNotFound, "NotFound", "not here")(w, r)
 	}
 }
 
 // change sends every open watch a new text for the note first.
 func (a *sharedAPI) change(text string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.rv++
 	line, _ := json.Marshal(map[string]any{"type": "MODIFIED", "object": map[string]any{
 		"apiVersion": "hello.krm-foyer.example/v1", "kind": "Note",
@@ -164,8 +178,17 @@ func (a *sharedAPI) change(text string) {
 		},
 		"spec": map[string]any{"text": text},
 	}})
-	for _, c := range a.watches {
-		c <- string(line) + "\n"
+	open := make([]openWatch, 0, len(a.watches))
+	for _, o := range a.watches {
+		open = append(open, o)
+	}
+	a.mu.Unlock()
+	// Sent without the lock, which a watch ending takes, and not to one that ended.
+	for _, o := range open {
+		select {
+		case o.changes <- string(line) + "\n":
+		case <-o.ended:
+		}
 	}
 }
 
@@ -195,7 +218,9 @@ func (a *sharedAPI) requestsWith(token string) []string {
 
 // sharedFoyer serves streams with notes shared, as the shared token, rechecking
 // every recheck.
-func sharedFoyer(t *testing.T, api *sharedAPI, creds gate.Credentials, m *metrics.Metrics, recheck time.Duration) foyer {
+func sharedFoyer(t *testing.T, api *sharedAPI, creds gate.Credentials, m *metrics.Metrics, recheck time.Duration,
+	adjust ...func(*Config),
+) foyer {
 	t.Helper()
 	file := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(file, []byte(sharedToken+"\n"), 0o600); err != nil {
@@ -208,6 +233,9 @@ func sharedFoyer(t *testing.T, api *sharedAPI, creds gate.Credentials, m *metric
 	return newFoyer(t, api.apiServer, creds, func(c *Config, g *gate.Config) {
 		g.Metrics = m
 		c.Shared = &SharedConfig{TokenFile: file, Resources: resources, RecheckInterval: recheck, DecisionTTL: recheck / 2}
+		for _, a := range adjust {
+			a(c)
+		}
 	})
 }
 
@@ -325,6 +353,11 @@ func TestASharedStreamAsksAboutEachUser(t *testing.T) {
 	if attrs == nil || attrs.Group != "hello.krm-foyer.example" || attrs.Resource != "notes" || attrs.Namespace != "hello" ||
 		(attrs.Verb != "list" && attrs.Verb != "watch") {
 		t.Errorf("asked about %+v; want list or watch of notes in hello", attrs)
+	}
+	// Decisions are reused across label selectors because the reviews ask about none
+	// (see decisions.Authorize). Should they start to, the key must take them.
+	if attrs != nil && (attrs.LabelSelector != nil || attrs.FieldSelector != nil) {
+		t.Errorf("the reviews now ask about selectors (%+v): key decisions on them", attrs)
 	}
 	if paths := api.requestsWith("carol-token"); strings.Join(paths, ",") != "POST /apis/authentication.k8s.io/v1/selfsubjectreviews" {
 		t.Errorf("carol's token was sent with %q; want her SelfSubjectReview alone", paths)
@@ -593,6 +626,11 @@ func TestDecisionsAreReusedForTheSameQuestionOnly(t *testing.T) {
 	if n := asked.Load(); n != 3 {
 		t.Errorf("asked %d times, want 3: other groups and another namespace are other questions", n)
 	}
+	selected := scope
+	selected.LabelSelector = "app=notes"
+	if err := d.Authorize(t.Context(), reader, selected); err != nil || asked.Load() != 3 {
+		t.Errorf("another label selector: %v, asked %d times; want the decision reused, as the reviews ask about no selector", err, asked.Load())
+	}
 
 	clock.Lock()
 	now = now.Add(time.Minute)
@@ -647,9 +685,10 @@ func FuzzDecisionsAreTransparent(f *testing.F) {
 		}
 		return sub, scope
 	}
-	// oracle is the API server's answer, a fixed function of the whole question.
+	// oracle is the API server's answer, a fixed function of the whole question the
+	// reviews ask: the subject, and the scope but for its label selector.
 	oracle := func(sub subscriber, scope gateway.Scope) error {
-		key, _ := json.Marshal([]any{sub.subject, scope})
+		key, _ := json.Marshal([]any{sub.subject, scope.Group, scope.Version, scope.Resource, scope.Namespace, scope.Name})
 		if sha256.Sum256(key)[0]&1 == 0 {
 			return gateway.Forbidden("no")
 		}
@@ -675,4 +714,74 @@ func FuzzDecisionsAreTransparent(f *testing.F) {
 			}
 		}
 	})
+}
+
+// A browser that stops reading cannot hold a shared stream open past a revoked
+// grant: krm-stream delivers and rechecks one at a time, so a write blocked on a
+// full connection would hold the recheck off for as long as it blocks. The write
+// timeout ends the write, and the stream with it.
+func TestABrowserThatStopsReadingCannotHoldOffARecheck(t *testing.T) {
+	api := newSharedAPI(t)
+	m := metrics.New()
+	f := sharedFoyer(t, api, byHeader{}, m, 200*time.Millisecond, func(c *Config) { c.WriteTimeout = 300 * time.Millisecond })
+	stalled := f.open(t.Context(), t, notes, as(otherToken))
+	stalled.until(t, "synced")
+
+	// Changes, many and large, that the browser never reads: they fill the buffers
+	// between krm-foyer and the browser, and krm-foyer's next write blocks.
+	big := strings.Repeat("x", 128<<10)
+	for i := range 160 {
+		api.change(fmt.Sprint(i, big))
+	}
+	api.allow("oidc:bob@example.com", false)
+	revoked := time.Now()
+	// The recheck interval, the decision's lifetime, the write timeout, and a margin.
+	eventuallyEqual(t, "streams open after the grant was revoked",
+		func() string { return gauge(t, m, "krm_foyer_streams_open") }, "0")
+	if took := time.Since(revoked); took > 3*time.Second {
+		t.Errorf("the stalled stream outlived its grant by %v", took)
+	}
+}
+
+// One shared watch stuck opening holds up nothing else: a stream of another scope
+// is served meanwhile, and the stuck opening is cancelled at the API server once
+// the stream that asked for it leaves, which frees its slot.
+func TestAStuckOpeningHoldsUpNoOtherScope(t *testing.T) {
+	api := newSharedAPI(t)
+	stuck, released := make(chan struct{}, 1), make(chan struct{}, 1)
+	api.watch = func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/namespaces/stuck/") {
+			api.serveWatch(w, r)
+			return
+		}
+		stuck <- struct{}{}
+		<-r.Context().Done() // no answer, not even headers, until krm-foyer gives up
+		released <- struct{}{}
+	}
+	m := metrics.New()
+	f := sharedFoyer(t, api, byHeader{}, m, time.Minute)
+
+	leaving, leave := context.WithCancel(t.Context())
+	f.open(leaving, t, strings.Replace(notes, "namespace=hello", "namespace=stuck", 1), as(userToken))
+	select {
+	case <-stuck:
+	case <-time.After(within):
+		t.Fatal("the stuck watch was never asked for")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), within)
+	defer cancel()
+	other := f.open(ctx, t, notes, as(otherToken))
+	if got := texts(t, other.until(t, "synced"))["first"]; got != "note first" {
+		t.Errorf("another scope's snapshot reads %q", got)
+	}
+
+	leave()
+	select {
+	case <-released:
+	case <-time.After(within):
+		t.Error("the stuck opening was never cancelled at the API server")
+	}
+	eventuallyEqual(t, "streams open after the stuck one left",
+		func() string { return gauge(t, m, "krm_foyer_streams_open") }, "1")
 }

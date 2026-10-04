@@ -76,6 +76,9 @@ Each step makes pending specs real and ends with `task verify` green.
    SelfSubjectReview with their token, and whether they may from SubjectAccessReviews at
    opening and every recheck, reused briefly for exactly the same question. Metrics
    count watches by identity, the streams on shared watches and every access decision.
+   Every stream's writes are bounded, so a browser that stops reading cannot hold off
+   a recheck, and a shared watch slow to open holds up no other scope; both are asked
+   of krm-stream as well ([requests](investigations/krm-stream-shared-watches.md)).
    The hello example's notes are shared, and the rehearsal runs both ways. A
    [decision guide](watches.md) says when to share, stream per-user, or use a native
    watch, which stays available but is not where the work goes.

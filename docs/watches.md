@@ -13,7 +13,7 @@ many users watch the same thing, and treat native watches as a fallback.**
 | Who opens the watch at the API server | The user, with their own token | krm-foyer's shared-watch identity, once per scope | The user, with their own token |
 | Watches at the API server for N streams of one scope | N | 1 | N |
 | Who decides what the user sees | The API server, on the user's own request | The API server, by a SubjectAccessReview about the user, at opening and every recheck | The API server, on the user's own request |
-| When RBAC changes | The open watch carries on until it ends (Kubernetes does not end watches on RBAC changes) | The stream ends at the next recheck: 30 seconds by default, plus the decision's lifetime | As per-user stream |
+| When RBAC changes | The open watch carries on until it ends (Kubernetes does not end watches on RBAC changes) | The stream ends at the next recheck: within a minute at the defaults ([bound](#revocation)) | As per-user stream |
 | What the page gets | Snapshot, changes, resync after a gap, reconnect with backoff, drafts kept | The same | Raw watch events; the page reconnects and resumes itself |
 | In the audit log, the watch is by | The user | The shared-watch identity; the reviews name the user | The user |
 | Configuration | None | A list of resources and an identity | None |
@@ -105,13 +105,31 @@ cluster-admin bait that must never be used.
    else's.
 
 A decision is reused for `-shared-watch-decision-ttl` (10 seconds) by the same user's
-other streams of the same scope and by their rechecks: exactly the same question (the
-whole subject and the whole scope), nothing broader. An error is never reused.
+other streams of the same scope and by their rechecks: exactly the question the
+reviews ask (the whole subject; the scope's group, version, resource, namespace and
+name), nothing broader. The label selector is not part of that question, since RBAC
+cannot grant by label, so streams that differ only in it share a decision. An error is
+never reused.
 
-**Revocation bound:** a grant taken away ends a shared stream within the recheck
-interval, plus the decision's lifetime, plus one check (at most 10 seconds): 50 seconds
-at the defaults. Logout and session expiry are not affected: they end every stream
-within the session-check interval, as before.
+### Revocation
+
+A grant taken away ends a shared stream within:
+
+| | Default | Flag |
+| --- | --- | --- |
+| The recheck interval | 30 seconds | `-shared-watch-recheck-interval` |
+| plus the decision's lifetime | 10 seconds | `-shared-watch-decision-ttl` |
+| plus one check | at most 10 seconds | |
+| plus one write to the browser in progress | at most 10 seconds | `-stream-write-timeout` |
+| **In all** | **60 seconds** | |
+
+The last line is there because krm-stream delivers events and rechecks one at a time:
+a recheck waits for the write in progress. Without a bound on writes, a browser that
+stopped reading would hold its stream open, unchecked, until the 30-minute response
+duration. With it, the write fails and the stream ends.
+
+Logout and session expiry are not affected: they end every stream within the
+session-check interval, as before.
 
 ### What the browser gets when something fails
 
@@ -124,15 +142,60 @@ within the session-check interval, as before.
 
 ### Load on the API server
 
-Per stream opened: one SelfSubjectReview. Per user and scope: two SubjectAccessReviews
-at opening, and two per recheck interval while any of their streams is open, fewer
-when decisions are reused. The shared-watch identity's client allows 100 requests a
-second, bursts of 200; the API server's priority and fairness applies on top. A
-large cluster that rejects reviews shows it as `error` results and `UPSTREAM_UNAVAILABLE`
-streams, not as streams served without a check. On one replica with 200 identities and 1800 streams of
-one scope, that was one watch at the API server, 200 decisions at opening (1600 reused),
-and 12.9 SubjectAccessReviews a second while the streams stayed open
-([the rehearsal](bounds.md#measured-the-rehearsal)).
+Per stream opened: one SelfSubjectReview. Then two SubjectAccessReviews per decision,
+and decisions are made per **user and scope**, not per stream. While a user has
+streams of a scope open, the API server is asked about that pair:
+
+- at least once per recheck interval, when all its streams recheck within one
+  decision's lifetime of each other, as one page's do;
+- at most once per decision lifetime, when its streams were opened far apart and
+  recheck at scattered times.
+
+So the steady load lies between `2 × pairs / recheck interval` and
+`2 × pairs / decision lifetime` reviews a second, where *pairs* is the number of
+distinct (user, scope) combinations with a stream open. The rehearsal, 200 users on
+one scope, opening together, measured the lower end: 12.9 reviews a second
+([the rehearsal](bounds.md#measured-the-rehearsal)). The same 200 users on nine
+distinct scopes each would be nine times that, before the decision lifetime's
+multiplier. Each review is cheap for the API server (an in-memory RBAC evaluation, no
+storage), but they add up, and the shared-watch identity's client sends at most
+`-shared-watch-qps` (100) a second, bursts twice that; the API server's priority and
+fairness applies on top. Reviews it cannot send in time show as `error` results and
+`UPSTREAM_UNAVAILABLE` streams, never as streams served without a check.
+
+How the two flags trade revocation time against load, for 200 users each on one scope
+(nine scopes: multiply the load by nine):
+
+| `-shared-watch-recheck-interval` / `-decision-ttl` | Revocation, at most | Reviews a second, together … scattered |
+| --- | --- | --- |
+| 30s / 10s (default) | 60 s | 13 … 40 |
+| 30s / 30s | 80 s | 13 |
+| 60s / 30s | 110 s | 7 … 13 |
+| 120s / 60s | 200 s | 3 … 7 |
+
+A lifetime equal to the interval removes the spread entirely, for 20 seconds more
+revocation time at the default interval. The defaults favour revocation; relax them where the load matters
+more, by measuring `krm_foyer_access_checks_total{source="api_server"}`.
+
+#### Why not check only when something changes?
+
+Kubernetes sends no notice that what a user may do has changed, so there is nothing to
+wait for. One could watch RBAC's Roles and Bindings and recheck when they change, but:
+
+- **RBAC is not all of authorization.** A webhook authorizer, the Node authorizer, or
+  group membership, which comes from the issuer and changes with no Kubernetes object,
+  can change an answer with nothing to watch. A periodic recheck stays as the safety
+  net either way.
+- **The shared-watch identity would read every Role and Binding** in the cluster: the
+  whole access policy, a broader grant than it has now.
+- **krm-stream rechecks on its own timer,** per stream; a host cannot ask it to
+  recheck now.
+
+The useful version is both: an RBAC watch that rechecks at once, making the common
+revocation immediate, with a long periodic recheck (minutes) behind it, cutting the
+load by as much. That needs krm-stream to let a host trigger rechecks, and is asked
+for in [the shared-watch requests](investigations/krm-stream-shared-watches.md#ask-11-let-a-host-trigger-a-recheck).
+Until then, the interval is the lever.
 
 Each replica holds its own shared watches. With several replicas, a scope has at most
 one watch per replica.
@@ -141,7 +204,7 @@ one watch per replica.
 
 | Metric | What to watch |
 | --- | --- |
-| `krm_foyer_upstream_watches_open{identity="shared"}` | Watches the shared-watch identity holds open: one per scope in use |
+| `krm_foyer_upstream_watches_open{identity="shared"}` | Watches the shared-watch identity holds open: one per scope in use. The bare name selects both series, `user` and `shared`; `sum()` them for the total |
 | `krm_foyer_upstream_watches_open{identity="user"}` | Watches opened with a user's own token, one per per-user stream |
 | `krm_foyer_shared_subscriptions_open` | Streams reading from a shared watch. Divided by the shared watches, the reuse |
 | `krm_foyer_shared_overflows_total` | Streams that fell so far behind that they got a fresh snapshot from the cache instead |
@@ -152,7 +215,7 @@ one watch per replica.
 How many streams one shared watch serves, as PromQL:
 
 ```text
-krm_foyer_shared_subscriptions_open / krm_foyer_upstream_watches_open{identity="shared"}
+krm_foyer_shared_subscriptions_open / ignoring(identity) krm_foyer_upstream_watches_open{identity="shared"}
 ```
 
 Worth an alert: `krm_foyer_access_checks_total{result="error"}` rising (reviews failing:
@@ -167,6 +230,30 @@ approaching 10 seconds.
 - **Bounds** count each stream, shared or not: the stream limits per session and per
   replica bound the shared watches too, since a scope has a watch only while a stream
   reads it.
+
+## Why sharing stays opt-in
+
+The rehearsal turned 1800 watches into one, and it is tempting to share every
+resource. krm-foyer does not, and does not plan to make it the default:
+
+- **The identity would need everything.** Sharing every resource means one identity
+  that may read everything any user may, and krm-foyer's reviews become the only thing
+  between that identity's cache and each browser. Kept narrow, a mistake exposes one
+  resource; kept broad, everything. krm-stream keeps sharing opt-in for the same
+  reason.
+- **The savings depend on overlap; the costs do not.** Sharing saves watches only where
+  many streams watch the same scope. The reviews cost per user and scope wherever
+  sharing is on, and on per-user scopes save nothing.
+- **What every stream still costs stays.** Each stream still gets its own snapshot,
+  connection and per-object work in krm-foyer and in the browser. The rehearsal's
+  memory figures compare different snapshots, so they do not isolate what sharing
+  saves there.
+- **What is measured is consolidation.** The rehearsal shows many streams of one scope
+  on one watch. It does not yet show varied scopes, streams opened at scattered times,
+  sustained change, or the API server's CPU; measure those before sharing broadly.
+
+Share the resources whose common scopes you know, with an identity narrowed to them:
+in an application's own deployment, that can well be on by default.
 
 ## Native watches through `/k8s`
 

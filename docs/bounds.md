@@ -118,6 +118,7 @@ krm-stream's streams are bounded on their own: see [streams](#streams).
 | Response duration | `-max-response-duration` | 30 minutes | The response is [cut short](#cutting-a-response-short) |
 | Response bytes, decoded | `-max-response-bytes` | 32 MiB | 502 `ResponseTooLarge` if known in advance; otherwise [cut short](#cutting-a-response-short) |
 | Session check | `-session-check-interval` | 5 seconds | An open response whose session has ended is [cut short](#the-session-check) |
+| One write of a stream | `-stream-write-timeout` | 10 seconds | The stream ends: its browser stopped reading |
 
 Why these defaults:
 
@@ -303,11 +304,15 @@ apart again:
   whose identity opened them (`krm_foyer_upstream_watches_open{identity}`), because with
   sharing the two counts differ: the reuse is their ratio.
 
-What is not bounded yet: a tab that stops reading. A native watch through `/k8s` holds
-its slot then until the response duration ends it, and a stream does the same.
-krm-stream can bound each write instead (`WriteTimeout`), which would free the slot
-within seconds; that needs its own test, of a tab that stops reading while a stream
-fills the buffers between, and comes later.
+- **Each write of a stream is bounded** (`-stream-write-timeout`, 10 seconds). A tab
+  that stops reading ends its stream within that once the buffers between are full,
+  rather than holding its slot until the response duration. It matters most for a
+  [shared](watches.md) stream: krm-stream delivers and rechecks one at a time, so a
+  blocked write would also hold off the recheck that applies a revoked grant. A test
+  stops reading, fills the buffers, revokes the grant and sees the stream end.
+
+What is not bounded yet: a native watch through `/k8s` whose tab stops reading holds
+its slot until the response duration ends it.
 
 ## Measured: the rehearsal
 

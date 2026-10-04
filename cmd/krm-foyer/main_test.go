@@ -53,7 +53,7 @@ func TestParseConfigWithLogin(t *testing.T) {
 		l.gate.MaxSessionConcurrentRequests != 64 || l.gate.MaxConcurrentRequests != 2000 ||
 		l.gate.MaxSessionStreams != 32 || l.gate.MaxStreams != 2000 ||
 		l.gate.SessionRequestRate != 20 || l.gate.SessionRequestBurst != 100 ||
-		l.kubernetes.MaxResponseBytes != 32<<20 {
+		l.kubernetes.MaxResponseBytes != 32<<20 || l.streamWrites != 10*time.Second {
 		t.Fatalf("%+v", l)
 	}
 }
@@ -75,7 +75,7 @@ func TestParseConfigSharedWatches(t *testing.T) {
 	if sh == nil || sh.TokenFile != "/token" || len(sh.Resources) != 2 ||
 		sh.Resources[0].Group != "hello.krm-foyer.example" || sh.Resources[0].Resource != "notes" ||
 		sh.Resources[1].Group != "" || sh.Resources[1].Resource != "configmaps" ||
-		sh.RecheckInterval != 30*time.Second || sh.DecisionTTL != 10*time.Second {
+		sh.RecheckInterval != 30*time.Second || sh.DecisionTTL != 10*time.Second || sh.QPS != 100 {
 		t.Fatalf("%+v", sh)
 	}
 }
@@ -125,6 +125,9 @@ func TestParseConfigRefuses(t *testing.T) {
 		"shared names none":      {append(loginArgs, "-shared-watch-resources", ",", "-shared-watch-token-file", "/token"), secret, "names no resource"},
 		"decisions outlive check": {append(loginArgs, "-shared-watch-resources", "configmaps", "-shared-watch-token-file", "/token",
 			"-shared-watch-decision-ttl", "1m"), secret, "-shared-watch-decision-ttl"},
+		"no stream write timeout": {append(loginArgs, "-stream-write-timeout", "0s"), secret, "-stream-write-timeout"},
+		"no shared QPS": {append(loginArgs, "-shared-watch-resources", "configmaps", "-shared-watch-token-file", "/token",
+			"-shared-watch-qps", "0"), secret, "-shared-watch-qps"},
 		"shared without login": {[]string{"-shared-watch-resources", "configmaps"}, nil, "need the sign-in flags"},
 		"no byte limit":        {append(loginArgs, "-max-response-bytes", "0"), secret, "-max-response-bytes"},
 	} {

@@ -123,6 +123,9 @@ func loadFixture() *fixture {
 	Expect(err).NotTo(HaveOccurred())
 	rehearsalUsers, err := strconv.Atoi(env["REHEARSAL_USERS"])
 	Expect(err).NotTo(HaveOccurred(), "REHEARSAL_USERS in the fixture's env (an older fixture? run task e2e-up)")
+	// Every string contains the empty one: a missing account would pass assertions
+	// that it never appears.
+	Expect(env["FOYER_SHARED_ACCOUNT"]).NotTo(BeEmpty(), "FOYER_SHARED_ACCOUNT in foyer-env (an older deployment? run task e2e-deploy)")
 	foyer, err := url.Parse(env["FOYER_URL"])
 
 	Expect(err).NotTo(HaveOccurred())

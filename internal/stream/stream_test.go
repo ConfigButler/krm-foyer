@@ -543,9 +543,10 @@ func TestAStreamEndsWithItsSession(t *testing.T) {
 	}
 }
 
-// When the gate cuts a stream short, the handler aborts the response even where the
-// write deadline cannot: the gateway returns quietly when its context ends, and
-// returning would end the response cleanly.
+// A stream is never ended cleanly where it cannot be bounded: a writer with no
+// write deadline is refused at opening, since every write of a stream is bounded,
+// and the response is aborted. (Where the gate cuts a stream short, the gateway
+// returns quietly when its context ends, and the handler aborts it the same way.)
 func TestACutStreamAbortsWithoutTheWriteDeadline(t *testing.T) {
 	api := newAPIServer(t, nil)
 	live := &atomic.Bool{}
