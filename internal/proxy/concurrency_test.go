@@ -207,12 +207,12 @@ func TestEverySlotIsReleased(t *testing.T) {
 			upstream: holdingHandler,
 			creds:    endedSession{},
 			config:   func(c *testConfig) { c.SessionCheckInterval = checkEvery },
-			end: func(t *testing.T, f foyer) { f.endsAborted(t, "a", watchTarget) },
+			end:      func(t *testing.T, f foyer) { f.endsAborted(t, "a", watchTarget) },
 		},
 		"the response duration is up": {
 			upstream: holdingHandler,
 			config:   func(c *testConfig) { c.MaxResponseDuration = 50 * time.Millisecond },
-			end: func(t *testing.T, f foyer) { f.endsAborted(t, "a", watchTarget) },
+			end:      func(t *testing.T, f foyer) { f.endsAborted(t, "a", watchTarget) },
 		},
 		"the answer is held back": {
 			upstream: func(w http.ResponseWriter, _ *http.Request) {
