@@ -8,90 +8,78 @@ it: `task demo` starts an example application in a browser.** Server-held tokens
 decided by Kubernetes alone and no service-account fallback each have an e2e spec that
 tries to get past them, against a real API server and Dex, with krm-foyer's service
 account as cluster-admin bait. Each other requirement becomes a property of krm-foyer
-when its test exists and passes, and not before. Since step 4, every
-[bound](bounds.md) is reached by a test, and an open response ends with its session.
-Since step 5, the hello example follows its notes live through krm-stream, and a
-rehearsal holds 1800 streams of 200 identities on one replica. Since step 5b, those
-streams share one watch per scope, with the API server asked about every user.
+when its test exists and passes, and not before. Request/response
+[bounds](bounds.md) and session cancellation have tests. The hello example follows
+notes live through krm-stream. A rehearsal holds 1800 streams of 200 identities on one
+replica, both per-user and shared; sharing asks the API server about every user.
 
 ## Order of work
 
-Each step makes pending specs real and ends with `task verify` green.
+The next work should make the existing service usable and operable by someone outside
+this repository. Each change ends with `task verify` green; a checked box requires
+an implemented test, not just a design or a pending spec.
 
-1. **The proxy, unit tests only** (done). Path checking first, as a pure function. Then the
-   proxy, which takes the user's credential from the session and nothing else, so it can
-   be tested against an `httptest` API server before login exists. There is deliberately no test-only way to hand krm-foyer a token: a back door
-   behind a build tag is still a back door. So the binary does not serve `/k8s` until
-   step 2 gives the proxy a credential source.
-2. **OIDC login and sessions, deployed into the e2e fixture** (done). krm-foyer runs in the
-   cluster with a cluster-admin bait service account, and the suite logs in by walking
-   Dex's login form with a cookie jar. The differential, audit, session, CSRF, logout and
-   token-scan specs go green together. The [interruption](design.md#interruptions) pages
-   come with it: the 401 page's sign-in link needs login, and this is the first step at
-   which a person can browse `/k8s`.
+1. **Finish the deployment path.** The Helm chart is being developed separately.
+   Review it against the contract and install it through e2e. Give the pod no API
+   grants in per-user mode; for sharing, use an explicitly configured, narrowly granted
+   projected token. Include resource
+   requests/limits, network policy, verified backend TLS, the OIDC client and cluster
+   authentication setup, and protected metrics. The current fixture deliberately gives
+   the pod cluster-admin bait and is not that deployment. Document certificate, CA and
+   client-secret rotation, restart/sign-out behavior, and supported Kubernetes/issuer
+   versions. Add certificate reload and tests for draining traffic during termination.
+   Finish the targeted ingress tests using the existing Traefik fixture.
+2. **Capacity and failure behavior beyond one tiny scope.** Measure large snapshots,
+   many distinct scopes, staggered subscriptions, sustained writes, slow readers and
+   reconnect bursts; record API-server load as well as foyer memory. Stream count does
+   not bound snapshot/cache bytes. Decide and test memory/admission budgets, including
+   active sessions and anonymous login traffic, before claiming production capacity.
+   Exercise API-server and issuer outages, rotating shared credentials, and recovery.
+   Preserve the current rehearsal as a regression test for watch consolidation.
+3. **A second application and an integration guide.** Use another API group without new
+   backend handlers, with a domain operator showing pending, accepted, rejected and
+   failed outcomes. Document helper outcomes, conditional saves, unknown write results,
+   stream errors and draft preservation at sign-out. State browser support: only
+   Chromium has browser e2e today. Add `/auth/whoami` and
+   `/_foyer/access` to make identity and RBAC problems diagnosable. This establishes
+   reuse and identifies which lifecycle features the application actually needs.
+4. **Refresh, when sessions must outlive short ID tokens.** Serialize refresh per
+   session, bound it, make logout win every race, never replay a mutation, and scan
+   refreshed credentials for leaks. Measure disablement for the chosen issuer
+   configuration. This can be delivered and tested on one replica before adding a
+   distributed store; it need not wait for high availability.
+5. **Shared storage, before multiple replicas.** Share login transactions as well as
+   sessions, so a callback may land on a different replica. Test cross-replica logout,
+   refresh coordination, store outages, restart and rolling updates. Measure store
+   read/write load before choosing its implementation: the current code touches sessions
+   per request and checks each open response periodically. Hashing session IDs does not
+   protect the raw cluster tokens a store holds; its access and encryption need a design.
+6. **Release and maintenance evidence.** Add vulnerability scanning to the CI image,
+   exercise the published artifact as an adopter, and document upgrades, rollback and
+   image/provenance verification. The release workflow already requests an SBOM and
+   build provenance; multi-arch builds and cosign image signing remain separate work.
+   Add docs/link checks early enough to prevent status drift; keep broader coverage
+   targets secondary to tests of specific failure modes.
 
-   Sessions live in memory, one replica, and there is no refresh: krm-foyer does not ask
-   for `offline_access`, holds no refresh token, and a session ends with its ID token.
-   That keeps the step small and gives the token scan a complete list of what to look
-   for. Five changes, in order: sessions and CSRF (unit tests); OIDC login and the
-   binary serving `/k8s`; interruption pages; deployment into the fixture with the login
-   and identity specs; then the differential, CSRF, logout and token-scan specs.
+The page login gate (`/auth/check`) is a convenience after the deployment and integration
+work: `requireSession()` already handles arrival while signed out. Application scopes,
+external-login modes and upgrade protocols stay driven by actual adopter requirements.
 
-3. **A working demo** (done). Moved ahead of refresh, shared storage and bounds
-   (2026-10-01), because a first useful experience shows what the rest must serve, and
-   the backend already worked against a real Dex and API server. One command, `task
-   demo`, starts the [hello example](../examples/hello) for a browser on this machine:
-   everything runs in one k3d cluster, a Gateway API front door (Traefik, the chart
-   gitops-reverser uses) puts the example and krm-foyer on one origin, and
-   `kubectl port-forward` brings the front door and Dex to
-   `*.localhost`, which browsers resolve to loopback with no setup. The example
-   signs in, lists, creates and edits a custom resource, shows Kubernetes' 403 and 409,
-   and signs out, with no application-specific code in krm-foyer; the generic browser
-   helper (`/_foyer/foyer.js`) came with it. Browser specs drive that journey in
-   Chromium. It reloads on request rather than streaming, and keeps one replica,
-   in-memory sessions and a new login when the ID token expires.
-4. **Bounds** (done), before anyone runs krm-foyer for real: the request rate per session,
-   concurrent requests per session and per replica, response duration and response
-   bytes (counted decoded), each configurable with a documented default and a test that
-   reaches it. Every open response ends when its session ends, at logout or expiry, and
-   is cancelled at the API server, proved against the real cluster. Metrics show how
-   close real traffic comes to each limit. Native watches stay open and are not a
-   special case: krm-foyer does not tell them apart, and no bound needs it to. A bound on
-   page size was left out (2026-10-02): it would not reliably bound what a list costs.
-   See [bounds](bounds.md).
-5. **Live notes with krm-stream** (done; was step 6). Moved ahead of refresh and shared
-   storage (2026-10-02), because live state is the experience krm-foyer is for: `/k8s`
-   for reads and changes, krm-stream for what changes while a page is open. krm-foyer
-   hosts krm-stream with user-authenticated upstream watches, and the hello example
-   follows its notes live instead of reloading. Its bounds come with it: browser
-   subscriptions and upstream watches counted separately (with sharing, several
-   subscriptions use one upstream watch, and the `/k8s` bounds do not cover watches
-   krm-stream opens itself), subscriptions closed when their session ends, and
-   recovery after a disconnect tested. The rehearsal with 200 identities measures what
-   one replica holds, which the per-replica defaults in [bounds](bounds.md) only
-   assume.
-5b. **Shared watches** (done, 2026-10-03), moved ahead of refresh, which is not needed
-   yet. For the resources configured, every stream of one scope reads one watch, opened
-   with a narrow identity of krm-foyer's own; who each user is comes from a
-   SelfSubjectReview with their token, and whether they may from SubjectAccessReviews at
-   opening and every recheck, reused briefly for exactly the same question. Metrics
-   count watches by identity, the streams on shared watches and every access decision.
-   Every stream's writes are bounded, so a browser that stops reading cannot hold off
-   a recheck, and a shared watch slow to open holds up no other scope; krm-stream 0.7.0
-   took both from krm-foyer's [requests](investigations/krm-stream-shared-watches.md),
-   so the second is krm-stream's own now.
-   The hello example's notes are shared, and the rehearsal runs both ways. A
-   [decision guide](watches.md) says when to share, stream per-user, or use a native
-   watch, which stays available but is not where the work goes.
-6. **Refresh and shared session storage, when the demo shows the need** (was step 5, and
-   before that 2b): refresh serialized per session and bounded, a refused refresh ending
-   the session, the disablement bound measured for Dex, and a shared store so more than
-   one replica works. The token scan then also reads the store, for tokens krm-foyer
-   obtained by refresh.
-7. **An example domain** with pending, accepted, rejected and failed outcomes, and a
-   second frontend on a different API group, with no application-specific code in
-   krm-foyer. Then measure the operational cost against keeping auth and transport in
-   each application.
+## Completed milestones
+
+These numbers identify earlier investigation notes, not the priority of future work.
+
+| Milestone | What exists now |
+| --- | --- |
+| 1–2: proxy and login | OIDC with PKCE/state/nonce, in-memory sessions, CSRF, interruption pages and differential/audit tests against Dex and Kubernetes |
+| 3: browser demo | `task demo`, the hello CRD editor, browser helper and Chromium journeys through Traefik |
+| 4: bounds | Request rate/concurrency, response duration/bytes, session cancellation and metrics |
+| 5: streams | krm-stream, live notes, conflict/draft recovery and a 200-identity rehearsal |
+| 5b: shared watches | Opt-in shared resources, API-server subject/access reviews, decision reuse, bounded rechecks and watch/access metrics |
+
+The [krm-stream investigations](investigations/krm-stream-feedback.md) retain the
+version-specific findings behind milestones 5 and 5b. Their superseded workarounds
+are historical, not instructions for the current integration.
 
 ## Versions
 
@@ -120,14 +108,14 @@ Security items need tests that try to get past the boundary.
 - [x] PR title check for conventional commits (squash merges take the PR title)
 - [x] krm-foyer deployed into the e2e fixture (image imported with `k3d image import`),
       with its service account as cluster-admin bait
-- [x] The `foyer` specs for step 2 made real: login, identity, differential answers,
+- [x] The implemented `foyer` authentication/access specs: login, identity, differential answers,
       RBAC changes, watches, path and subresource refusals, CSRF, logout and the token
       scan, each checked by deploying a krm-foyer broken on purpose
-- [ ] The remaining `foyer` specs: refusal of a refresh (step 6), the ingress (later)
+- [ ] The remaining `foyer` specs: refusal of a refresh, and dedicated ingress/login-gate behavior
 - [x] Browser e2e: log in, read, create, edit, get refused with 403, hit a 409, log out,
       and no credential within the page's reach. Chromium driven from the Go suite
-      with chromedp, rather than Playwright: no Node or npm in CI, one language for the
-      suite
+      with chromedp, keeping browser e2e in Go. Node separately runs the helper unit
+      tests; there is no application JavaScript build
 - [x] `task demo`: the e2e fixture with the hello example behind a front door, for a
       browser on this machine
 - [ ] Coverage baseline that ratchets upward
@@ -135,7 +123,9 @@ Security items need tests that try to get past the boundary.
       return paths, with a short fuzz run of each in `task verify`
 - [ ] Helm chart with `values.schema.json`, `helm lint`, `helm template` tests, and e2e
       that installs through the chart
-- [ ] Signed multi-arch image (cosign keyless) with an SBOM
+- [x] Release workflow configured to generate an SBOM and attest build provenance
+- [ ] Signed multi-arch image (cosign keyless), with documented artifact verification
+- [ ] Dependency/image vulnerability scanning inside the CI image
 - [ ] Docs lint: markdownlint and link checking
 - [ ] Parse the whole squash message the way release-please does, once a dropped
       changelog entry makes it worth it
@@ -155,8 +145,9 @@ Security items need tests that try to get past the boundary.
 - [x] krm-foyer serves TLS from a mounted certificate (the e2e deployment does)
 - [ ] It reloads the certificate on rotation
 - [ ] Behind an ingress: the public URL from configuration and no trust in `Host` or
-      `X-Forwarded-*`, with one e2e spec running nginx in front. See [ingress](ingress.md)
-- [ ] Behind an ingress with re-encryption: the ingress verifies krm-foyer's certificate
+      `X-Forwarded-*`, with targeted e2e specs through the Traefik fixture. See [ingress](ingress.md)
+- [x] Browser fixture behind Traefik with re-encryption and a BackendTLSPolicy for each
+      backend; targeted spoofing and buffering checks remain above
 - [ ] A NetworkPolicy in the chart that admits only the ingress to krm-foyer's port, and
       only the monitoring system to the metrics port
 - [ ] Helm chart values for both models
@@ -166,9 +157,9 @@ Security items need tests that try to get past the boundary.
       wait before shutdown, or readiness turned off first, with a test
 - [ ] Routing recipes for one shared domain: a Gateway API `HTTPRoute`, an nginx server
       block and a Vite dev-server proxy
+- [x] `requireSession()` in the browser helper for navigation to login
 - [ ] Login gate: `GET /auth/check` for an ingress gating the application's pages, with
-      nginx and Traefik recipes, and `requireSession()` in the helper where there is no
-      ingress support
+      nginx and Traefik recipes
 - [ ] Later, when a hybrid application asks: identity headers from the check for a domain
       backend, never the token
 
@@ -194,9 +185,9 @@ Security items need tests that try to get past the boundary.
 - [x] A test proves that no request falls back to the service account: with the bait in
       place, a request without a session gets 401 and never reaches the API server, and
       the audit log names the user for every request with one
-- [x] A test proves that no response, on any route, and no log line contains a token
-      krm-foyer holds, a session ID or a client secret
-- [ ] The same for tokens obtained by refresh, read from the session store (step 6)
+- [x] A test scans responses and logs for tokens krm-foyer holds and client secrets;
+      session IDs are allowed only in the session cookie's issuing `Set-Cookie` header
+- [ ] The same for tokens obtained by refresh, read from the session store
 - [x] Upstream bodies reach the browser decoded: the browser's `Accept-Encoding` is
       dropped, and a gzip answer from the API server arrives uncompressed without
       `Content-Encoding`
@@ -210,25 +201,24 @@ Security items need tests that try to get past the boundary.
 ### Login and sessions
 
 - [x] OIDC authorization code with PKCE, state and nonce, through a maintained library
-      (unit tests against an issuer that misbehaves on request; e2e in step 2)
+      (unit tests against an issuer that misbehaves on request; e2e against Dex)
 - [x] Opaque server-side sessions: rotated at login, with idle and absolute expiry, and
-      ended with the ID token while there is no refresh (unit tests; e2e in step 2)
-- [ ] Refresh is serialized per session and bounded (step 6)
-- [ ] A refused refresh ends the session at once: 401s, and its streams close (step 6)
+      ended with the ID token while there is no refresh (unit tests; e2e against Dex)
+- [ ] Refresh is serialized per session and bounded
+- [ ] A refused refresh ends the session at once: 401s, and its streams close
 - [ ] The disablement bound measured for Dex in the fixture (remove a user, time the
       refused refresh), and documented per issuer configuration; elsewhere the documented
       bound is the absolute session expiry
 - [x] CSRF proof and same-origin checks on every mutation through `/k8s`, with repeated
-      header fields refused (unit tests and a fuzz property; e2e in step 2)
+      header fields refused (unit tests and a fuzz property; e2e against Dex)
 - [x] The same checks on logout
-- [x] An unauthenticated API request gets a JSON 401, not a redirect (unit tests; e2e in
-      step 2)
+- [x] An unauthenticated API request gets a JSON 401, not a redirect (unit tests; e2e against Dex)
 - [x] `/auth/session`
 - [ ] `/auth/whoami` from a SelfSubjectReview
 - [ ] `/_foyer/access`: the rules for a namespace from a SelfSubjectRulesReview, and a
       "can I?" form answered by a SelfSubjectAccessReview. See
       [what may I do](design.md#what-may-i-do)
-- [ ] Shared session storage, so more than one replica works (step 6)
+- [ ] Shared session storage, so more than one replica works
 - [ ] The [session lifecycle](design.md#session-lifecycle) bounds, each with a test:
       logout seen by every replica at once, logout racing a refresh, and the session
       store unavailable
@@ -241,7 +231,8 @@ Security items need tests that try to get past the boundary.
 
 - [x] `Status` errors, content types, patch types, dry-run and Server-Side Apply pass
       through unchanged (the differential specs)
-- [ ] Mutations are never replayed, including after the session is refreshed
+- [x] A dropped create response is not replayed (`TestMutationsAreNotReplayed`)
+- [ ] The same guarantee across refresh and logout races
 - [x] Native watches and logs stream without buffering, and cancellation reaches the
       upstream
 - [x] Every open response ends when its session ends: at logout and at expiry it is
@@ -250,7 +241,7 @@ Security items need tests that try to get past the boundary.
       witness, each checked by deploying a krm-foyer broken on purpose)
 - [x] [Bounds](bounds.md) on the request rate per session, concurrent requests per
       session and per replica, response duration and response bytes, each reached by a
-      test (step 4)
+      test
 - [x] A response cut short by a bound is aborted, never ended cleanly, and cancelled at
       the API server (unit tests over HTTP/1.1 and HTTP/2, and e2e with the audit log as
       witness)
@@ -260,17 +251,17 @@ Security items need tests that try to get past the boundary.
 - [x] Host krm-stream, with RBAC deciding what a user may watch, and no list of
       resources in krm-foyer (unit tests; e2e with the audit log as witness, checked by
       deploying a krm-foyer that opens watches as its service account). Which resources
-      use a shared watch will be configuration for efficiency, not access
+      use a shared watch is configuration for efficiency, not access
 - [x] User-authenticated watches first, with the hello example following its notes live:
       a change made elsewhere appears without a reload, a change to a note being edited
       is a conflict the page shows, and a 409 from a change the stream does not show
       saves nothing until asked again (browser specs, each checked against a broken
       example)
-- [x] Bounds on browser subscriptions and on upstream watches, counted separately:
+- [x] Bounds on browser subscriptions, with upstream watches counted separately:
       streams per session and per replica, apart from requests, and the watches they
       hold at the API server counted on their own (unit tests and e2e, each checked
-      against a build broken on purpose). A bound of their own on upstream watches
-      comes with shared watches
+      against a build broken on purpose). Upstream watches have no separate bound:
+      there are no more watches than streams ([why](bounds.md#streams))
 - [x] Recovery after a disconnect: a watch the API server ends, or ends with 410 Gone,
       is opened again on the same stream with a fresh snapshot (unit tests); a dropped
       connection between browser and krm-foyer is recovered by krm-stream's client, with
@@ -300,7 +291,7 @@ Security items need tests that try to get past the boundary.
       and a stream's refusals) with user, route and reason, and who refused (unit
       tests, each checked against a build broken on purpose)
 - [x] Metrics on every bound, requests in flight, why responses are cut short, and
-      interruptions by reason, on a listener of their own (step 4; see
+      interruptions by reason, on a listener of their own (see
       [metrics](bounds.md#metrics))
 - [ ] Metrics for requests and active sessions
 

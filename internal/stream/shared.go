@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
 
 	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/metrics"
@@ -142,12 +143,18 @@ func newShared(cfg SharedConfig, s *Streams) (*shared, error) {
 		BearerTokenFile: cfg.TokenFile,
 		Transport:       s.transport,
 		UserAgent:       "krm-foyer shared watches",
-		QPS:             qps,
-		Burst:           int(2 * qps),
+		// Limit at the transport below: client-go deliberately skips its own
+		// limiter for watches. Disable its per-client limiters to avoid charging
+		// reviews and fallback lists twice.
+		QPS: -1,
 	}
 	httpClient, err := kube.HTTPClientFor(rc)
 	if err != nil {
 		return nil, err
+	}
+	httpClient.Transport = sharedTransport{
+		next: httpClient.Transport,
+		rate: flowcontrol.NewTokenBucketRateLimiter(qps, max(1, int(2*qps))),
 	}
 	data, err := dynamic.NewForConfigAndClient(rc, httpClient)
 	if err != nil {
@@ -170,6 +177,24 @@ func newShared(cfg SharedConfig, s *Streams) (*shared, error) {
 		},
 		interval: interval,
 	}, nil
+}
+
+// sharedTransport charges every request by the shared identity to one budget:
+// access reviews, watch openings, fallback lists and retries. Waiting ends with
+// the request, so a queued watch can still be abandoned and a review times out.
+type sharedTransport struct {
+	next http.RoundTripper
+	rate flowcontrol.RateLimiter
+}
+
+func (t sharedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if err := t.rate.Wait(r.Context()); err != nil {
+		if r.Body != nil {
+			_ = r.Body.Close()
+		}
+		return nil, err
+	}
+	return t.next.RoundTrip(r)
 }
 
 // serves reports whether streams of scope share a watch.

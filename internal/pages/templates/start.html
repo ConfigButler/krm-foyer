@@ -23,15 +23,16 @@
       <li>Sign-in through the configured OIDC issuer: <a href="/auth/login">sign in</a>, and
         <a href="/auth/session"><code>/auth/session</code></a> to see the session</li>
       <li>The Kubernetes API under <code>/k8s/</code>, with your own credential</li>
+      <li>Live Kubernetes resources through krm-stream at <code>/stream/v1</code></li>
       {{- end}}
     </ul>
 
     <h2>Not here</h2>
     <ul>
       {{- if not .Login}}
-      <li>Sign-in and the Kubernetes API: this deployment has no OIDC issuer configured</li>
+      <li>Sign-in, the Kubernetes API and streams: this deployment has no OIDC issuer configured</li>
       {{- end}}
-      <li>krm-stream resource streams under <code>/stream</code>, which are not built yet</li>
+      <li>Your application's pages: serve them separately on this origin</li>
     </ul>
 
     <p>Read the <a href="https://github.com/ConfigButler/krm-foyer/blob/main/docs/design.md">service design</a>

@@ -3,7 +3,8 @@
 krm-foyer sits between browsers and a cluster, and its main promise is a negative one:
 **it does not invent authentication or authorization.** Dex, or whichever issuer is
 configured, says who the user is. The API server says what that user may do. krm-foyer
-carries the user's credential and decides nothing about access. This document
+carries the user's credential for API calls and per-user watches. Shared watches
+use an explicit service identity, with API-server reviews for every subscriber. This document
 describes how the tests prove that.
 
 ## What has to be proved
@@ -11,10 +12,10 @@ describes how the tests prove that.
 | Claim | What would break it | How the suite catches it |
 | --- | --- | --- |
 | Identity comes from the issuer | krm-foyer asserting a user name, impersonating, or accepting a token issued to another client | The audit log names the user and shows no impersonation; tokens for other clients are rejected |
-| Permission comes from RBAC | krm-foyer deciding something itself, or caching a decision | The same request gets the same answer through krm-foyer as it does directly; a RoleBinding change shows on the next request |
+| Permission comes from Kubernetes | krm-foyer granting access itself or reusing a decision beyond its subject, scope or lifetime | Proxied requests match direct answers and see RoleBinding changes on the next request; shared streams test exact decision keys and bounded rechecks |
 | No service-account fallback | A request without a usable user credential being sent with krm-foyer's own identity | The e2e deployment gives krm-foyer's service account cluster-admin, so a fallback turns a 403 into a 200 |
 | One parse of each path | A path krm-foyer reads one way and Kubernetes another | Non-canonical paths are rejected; fuzzing shows the path forwarded is byte-for-byte the path received |
-| The credential stays on the server | A token or session ID in a response body, header, page or log line | Every response and log line is scanned for every token involved, including those krm-foyer obtained by refresh |
+| The credential stays on the server | A token or session ID in a response body, header, page or log line | Every response and log line is scanned for every token involved, with refreshed credentials to be added when refresh exists |
 
 ## Four techniques
 
@@ -45,8 +46,9 @@ again after the whole suite. It looks for every token the suite obtained, exactl
 anything shaped like a JWT. The second covers the tokens krm-foyer holds and never showed
 the suite: the ID tokens it got by redeeming codes, and its own service-account token.
 krm-foyer holds no refresh token yet, since it asks for no `offline_access`. When refresh
-arrives (roadmap step 6), its session store moves out of process, and the scan also reads
-it as admin for the opaque refresh tokens no pattern can find.
+arrives, the scan must also inspect stored credentials for opaque refresh tokens no
+pattern can find. Shared storage is a separate roadmap item, not a prerequisite for
+testing refresh on one replica.
 
 A session ID has exactly one place it belongs: the `Set-Cookie` header that issues it,
 on the login callback and wherever the ID is rotated. The scan allows the ID there, and
@@ -84,8 +86,10 @@ bugs are here, where they are cheap to find:
   single content type that a browser cannot read as anything but an allowed one. The
   property is written independently of the check, so it can catch the check's own
   blind spots, such as a repeated `Content-Type` field.
-- **Interruption pages**: every row of the interruptions table is triggered twice, as
-  code and as a browser navigation, and must give the same status both times. A
+- **Interruption pages**: table-driven tests exercise proxy interruptions as
+  code and as browser navigations, checking that the status is the same. Rate,
+  concurrency, size and stream-method refusals also have tests in their own suites;
+  the roadmap retains a full contract-to-test audit as unfinished work. A
   `fetch`, an iframe, another method, a capitalized or repeated `Sec-Fetch-Dest` and
   `Accept: text/html` alone all get JSON, and the API server's own 401, 403, 404, 409,
   422, 429, 500 and 503 reach a navigation unchanged.
@@ -136,7 +140,9 @@ bugs are here, where they are cheap to find:
   else. A 401 or 403 on an open watch ends the stream as it does at opening. A failure
   that may pass (a 503 or 429 at opening, a 500 or 429 on an open watch) ends the stream
   with a non-terminal `UPSTREAM_UNAVAILABLE` and the API server's hint, after one
-  attempt: the browser's client retries, through the gate. A watch that ends before its
+  attempt in these fixtures: they put the hint in the `Status`, not a `Retry-After`
+  header that client-go would retry internally. The browser's client retries through
+  the gate. A watch that ends before its
   snapshot or hardly after it, or with a 410 right after it, is opened once more and
   then ends the stream the same way, after two attempts and never more. What the API server wrote when it failed,
   the token it echoed among it, reaches neither the browser nor the log, and an ended
@@ -173,7 +179,9 @@ bugs are here, where they are cheap to find:
   the scope, against an oracle that knows nothing of the cache. Keys missing the UID,
   the extras, the name, the version or the group each failed it within a second; the
   label selector is left out on purpose, as the reviews do not ask about it, and a test
-  fails if they start to.
+  fails if they start to. A rate-budget regression spends the shared identity's burst
+  on two reviews and checks that opening its watch waits for the same budget to refill;
+  client-go's built-in limiter alone does not throttle watch openings.
 - **Upstream text in the log** ([internal/proxy](../internal/proxy),
   [internal/upstream](../internal/upstream)): an API server that echoes the token in a
   malformed response, a `Content-Type` or a `Location` never gets it into krm-foyer's
@@ -319,7 +327,7 @@ flowchart LR
     T -->|bearer token, directly| K
     T -->|session cookie, NodePort| F
     FD -->|/| W
-    FD -->|/auth, /k8s, /_foyer, TLS verified| F
+    FD -->|/auth, /k8s, /stream, /_foyer, TLS verified| F
     F -->|user's token| K
     F -->|discovery and code exchange| D
     K -->|discovery and keys| D
@@ -388,9 +396,9 @@ The test issuer is nginx serving a discovery document and a JWKS. The suite hold
 signing key (`.e2e/issuer-signing.key`), so it can mint tokens with claims Dex never
 issues. Use it for claims; use Dex for anything a real login would do.
 
-Dex has two static users, `alice@example.com` and `bob@example.com` (password
+Dex has two demo users, `alice@example.com` and `bob@example.com` (password
 `password`), which Kubernetes sees as `oidc:alice@example.com` and
-`oidc:bob@example.com`. There are two clients: `krm-foyer`, whose tokens the cluster
+`oidc:bob@example.com`, plus 200 generated rehearsal users. There are two clients: `krm-foyer`, whose tokens the cluster
 accepts, and `other-app`, whose tokens it must reject.
 
 ```bash
@@ -407,12 +415,15 @@ When something fails, the API server's view is usually the answer:
 thought was asking. `KUBECONFIG=.e2e/kubeconfig kubectl ...` gives admin access for
 looking around.
 
-## Order of work
+## What remains to prove
 
-The [roadmap](roadmap.md#order-of-work) sets the order: the proxy, then login and
-sessions deployed into the fixture, then streams. Each step makes
-pending specs real.
+The [roadmap](roadmap.md#order-of-work) sets the next priorities. Pending e2e specs
+currently cover refused refresh and targeted ingress/login-gate behavior. They are
+listed by Ginkgo but do not fail the suite. Existing browser specs already exercise
+Traefik routing, verified backend TLS and live notes; a passing run does not mean the
+pending behaviors are implemented.
 
-To keep krm-foyer small, the OIDC work uses maintained libraries (`coreos/go-oidc` and
-`golang.org/x/oauth2`), and the proxy uses `net/http/httputil`. Neither the service nor
-its tests need `client-go`.
+OIDC uses `coreos/go-oidc` and `golang.org/x/oauth2`; `/k8s` uses `net/http/httputil`.
+Streams and Kubernetes subject/access reviews use `client-go`, directly and through
+krm-stream. The Go modules and the vendored browser bundle are checked separately by
+`task tidy-check` and `task vendor-check`, both included in `task verify` and CI.

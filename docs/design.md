@@ -5,10 +5,11 @@ APIs. It owns OIDC login and server-side sessions, proxies Kubernetes API reques
 the user's own credential, and hosts krm-stream resource
 streams on the frontend's origin.
 
-This document is the contract: what krm-foyer must do. **Most of it is not implemented
-yet.** Every guarantee below is a requirement until the test that tries to break it
-exists; the [roadmap](roadmap.md) tracks which do. Why the service exists, and what it expects from
-the domains behind it, is in the [vision](vision.md).
+This document is the contract: what krm-foyer must do. Login, single-replica sessions,
+the API proxy, bounds, streams and opt-in shared watches have implementation and tests.
+Planned routes and lifecycle requirements are marked below; the [roadmap](roadmap.md)
+tracks the evidence still missing. A requirement is not a delivered guarantee until
+its test exists and passes. The [vision](vision.md) explains why the service exists.
 
 ## Architecture and ownership
 
@@ -32,18 +33,20 @@ boundary, since it can act as the signed-in user; see
 The initial design uses one configured cluster per deployment and a configurable OIDC
 provider. No particular identity provider or frontend framework is required.
 
-krm-foyer terminates TLS itself from a mounted certificate, reloaded when it changes, or
-sits behind an ingress that terminates TLS. Both are supported, but they are not equally
-safe: behind an ingress, the hop to krm-foyer carries session cookies, and in plain HTTP
-anything that can observe that hop can take a session. Plain HTTP is acceptable only
+krm-foyer terminates TLS itself from a mounted certificate, or
+sits behind an ingress that terminates TLS. Certificates are currently read at startup;
+reload on rotation is a planned requirement. Both network models are supported, but
+they are not equally safe: behind an ingress, the hop to krm-foyer carries session
+cookies, and in plain HTTP anything that can observe that hop can take a session. Plain HTTP is acceptable only
 where nothing but the ingress can reach krm-foyer; otherwise the ingress re-encrypts and
 verifies krm-foyer's certificate. See [both TLS models](ingress.md#decision-2026-10-01-both-tls-models).
 Its public URL is configuration: the OIDC redirect URI, same-origin and CSRF checks and return
 paths use it, never `Host` or `X-Forwarded-*`. An ingress in front must be transparent: no
 buffering of streams, and no authentication or header rewriting of its own on krm-foyer's
-routes. An ingress's external-authentication feature (`auth_request`, ForwardAuth) is used only as a
-login gate for the application's pages, through `/auth/check`. It never decides on `/k8s` or
-`/stream` traffic. The [ingress decision](ingress.md) explains why, and what would make
+routes. The planned `/auth/check` lets an ingress's external-authentication feature
+(`auth_request`, ForwardAuth) act only as a login gate for the application's pages.
+Until it exists, the helper's `requireSession()` handles that navigation. A login gate
+never decides on `/k8s` or `/stream` traffic. The [ingress decision](ingress.md) explains why, and what would make
 more worth revisiting.
 
 krm-foyer has two halves. The **login half** (`/auth/...`) obtains the user's OIDC token
@@ -87,13 +90,18 @@ come from krm-stream, not from a reimplementation here.
 | `/auth/callback` | Validate the callback and establish a session, then `303` to the return path |
 | `/auth/session` | Return minimal identity/session state and CSRF information, never bearer tokens: `200` with `authenticated`, `issuer`, `subject`, `email`, `expiresAt`, `csrfToken` and `csrfHeader`, or `401` with `{"authenticated":false}` |
 | `/auth/logout` | CSRF-protected POST that destroys the server session and answers `204`; the caller then goes where it likes, `/auth/logged-out` by default |
-| `/auth/check` | 204 or 401 (or 302 to login on request) for an ingress gating the application's pages; never a token or identity. See the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages) |
+| `/auth/check` **(planned)** | 204 or 401 (or 302 to login on request) for an ingress gating the application's pages; never a token or identity. See the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages) |
 | `/k8s/api/...` | Proxy core Kubernetes APIs after stripping `/k8s` |
 | `/k8s/apis/...` | Proxy grouped APIs, including CRDs and aggregated APIs |
 | `/k8s/api`, `/k8s/apis`, `/k8s/version`, `/k8s/openapi/...` | Proxy discovery and schema endpoints |
-| `/stream/v1` | A [krm-stream](https://github.com/ConfigButler/krm-stream/blob/main/spec/v1.md) resource stream (`GET`, the scope in the query), with the watch opened as the user: whatever RBAC lets the user watch, and nothing krm-foyer lists. See [streams and editing](#streams-and-editing) |
-| `/auth/whoami` | Who Kubernetes takes the user to be, from a SelfSubjectReview, plus the session's issuer and expiry. Never tokens |
-| `/_foyer/access` | A page showing what the user may do, from Kubernetes' own reviews. See [what may I do](#what-may-i-do) |
+| `/stream/v1` | A [krm-stream](https://github.com/ConfigButler/krm-stream/blob/main/spec/v1.md) resource stream (`GET`, the scope in the query): a watch opened as the user, or an opt-in shared watch guarded by API-server reviews. See [streams and editing](#streams-and-editing) |
+| `/auth/whoami` **(planned)** | Who Kubernetes takes the user to be, from a SelfSubjectReview, plus the session's issuer and expiry. Never tokens |
+| `/_foyer/access` **(planned)** | A page showing what the user may do, from Kubernetes' own reviews. See [what may I do](#what-may-i-do) |
+
+Planned routes currently return 404. The start page (`/`), logout confirmation
+(`/auth/logged-out`), probes (`/healthz`, `/readyz`) and static assets under `/_foyer/`
+also exist. `/readyz` records successful initial issuer discovery; it is not a live
+check of the issuer, API server or shared-watch permissions.
 
 Metrics are served on a listener of their own (`-metrics-listen`), never on the origin;
 see [metrics](bounds.md#metrics).
@@ -169,8 +177,9 @@ subresources, which return whatever their backend sends:
 
 A held-back response is answered as an [interruption](#interruptions): code gets a
 `Status` with status 502 and the reason, and a person browsing gets a page that
-explains it. For a redirect, both carry the target; for HTML, the page shows its source
-as escaped text. Every interruption is logged ([how](#interruptions)).
+explains it. For a redirect, both carry the target. For held-back HTML, the page names
+the content type; a bounded, escaped source preview is planned. Every interruption is
+logged ([how](#interruptions)).
 
 ### Interruptions
 
@@ -193,8 +202,9 @@ answer, it says so in a form the requester can read:
 | A [bound](bounds.md) reached | 429 for the request rate, for concurrent requests and for streams open; 502 for a response known to exceed its size bound before it starts | `Status` naming the bound, with `Retry-After` for the request rate | A page saying so | No for a 429; yes for a 502 |
 | API server unreachable | 502 | `Status` | A page saying so | Perhaps: a connection can fail after the request was sent |
 
-This table is the complete list of answers krm-foyer gives instead of the API server's.
-Anything not in it is the API server's answer.
+This table lists interruptions from the API gate and proxy. Once `/stream/v1` starts,
+its protocol uses the [stream errors](#streams-and-editing) below. Login routes have
+their own [failure responses](#login).
 
 Rules:
 
@@ -219,7 +229,7 @@ Rules:
 - **Answers from Kubernetes are never replaced.** A 403 from RBAC, a 404 or a 409 is the
   API server's answer and reaches the tab as its JSON. Interruptions are only what
   krm-foyer itself decided. For a 403, [`/_foyer/access`](#what-may-i-do) is where a
-  person finds out why.
+  person will be able to investigate the refusal once that page exists.
 - **Every refusal is one log line**, whoever refused: `"msg":"refused"`, with `by`
   (`krm-foyer` or `kubernetes`), the `user` as the issuer named them once the request
   has a session, the `route`, method and path (never the query), and the reason. That is
@@ -283,7 +293,7 @@ SelfSubjectAccessReview through `/k8s` says whether the user may do one thing, a
 SelfSubjectRulesReview lists what they may do in a namespace. Without a scope layer,
 those native answers are exactly what requests through krm-foyer will get.
 
-For a person with a browser tab, krm-foyer adds one page, `/_foyer/access`:
+For a person with a browser tab, the planned `/_foyer/access` page will provide:
 
 - **The rules for a namespace,** from a SelfSubjectRulesReview sent with the user's own
   token, as a table of resources and verbs. When Kubernetes marks the answer incomplete,
@@ -313,8 +323,8 @@ what may be stored and what may be processed before exposing creates.
 
 Tokens and session contents stay server-side. The browser holds only an opaque session ID
 in a Secure, HttpOnly, host-scoped cookie with appropriate SameSite settings. Server-side
-sessions support per-session revocation and refresh-token custody. They require shared
-storage across replicas, bounded logout propagation and a defined failure policy.
+sessions support per-session revocation. Refresh-token custody and shared storage
+across replicas are planned, with bounded logout propagation and a defined failure policy.
 
 **The session ID is a bearer credential.** Whoever holds it can call krm-foyer as the
 user, from anywhere, until the session ends. `HttpOnly` keeps it from page scripts and
@@ -419,7 +429,10 @@ from making requests as the user.
 
 ### Session lifecycle
 
-Revocation is as fast as its slowest path. Each row is a requirement with a test:
+Revocation is as fast as its slowest path. The table includes future requirements:
+refresh and shared storage do not exist yet. Logout and open-response cancellation
+are tested with the current in-memory store on one replica; store failures are tested
+with unit-test doubles. The [roadmap](roadmap.md#login-and-sessions) tracks the rest.
 
 | Event | Required behavior |
 | --- | --- |
@@ -428,11 +441,17 @@ Revocation is as fast as its slowest path. Each row is a requirement with a test
 | Session store unavailable | Fail closed: API and stream requests get 503. Never a stale local copy, never anonymous, never the service account |
 | Responses and streams open at logout | Cut short on every replica within the [session-check interval](bounds.md#the-session-check) (`-session-check-interval`, 5 seconds by default, twice that at worst when the check itself hangs), and cancelled at the API server |
 | Token expiry or failed refresh | API requests get 401; open responses and streams are cut short within the session-check interval of the token's expiry or the session's, whichever comes first |
-| RBAC change | Kubernetes applies it on the next request. A shared watch applies it within its SubjectAccessReview recheck interval; that is reauthorization, not revocation |
+| RBAC change | Kubernetes applies it on the next request. A shared stream applies it within the [full reauthorization budget](watches.md#revocation), 60 seconds at defaults, including decision reuse, a check and a write; a per-user watch is checked again when it reopens |
 | Issuer refuses a refresh | The session ends at once: API requests get 401 and its streams close. krm-foyer never retries a refusal into a success or keeps using the old token past its expiry |
 | User disabled at the issuer | Provider-dependent; see below. The only bound krm-foyer itself guarantees is the session's absolute expiry |
 
-Disabling a user reaches krm-foyer only as a refused refresh. Until then the API server
+Today, without refresh, disablement at the issuer does not actively end a session:
+the earlier of session expiry and ID-token expiry ends its use here. A shared stream's
+reviews recheck permissions for the subject captured when it opened; they do not
+re-resolve issuer group membership.
+
+With refresh implemented, disabling a user can reach krm-foyer as a refused refresh.
+Until then the API server
 accepts the ID token krm-foyer already holds, so the user keeps access for the rest of
 that token's lifetime **plus** however long the issuer goes on granting refreshes after
 the account is disabled. That second part belongs to the issuer, and OAuth leaves it to
@@ -547,7 +566,7 @@ of partial success.
 | Reuse | Two frontends using different API groups without application-specific backend handlers |
 | Authentication | Callback failure, expiry, refresh, restart and logout tests across replicas |
 | Session lifecycle | Every bound in [session lifecycle](#session-lifecycle) measured by a test, including logout racing refresh, store outage, streams open at logout and a refused refresh; a disablement bound is claimed only for issuer configurations where a test measured it |
-| Credential custody | No token krm-foyer holds, including refreshed ones, and no session ID in any response, log line or error page the suite collects |
+| Credential custody | No token krm-foyer holds, including refreshed ones, in any collected response or log; session IDs appear only in the session cookie's issuing `Set-Cookie` header |
 | Access | Every answer through krm-foyer equals the API server's answer for the same token, except the [interruptions](#interruptions), each with a test that it happens exactly when the table says; non-canonical paths are rejected; nothing falls back to the service account |
 | Proxy semantics | Kubernetes errors and patch types preserved; conflicting writes and ambiguous create outcomes handled without automatic replay |
 | Upstream responses | An upstream that sends HTML, `Set-Cookie`, CORS headers, cache headers or a redirect has none of them reach the browser unasked; a gzip response arrives decoded, and the size bound holds for its decoded bytes |

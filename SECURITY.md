@@ -20,13 +20,15 @@ receives security fixes.
 krm-foyer holds users' sessions and forwards their requests to a Kubernetes API server, so
 we treat the following as security bugs:
 
-- **A token reaching the browser.** An ID, access or refresh token in a response body,
+- **A login or shared-watch token reaching the browser.** A token krm-foyer holds in a response body,
   header, readable cookie, log line or error message.
 - **A session ID leaking.** The session ID is a bearer credential: one in a log line, a
   URL, an error page, or anywhere outside the cookie is a vulnerability.
 - **krm-foyer deciding access.** A request answered differently through krm-foyer than the
-  API server answers the same token directly, or a non-canonical path forwarded instead of
-  rejected.
+  API server answers the same token directly, except the documented
+  [interruptions](docs/design.md#interruptions), or a non-canonical path forwarded
+  instead of rejected. Shared streams must follow their documented review and
+  reauthorization contract.
 - **A request made with the wrong credential.** Another user's, or the service's own
   service account standing in for a user.
 - **A shared watch read without the API server's say.** A stream served from a shared
@@ -48,7 +50,9 @@ we treat the following as security bugs:
 ## What does not
 
 - Anything a user can do with permissions Kubernetes RBAC already grants them, including
-  through the browser. krm-foyer has no [application scope](docs/application-scope.md)
+  through the browser, including reading Secrets or creating tokens where those
+  permissions are granted. The server-held-token guarantee is not a filter on
+  authorized Kubernetes resource data. krm-foyer has no [application scope](docs/application-scope.md)
   yet, so a session carries the user's full access by design. Enumerating a namespace you
   are allowed to list is not a leak.
 - Denial of service by an already authenticated user within the configured limits.

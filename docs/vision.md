@@ -40,8 +40,8 @@ see what Kubernetes answered for you. Where krm-foyer itself steps in, because y
 signed in, or the upstream answered with a redirect or a page it will not render, it tells you, in a page instead of a bare error code. For a redirect,
 you see where it leads and choose whether to go.
 
-Two pages answer the questions everyone asks first. `/auth/whoami` shows who Kubernetes
-thinks you are. `/_foyer/access` shows what you may do, from Kubernetes' own reviews,
+Two planned pages will answer the questions everyone asks first. `/auth/whoami` will show who Kubernetes
+thinks you are. `/_foyer/access` will show what you may do, from Kubernetes' own reviews,
 with a "can I?" form. Code asks Kubernetes the same questions natively, to hide buttons
 that would only produce a 403.
 

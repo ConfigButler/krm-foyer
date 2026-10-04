@@ -12,7 +12,7 @@ krm-foyer supports two ways of being deployed. They are **not** equally safe:
 
 | Model | How | When | What it assumes |
 | --- | --- | --- | --- |
-| **krm-foyer terminates TLS** | Certificate and key are mounted files, for example from cert-manager. krm-foyer reloads them when they change, so rotation needs no restart | The default | Nothing beyond the usual: no hop carries a session cookie in plain text |
+| **krm-foyer terminates TLS** | Certificate and key are mounted files, for example from cert-manager. Currently a restart loads a changed certificate; automatic reload is planned | Used by the e2e fixture | Nothing beyond the usual: no hop carries a session cookie in plain text |
 | **Behind an ingress** | The ingress or gateway terminates the browser's TLS and forwards to krm-foyer | An organization that routes everything through one ingress, or a team that already manages certificates there | The ingress is trusted, and the hop behind it is protected (see below) |
 
 Behind an ingress, every request on the hop to krm-foyer carries the session cookie, and
@@ -27,7 +27,8 @@ hop is one of two things:
   NetworkPolicy admits the ingress's pods to krm-foyer's port and nothing else, and the
   cluster network is not observable by other tenants. Anything that can read that hop
   can take a session. Operators choosing this accept that assumption explicitly; the
-  chart's default is the policy, not an open port.
+  chart being developed separately must default to that policy. Until its deployment
+  contract is tested, supply and verify the policy in the deployment.
 
 What both models do share is that **krm-foyer never works out its own public address
 from the request.** It is configured with its public URL. That URL is the
@@ -35,18 +36,20 @@ OIDC redirect URI, the origin that CSRF and same-origin checks compare against, 
 base for return paths. `Host` and `X-Forwarded-*` headers do not change any of those, so
 a spoofed header cannot poison a redirect or the CSRF origin. That protects against
 header tricks; it does nothing for a cookie read off an unencrypted hop. Forwarded client
-addresses are used only for logging and rate limiting, and only when they come from proxy
-addresses the operator configured.
+addresses are not used for logging or rate limiting. Current rate limits are keyed by
+session, and there is no trusted-proxy-address configuration.
 
 Session cookies are always `Secure`, in both models. Behind an ingress the browser still
-sees HTTPS, and browsers accept `Secure` cookies from `http://localhost`, so local
-development needs no exception.
+sees HTTPS. Login configuration requires an HTTPS public URL, including locally;
+`task demo` supplies TLS for the browser. Plain `task run` serves only the start page,
+assets and probes.
 
 An ingress in front of krm-foyer has to stay transparent:
 
 - **No response buffering** on `/k8s` watches and `/stream`, and read timeouts longer
-  than a watch. krm-foyer sends `X-Accel-Buffering: no` on streaming responses, which
-  nginx honors. Other proxies need their own setting.
+  than a watch. krm-stream sends `X-Accel-Buffering: no` on `/stream/v1`; the `/k8s`
+  proxy flushes every chunk but does not emit that header. Configure buffering off
+  for both routes in the ingress rather than depending on a response header.
 - **No authentication of its own** on krm-foyer's routes. The ingress may limit request
   sizes and rates, but it must not add or rewrite `Authorization` or `Impersonate-*`
   headers.
@@ -56,8 +59,10 @@ An ingress in front of krm-foyer has to stay transparent:
 
 The e2e fixture runs krm-foyer with its own TLS, because that is the default, and its
 browser specs already reach krm-foyer through a gateway (Traefik, re-encrypting). The
-ingress model gets one more e2e spec through that gateway. It checks two things: a spoofed `Host` or `X-Forwarded-Host` changes neither the redirect
-URI nor the CSRF origin, and watch events arrive without delay.
+dedicated ingress specs remain pending: spoofed `Host` or `X-Forwarded-Host` must
+change neither the redirect URI nor the CSRF origin, and watch events must arrive
+without buffering. The existing browser journeys exercise routing and live updates,
+but do not replace those targeted checks.
 
 ## Decision (2026-10-01): sharing one domain with other services
 
@@ -203,6 +208,9 @@ credential to code that krm-foyer does not test.
 
 ## Decision (2026-10-01): a login gate for the application's pages
 
+**Planned, not implemented.** `/auth/check` currently returns 404. The behavior below
+is the proposed contract; use the implemented `requireSession()` helper today.
+
 The ingress can ask krm-foyer one question before serving the application's pages: *is
 this browser signed in?* If it is not, the browser goes to the login, and comes back to
 the page it asked for. Every frontend needs this, and it is wasteful to write it in each
@@ -226,7 +234,10 @@ Ingresses differ in what they do with a refusal, which is why there are two refu
 - **Traefik ForwardAuth and Envoy's external authorization** pass the check's response to
   the browser, so they use `?redirect=true`.
 
-Gateway API has no standard external-auth filter yet. Without one, the browser helper's
+Gateway API introduced an experimental `externalAuth` filter in
+[v1.4](https://kubernetes.io/blog/2025/11/06/gateway-api-v1-4/); support depends on the
+installed CRDs and gateway implementation. This fixture does not configure it.
+Without a usable page gate, the browser helper's
 `requireSession()` does the same at page load, in a few lines of JavaScript. The gate is
 an improvement for whoever has it, not a requirement.
 
@@ -280,8 +291,9 @@ The ingress then forwards the request to the API server with that token.
 - **Streams do not fit.** `/stream` needs the principal inside krm-stream, not a yes or
   no in front of it.
 - **Every ingress is different.** nginx, Traefik, Envoy and Gateway API each have their
-  own external-auth configuration, and each would need its own tests. Gateway API has no
-  standard for it yet, and the Kubernetes project has retired ingress-nginx, the most
+  own external-auth configuration, and each would need its own tests. Gateway API's
+  experimental filter also needs implementation-specific validation. The Kubernetes
+  project has retired ingress-nginx, the most
   common place `auth_request` was configured.
 - **We have already tried this.** Voter's first design (March 2026) was Traefik
   ForwardAuth deciding from a cookie Voter issued, followed by impersonation. It was
@@ -361,5 +373,5 @@ auth proxy would make krm-foyer less opinionated, much larger, and impossible to
 across all of those combinations.
 
 The flexibility people need is in the network, not in who decides. Both TLS models are
-supported, a transparent ingress is fine, the ingress can gate pages on the login, and
+supported, a transparent ingress is fine, the planned login gate can cover page loads, and
 the seam for external login exists if it is ever needed.

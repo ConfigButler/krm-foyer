@@ -21,6 +21,7 @@ import (
 	"github.com/ConfigButler/krm-stream/gateway/kube"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/util/flowcontrol"
 
 	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
@@ -252,6 +253,69 @@ func eventuallyEqual(t *testing.T, what string, got func() string, want string) 
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// Reviews and watch openings must share the configured budget, even though they
+// use different client-go clients. The user's SelfSubjectReview is separate.
+func TestSharedReviewsAndWatchesUseOneRateBudget(t *testing.T) {
+	api := newSharedAPI(t)
+	opened := make(chan time.Time, 1)
+	api.watch = func(w http.ResponseWriter, r *http.Request) {
+		opened <- time.Now()
+		api.serveWatch(w, r)
+	}
+	f := sharedFoyer(t, api, byHeader{}, metrics.New(), time.Minute, func(c *Config) {
+		c.Shared.QPS = 1 // A burst of two: the list and watch reviews spend it.
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), within)
+	defer cancel()
+	start := time.Now()
+	s := f.open(ctx, t, notes, as(userToken))
+	s.until(t, "synced")
+	select {
+	case at := <-opened:
+		if elapsed := at.Sub(start); elapsed < 800*time.Millisecond {
+			t.Fatalf("two reviews and a watch reached the API server in %v; the watch bypassed the shared rate budget", elapsed)
+		}
+	case <-ctx.Done():
+		t.Fatal("the shared watch never opened after the rate budget refilled")
+	}
+}
+
+// Cancelling a request waiting for the shared budget must release its body and
+// reach no API server, as any failed RoundTrip must.
+func TestSharedRateWaitHonorsCancellation(t *testing.T) {
+	api := newSharedAPI(t)
+	limiter := flowcontrol.NewTokenBucketRateLimiter(1, 1)
+	limiter.TryAccept() // Spend the burst, so the next request must wait.
+	transport := sharedTransport{next: api.Client().Transport, rate: limiter}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	body := &closeTrackedBody{Reader: strings.NewReader("{}")}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, api.URL, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := transport.RoundTrip(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if resp != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled request: response %v, error %v", resp, err)
+	}
+	if !body.closed || len(api.received()) != 0 {
+		t.Fatalf("body closed: %v; upstream requests: %d", body.closed, len(api.received()))
+	}
+}
+
+type closeTrackedBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *closeTrackedBody) Close() error {
+	b.closed = true
+	return nil
 }
 
 // Streams of one scope share one watch at the API server, whoever opens them: three
