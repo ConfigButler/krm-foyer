@@ -6,7 +6,11 @@
       "release-type": "go",
       "initial-version": "0.1.0",
       "package-name": "krm-foyer",
-      "include-component-in-tag": false
+      "include-component-in-tag": false,
+      "extra-files": [
+        { "type": "yaml", "path": "charts/krm-foyer/Chart.yaml", "jsonpath": "$.version" },
+        { "type": "yaml", "path": "charts/krm-foyer/Chart.yaml", "jsonpath": "$.appVersion" }
+      ]
     }
   },
   "changelog-sections": [

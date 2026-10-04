@@ -128,7 +128,7 @@ func rehearse(ctx SpecContext, r rehearsal, name string) {
 	// The old pod stops listening as soon as it is told to stop, and may still be
 	// routed to for a moment: wait until it is gone, and the new one answers.
 	eventually(ctx, func() string {
-		return fx.kubectl("-n", fx.foyerNamespace, "get", "pods", "-l", "app=krm-foyer", "-o", "jsonpath={.items[*].status.phase}")
+		return fx.kubectl("-n", fx.foyerNamespace, "get", "pods", "-l", "app.kubernetes.io/instance=krm-foyer", "-o", "jsonpath={.items[*].status.phase}")
 	}).WithTimeout(time.Minute).Should(Equal("Running"))
 	eventually(ctx, func() error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fx.foyerURL+"/auth/session", nil)

@@ -1,0 +1,22 @@
+apiVersion: v2
+name: krm-foyer
+description: >-
+  Browser login, Kubernetes API access and live resources on one origin, with every
+  access decision left to the API server
+type: application
+# Both are kept at the release's version by release-please (release-please-config.json).
+version: 0.1.0
+appVersion: 0.1.0
+keywords:
+  - kubernetes
+  - oidc
+  - browser
+  - proxy
+home: https://github.com/ConfigButler/krm-foyer
+sources:
+  - https://github.com/ConfigButler/krm-foyer
+maintainers:
+  - name: ConfigButler
+    url: https://github.com/ConfigButler
+annotations:
+  artifacthub.io/license: Apache-2.0

@@ -46,7 +46,7 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 	// The no-fallback specs rely on a fallback being loud. If the bait were missing, a
 	// fallback would be a quiet 403, and those specs would pass for the wrong reason.
 	Expect(fx.kubectl("auth", "can-i", "*", "*", "--as="+fx.foyerAccount)).To(Equal("yes"))
-	Expect(fx.kubectl("-n", fx.foyerNamespace, "get", "pods", "-l", "app=krm-foyer", "-o",
+	Expect(fx.kubectl("-n", fx.foyerNamespace, "get", "pods", "-l", "app.kubernetes.io/instance=krm-foyer", "-o",
 		"jsonpath={.items[*].spec.containers[0].volumeMounts[*].mountPath}")).
 		To(ContainSubstring("/var/run/secrets/kubernetes.io/serviceaccount"))
 

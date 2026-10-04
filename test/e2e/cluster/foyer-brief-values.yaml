@@ -1,0 +1,32 @@
+# A second krm-foyer in the e2e fixture with small bounds, for the specs that wait for a
+# bound to be reached: sessions end within a minute, responses within 20 seconds, a
+# session may have two requests in flight and send ten at once, then one a second, and a
+# response has at most 128 KiB. The main instance keeps ordinary bounds, so no other
+# spec has to race them. Installed on top of foyer-values.yaml: the same image,
+# certificate, public URL and Dex client. The suite reaches it on its own NodePort, under
+# the same name.
+bounds:
+  sessionIdleTimeout: 45s
+  sessionAbsoluteTimeout: 45s
+  sessionCheckInterval: 1s
+  maxResponseDuration: 20s
+  maxSessionConcurrentRequests: 2
+  maxSessionStreams: 2
+  sessionRequestBurst: 10
+  sessionRequestRate: 1
+  maxResponseBytes: 131072
+# Shared notes, rechecked often, so a revoked grant shows within seconds, with the main
+# instance's shared-watch identity.
+sharedWatches:
+  serviceAccount:
+    create: false
+    name: krm-foyer-shared
+  tuning:
+    recheckInterval: 2s
+    decisionTTL: 1s
+# The same bait as the main instance.
+serviceAccount:
+  create: false
+  name: krm-foyer
+service:
+  nodePort: 30444

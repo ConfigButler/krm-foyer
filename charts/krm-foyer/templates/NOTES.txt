@@ -1,0 +1,8 @@
+krm-foyer serves {{ .Values.publicURL }} from the Service {{ include "krm-foyer.fullname" . }} in {{ .Release.Namespace }}.
+
+Route the paths it owns there: /auth, /k8s, /stream and /_foyer (docs/ingress.md).
+The API server must accept ID tokens from {{ .Values.oidc.issuer }} for {{ .Values.oidc.clientID }}.
+{{- if not .Values.tls.secretName }}
+
+It serves plain HTTP. That hop carries session cookies: terminate TLS on the same host.
+{{- end }}

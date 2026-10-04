@@ -88,8 +88,9 @@ the pod's own service account by itself: if you want that account to be the
 shared-watch identity, point the flag at its projected token
 (`/var/run/secrets/kubernetes.io/serviceaccount/token`) and give it only the grants
 above. Otherwise mount a token of a separate account, as the
-[e2e fixture](../test/e2e/cluster/foyer.yaml) does, where the pod's own account is
-cluster-admin bait that must never be used.
+[Helm chart](../charts/krm-foyer) does with `sharedWatches.resources`, and as the
+[e2e fixture](../test/e2e/cluster/foyer-values.yaml) relies on, where the pod's own
+account is cluster-admin bait that must never be used.
 
 ### What happens for each stream
 

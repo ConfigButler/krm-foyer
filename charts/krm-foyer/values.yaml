@@ -1,0 +1,106 @@
+# krm-foyer's chart. values.schema.json checks these on template, lint, install and
+# upgrade: a misspelt key or a missing required value fails the install rather than
+# being ignored. docs/design.md is the contract behind every setting.
+
+# krm-foyer's origin as browsers reach it, such as https://app.example.com. Required.
+publicURL: ""
+
+# The OIDC issuer the API server trusts, and krm-foyer's client there. The API server
+# must accept ID tokens for clientID.
+oidc:
+  # Required.
+  issuer: ""
+  # Required.
+  clientID: ""
+  # The Secret holding the client secret. Required.
+  clientSecret:
+    secretName: ""
+    key: client-secret
+  # Scopes to ask for at login. Empty uses krm-foyer's own default.
+  scopes: []
+  # A ConfigMap with extra CA certificates (PEM) to trust for the issuer, besides the
+  # system's. Empty trusts the system's only.
+  caConfigMap:
+    name: ""
+    key: ca.crt
+
+# The API server every request goes to, with the user's own token.
+kubernetes:
+  server: https://kubernetes.default.svc
+  # The CA that signs the API server's certificate. Every namespace has
+  # kube-root-ca.crt; reading it is not using the service account.
+  caConfigMap:
+    name: kube-root-ca.crt
+    key: ca.crt
+
+# A kubernetes.io/tls Secret krm-foyer serves HTTPS with, on port 8443. Empty serves
+# plain HTTP on 8080, which is only acceptable behind an ingress that terminates TLS on
+# the same host: that hop carries session cookies. See docs/ingress.md.
+tls:
+  secretName: ""
+
+# Bounds on what one session, and the replica, may use (docs/bounds.md). Each one left
+# out keeps krm-foyer's own default, which `krm-foyer -h` prints.
+#   sessionIdleTimeout, sessionAbsoluteTimeout, sessionCheckInterval,
+#   maxResponseDuration, streamWriteTimeout: Go durations, such as 30s or 8h
+#   maxSessionConcurrentRequests, maxConcurrentRequests, maxSessionStreams,
+#   maxStreams, sessionRequestBurst, maxResponseBytes: whole numbers
+#   sessionRequestRate: requests a second
+bounds: {}
+
+# Resources whose streams share one watch per scope (docs/watches.md), as kubectl names
+# them: notes.hello.krm-foyer.example, configmaps. Empty opens every watch as its user.
+sharedWatches:
+  resources: []
+  # The identity shared watches are opened with. Created, it may list and watch the
+  # resources above and create subjectaccessreviews, and nothing else; its token is a
+  # Secret named <name>-token. Not created, the account named, and a token Secret named
+  # <name>-token, must already exist.
+  serviceAccount:
+    create: true
+    # Empty is <fullname>-shared.
+    name: ""
+  # recheckInterval, decisionTTL (Go durations) and qps; left out keeps the default.
+  tuning: {}
+
+metrics:
+  # Serves Prometheus metrics on port 9090, apart from the origin, behind a Service of
+  # their own (<fullname>-metrics).
+  enabled: true
+
+image:
+  repository: ghcr.io/configbutler/krm-foyer
+  # Empty is the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# The pod's own service account. krm-foyer never sends a request as it: every request
+# carries the user's token, or the shared-watch identity's for shared watches. So it
+# gets no grants here, and its token is not mounted.
+serviceAccount:
+  create: true
+  # Empty is <fullname>.
+  name: ""
+  annotations: {}
+  # Mounts its token anyway. Only for a test that makes the account powerful on
+  # purpose, to prove krm-foyer never falls back to it, as the e2e fixture does.
+  automountToken: false
+
+service:
+  # ClusterIP, or NodePort with nodePort set to choose the port.
+  type: ClusterIP
+  nodePort: null
+
+# Sessions live in memory, so there is one replica, and an update replaces it: every
+# session ends then. See docs/roadmap.md for shared storage.
+
+podAnnotations: {}
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+nameOverride: ""
+fullnameOverride: ""

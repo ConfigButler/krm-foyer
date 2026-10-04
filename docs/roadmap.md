@@ -121,8 +121,10 @@ Security items need tests that try to get past the boundary.
 - [ ] Coverage baseline that ratchets upward
 - [x] Fuzz tests for path checking, the upstream response check, the CSRF rule and
       return paths, with a short fuzz run of each in `task verify`
-- [ ] Helm chart with `values.schema.json`, `helm lint`, `helm template` tests, and e2e
+- [x] Helm chart with `values.schema.json`, `helm lint`, `helm template` tests, and e2e
       that installs through the chart
+- [x] Publish the chart with each release: an OCI artifact beside the image, with build
+      provenance
 - [x] Release workflow configured to generate an SBOM and attest build provenance
 - [ ] Signed multi-arch image (cosign keyless), with documented artifact verification
 - [ ] Dependency/image vulnerability scanning inside the CI image
