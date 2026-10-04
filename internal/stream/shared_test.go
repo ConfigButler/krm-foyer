@@ -354,13 +354,32 @@ func TestASharedStreamAsksAboutEachUser(t *testing.T) {
 		(attrs.Verb != "list" && attrs.Verb != "watch") {
 		t.Errorf("asked about %+v; want list or watch of notes in hello", attrs)
 	}
-	// Decisions are reused across label selectors because the reviews ask about none
-	// (see decisions.Authorize). Should they start to, the key must take them.
-	if attrs != nil && (attrs.LabelSelector != nil || attrs.FieldSelector != nil) {
-		t.Errorf("the reviews now ask about selectors (%+v): key decisions on them", attrs)
-	}
 	if paths := api.requestsWith("carol-token"); strings.Join(paths, ",") != "POST /apis/authentication.k8s.io/v1/selfsubjectreviews" {
 		t.Errorf("carol's token was sent with %q; want her SelfSubjectReview alone", paths)
+	}
+}
+
+// Decisions are reused across label selectors because the reviews ask about none
+// (see decisions.Authorize). This fails if they start to, for a stream that asks for
+// a selector: the key must then take it.
+func TestTheReviewsAskAboutNoSelector(t *testing.T) {
+	api := newSharedAPI(t)
+	f := sharedFoyer(t, api, byHeader{}, nil, time.Minute)
+	f.open(t.Context(), t, notes+"&labelSelector=app%3Dnotes", as(userToken)).until(t, "synced")
+	verbs := map[string]bool{}
+	for _, spec := range api.subjectReviews() {
+		attrs := spec.ResourceAttributes
+		if attrs == nil {
+			t.Fatalf("a review without resource attributes: %+v", spec)
+		}
+		verbs[attrs.Verb] = true
+		if attrs.LabelSelector != nil || attrs.FieldSelector != nil {
+			t.Errorf("the %s review asks about selectors (%+v, %+v): key decisions on them",
+				attrs.Verb, attrs.LabelSelector, attrs.FieldSelector)
+		}
+	}
+	if !verbs["list"] || !verbs["watch"] {
+		t.Errorf("reviews of %v; want both list and watch", verbs)
 	}
 }
 

@@ -102,11 +102,16 @@ the trade-off between the interval and the load ([watches](../watches.md#load-on
 
 ## Ask 12: recheck once per principal and scope
 
-**The problem.** Each subscriber has its own recheck timer. A user with nine tabs on one
-scope is nine timers, each asking the same two questions, and the timers drift apart
-as the tabs open at different times. The reviews then scale with streams, not with
-users: with 200 users each on nine scopes, about 120 reviews a second at a 30-second
-interval, against 13 for one scope.
+**The problem.** Each subscriber has its own recheck timer. A user with nine tabs on
+**one** scope is nine timers, each asking the same two questions, and the timers drift
+apart as the tabs open at different times. Without reuse, the reviews scale with
+streams rather than with users and scopes: 200 users with nine tabs each on one scope
+cost about 120 reviews a second at a 30-second interval, where 13 would do.
+
+That multiplier is what this ask removes. It is different from nine **different**
+scopes: 200 users each on nine scopes are nine questions per user, about 120 reviews a
+second however checks are coalesced. Only a longer interval cuts that, which ask 11
+would make safe.
 
 **What we suggest,** either of:
 
@@ -122,7 +127,9 @@ authorizer with such a cache: a decision is reused for 10 seconds for exactly th
 subject and asked attributes, two checks at once wait for one answer, and an error is
 never kept. A fuzz test checks that the cache never changes an answer. Reuse still
 depends on the timers falling within one lifetime of each other, which ask 12's first
-form would make unnecessary.
+form would make unnecessary; and as a lifetime starts when its review finishes,
+whether a timer lands inside it is a matter of milliseconds, so the counts can only be
+planned roughly.
 
 ## Ask 13: say which attributes the review asks about
 

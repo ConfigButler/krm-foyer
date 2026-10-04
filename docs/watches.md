@@ -144,38 +144,47 @@ session-check interval, as before.
 
 Per stream opened: one SelfSubjectReview. Then two SubjectAccessReviews per decision,
 and decisions are made per **user and scope**, not per stream. While a user has
-streams of a scope open, the API server is asked about that pair:
+streams of a scope open, the API server is asked about that pair roughly:
 
-- at least once per recheck interval, when all its streams recheck within one
-  decision's lifetime of each other, as one page's do;
-- at most once per decision lifetime, when its streams were opened far apart and
-  recheck at scattered times.
+- once per recheck interval, when all its streams recheck within one decision's
+  lifetime of each other, as one page's do;
+- up to once per decision lifetime, when its streams were opened far apart and recheck
+  at scattered times.
 
-So the steady load lies between `2 × pairs / recheck interval` and
-`2 × pairs / decision lifetime` reviews a second, where *pairs* is the number of
-distinct (user, scope) combinations with a stream open. The rehearsal, 200 users on
-one scope, opening together, measured the lower end: 12.9 reviews a second
-([the rehearsal](bounds.md#measured-the-rehearsal)). The same 200 users on nine
-distinct scopes each would be nine times that, before the decision lifetime's
-multiplier. Each review is cheap for the API server (an in-memory RBAC evaluation, no
-storage), but they add up, and the shared-watch identity's client sends at most
-`-shared-watch-qps` (100) a second, bursts twice that; the API server's priority and
-fairness applies on top. Reviews it cannot send in time show as `error` results and
-`UPSTREAM_UNAVAILABLE` streams, never as streams served without a check.
+So, **as a planning estimate,** the steady load is around `2 × pairs / recheck
+interval` reviews a second, and up to `2 × pairs / decision lifetime`, where *pairs* is
+the number of distinct (user, scope) combinations with a stream open. Exact counts
+depend on timing: a decision's lifetime starts when its review finishes, so a recheck
+can land just inside it (and reuse it) or just outside (and ask again), and a run can
+come out below the first figure. The rehearsal, 200 users on one scope opening
+together, measured 12.9 reviews a second ([the rehearsal](bounds.md#measured-the-rehearsal)).
+The same 200 users on nine distinct scopes each are nine times as many pairs, so nine
+times the load; reusing decisions cannot remove that, since each scope is its own
+question.
 
-How the two flags trade revocation time against load, for 200 users each on one scope
-(nine scopes: multiply the load by nine):
+What a review costs depends on the cluster's authorizers. With RBAC alone, it is an
+in-memory evaluation, with no storage. With a webhook authorizer in the chain, it can be
+a blocking HTTP call to that webhook, so the load lands there too, at the webhook's
+latency; measure it with `krm_foyer_access_check_duration_seconds`. The shared-watch
+identity's client sends at most `-shared-watch-qps` (100) requests a second, bursts
+twice that, and the API server's priority and fairness applies on top. Reviews that
+cannot be sent in time show as `error` results and `UPSTREAM_UNAVAILABLE` streams,
+never as streams served without a check.
+
+How the two flags trade revocation time against load, as planning estimates for 200
+users each on one scope (nine scopes each: multiply the load by nine):
 
 | `-shared-watch-recheck-interval` / `-decision-ttl` | Revocation, at most | Reviews a second, together … scattered |
 | --- | --- | --- |
-| 30s / 10s (default) | 60 s | 13 … 40 |
-| 30s / 30s | 80 s | 13 |
-| 60s / 30s | 110 s | 7 … 13 |
-| 120s / 60s | 200 s | 3 … 7 |
+| 30s / 10s (default) | 60 s | about 13 … up to 40 |
+| 30s / 30s | 80 s | about 13 or fewer |
+| 60s / 30s | 110 s | about 7 … up to 13 |
+| 120s / 60s | 200 s | about 3 … up to 7 |
 
-A lifetime equal to the interval removes the spread entirely, for 20 seconds more
-revocation time at the default interval. The defaults favour revocation; relax them where the load matters
-more, by measuring `krm_foyer_access_checks_total{source="api_server"}`.
+A lifetime as long as the interval caps the scattered case at the together figure, for
+20 seconds more revocation time at the default interval. The defaults favour
+revocation; relax them where the load matters more, and measure the result with
+`krm_foyer_access_checks_total{source="api_server"}` rather than relying on the table.
 
 #### Why not check only when something changes?
 
