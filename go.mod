@@ -3,8 +3,8 @@ module github.com/ConfigButler/krm-foyer
 go 1.27.1
 
 require (
-	github.com/ConfigButler/krm-stream/gateway v0.6.0
-	github.com/ConfigButler/krm-stream/gateway/kube v0.6.0
+	github.com/ConfigButler/krm-stream/gateway v0.7.0
+	github.com/ConfigButler/krm-stream/gateway/kube v0.7.0
 	github.com/chromedp/cdproto v0.0.0-20260714215040-dc233986426f
 	github.com/chromedp/chromedp v0.16.0
 	github.com/coreos/go-oidc/v3 v3.21.0

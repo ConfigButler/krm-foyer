@@ -169,6 +169,10 @@ func TestLiveFollowsTheSession(t *testing.T) {
 	if !cred.Live(t.Context()) {
 		t.Fatal("a live session's credential is not live")
 	}
+	// Log lines name the user as the issuer did.
+	if cred.User != alice {
+		t.Errorf("User = %q, want %q", cred.User, alice)
+	}
 	// The session's name for bounds is stable, its own, and not its ID.
 	again, _ := h.auth.Token(cookieRequest(b))
 	other := h.browser()

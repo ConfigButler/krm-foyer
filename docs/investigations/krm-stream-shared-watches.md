@@ -9,6 +9,24 @@ that sharing costs. For each we say what krm-foyer does meanwhile. Everything wa
 checked against krm-stream main at `5ca19ed` (gateway 0.6.0) on 2026-10-04, by reading
 the source and by tests in krm-foyer that reproduce each problem.
 
+## Status (2026-10-04): asks 9, 10 and 13 are in krm-stream 0.7.0
+
+krm-stream took ask 9, the "require a write timeout" form of ask 10, and the documentation
+part of ask 13 ([its proposal 0008](https://github.com/ConfigButler/krm-stream/blob/main/docs/proposals/0008-shared-watch-hardening.md)),
+and krm-foyer moved to 0.7.0:
+
+- **Ask 9:** krm-foyer's upstream backend opens the shared watch in `Watch` again; the
+  workaround that opened it on the first `Next` is gone. The test that reproduced the
+  problem stays, and fails against 0.6.0.
+- **Ask 10:** nothing changed in krm-foyer, which always set a write timeout. A test now
+  checks that every route in front of a stream lets it flush and set write deadlines.
+- **Ask 13:** the decision cache's key cites krm-stream's documented review attributes; the
+  test that fails if a review starts carrying a selector stays, since the key is
+  krm-foyer's to get right.
+
+Asks 11 and 12 are deferred, with what would reopen them recorded in the proposal.
+krm-foyer keeps rechecking on the timer and reusing decisions in its own authorizer.
+
 ## The asks at a glance
 
 | # | Ask | Priority | What krm-foyer does meanwhile |

@@ -170,7 +170,7 @@ subresources, which return whatever their backend sends:
 A held-back response is answered as an [interruption](#interruptions): code gets a
 `Status` with status 502 and the reason, and a person browsing gets a page that
 explains it. For a redirect, both carry the target; for HTML, the page shows its source
-as escaped text. Every interruption is logged.
+as escaped text. Every interruption is logged ([how](#interruptions)).
 
 ### Interruptions
 
@@ -220,6 +220,13 @@ Rules:
   API server's answer and reaches the tab as its JSON. Interruptions are only what
   krm-foyer itself decided. For a 403, [`/_foyer/access`](#what-may-i-do) is where a
   person finds out why.
+- **Every refusal is one log line**, whoever refused: `"msg":"refused"`, with `by`
+  (`krm-foyer` or `kubernetes`), the `user` as the issuer named them once the request
+  has a session, the `route`, method and path (never the query), and the reason. That is
+  an interruption below 500; the API server's 401, 403, 409 or 422 on `/k8s`; and a
+  stream's `FORBIDDEN`, `UNAUTHENTICATED` or `SCOPE_INVALID`, with the scope asked for.
+  An interruption from 500 is a failure, not a refusal, and is logged as
+  `"msg":"interruption"`. What the API server wrote is never logged.
 - **Permission is a link, never an action.** Following a redirect is a navigation the
   user starts; nothing is re-sent, and no request with a body is ever continued. An
   upstream HTML page is never rendered on the origin, with or without consent: consent

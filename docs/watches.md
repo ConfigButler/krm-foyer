@@ -126,7 +126,10 @@ A grant taken away ends a shared stream within:
 The last line is there because krm-stream delivers events and rechecks one at a time:
 a recheck waits for the write in progress. Without a bound on writes, a browser that
 stopped reading would hold its stream open, unchecked, until the 30-minute response
-duration. With it, the write fails and the stream ends.
+duration. With it, the write fails and the stream ends. Since 0.7.0 krm-stream refuses
+timed rechecks without a write timeout, and its
+[revocation budget](https://github.com/ConfigButler/krm-stream/blob/main/docs/auth.md#revocation-budget)
+breaks down the same parts.
 
 Logout and session expiry are not affected: they end every stream within the
 session-check interval, as before.

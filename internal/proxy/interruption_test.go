@@ -268,17 +268,70 @@ func TestSignInReturnsToTheURL(t *testing.T) {
 	}
 }
 
-// Every interruption is logged with the path that was asked for, including the
-// ones decided after the API server answered.
+// Every interruption is logged once, with the path that was asked for, including
+// the ones decided after the API server answered. One below 500 is krm-foyer
+// refusing the request, logged as a refusal like the API server's; one from 500 is
+// a failure. The user is named once the request has one.
 func TestInterruptionsAreLoggedWithThePath(t *testing.T) {
 	for _, tc := range interruptionCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			f := tc.foyer(t)
 			f.request(t, http.MethodGet, tc.target, nil, tc.header)
 			path, _, _ := strings.Cut(tc.target, "?")
-			if logs := f.logs.String(); !strings.Contains(logs, `"msg":"interruption"`) || !strings.Contains(logs, `"path":"`+path+`"`) {
-				t.Errorf("logged:\n%s", logs)
+			want := map[string]any{"msg": "interruption", "path": path, "route": "/k8s", "status": float64(tc.status)}
+			if tc.status < http.StatusInternalServerError {
+				want["msg"], want["by"] = "refused", gate.ByFoyer
+			}
+			lines := logLines(t, f.logs.String(), want)
+			if len(lines) != 1 {
+				t.Fatalf("%d lines like %v; logged:\n%s", len(lines), want, f.logs.String())
+			}
+			// Past the credential: the bound counts per session, and the API
+			// server's answers come after the gate.
+			admitted := tc.occupy || tc.upstream != nil
+			if user, ok := lines[0]["user"]; admitted != ok || (ok && user != testUser) {
+				t.Errorf("user = %v; want it named only past the credential", user)
 			}
 		})
+	}
+}
+
+// The API server refusing the user is logged once, as krm-foyer's own refusals
+// are: who, what, and why. Any other answer is not a refusal, and is not logged.
+func TestKubernetesRefusalsAreLogged(t *testing.T) {
+	api := newAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		status, _ := strconv.Atoi(r.URL.Query().Get("answer"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, `{"kind":"Status","message":"`+userToken+`"}`)
+	})
+	f := newFoyer(t, api, credentials{token: userToken})
+	for status, reason := range map[int]string{
+		http.StatusUnauthorized: "Unauthorized", http.StatusForbidden: "Forbidden",
+		http.StatusConflict: "Conflict", http.StatusUnprocessableEntity: "Unprocessable Entity",
+		http.StatusOK: "", http.StatusNotFound: "", http.StatusTooManyRequests: "", http.StatusInternalServerError: "",
+	} {
+		before := len(logLines(t, f.logs.String(), nil))
+		target := "/k8s/api/v1/namespaces/a/configmaps?answer=" + strconv.Itoa(status)
+		if resp := f.get(t, target); resp.StatusCode != status {
+			t.Fatalf("GET %s = %d", target, resp.StatusCode)
+		}
+		lines := logLines(t, f.logs.String(), nil)[before:]
+		if reason == "" {
+			if len(lines) != 0 {
+				t.Errorf("%d is not a refusal, but logged %v", status, lines)
+			}
+			continue
+		}
+		want := map[string]any{
+			"msg": "refused", "by": gate.ByKubernetes, "user": testUser, "status": float64(status), "reason": reason,
+			"method": http.MethodGet, "path": "/k8s/api/v1/namespaces/a/configmaps", "route": "/k8s",
+		}
+		if len(lines) != 1 || len(logLines(t, f.logs.String(), want)) != 1 {
+			t.Errorf("%d: logged %v; want one line like %v", status, lines, want)
+		}
+	}
+	if strings.Contains(f.logs.String(), userToken) {
+		t.Errorf("what the API server wrote reached the log:\n%s", f.logs.String())
 	}
 }

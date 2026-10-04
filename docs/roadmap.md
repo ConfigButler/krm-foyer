@@ -77,8 +77,9 @@ Each step makes pending specs real and ends with `task verify` green.
    opening and every recheck, reused briefly for exactly the same question. Metrics
    count watches by identity, the streams on shared watches and every access decision.
    Every stream's writes are bounded, so a browser that stops reading cannot hold off
-   a recheck, and a shared watch slow to open holds up no other scope; both are asked
-   of krm-stream as well ([requests](investigations/krm-stream-shared-watches.md)).
+   a recheck, and a shared watch slow to open holds up no other scope; krm-stream 0.7.0
+   took both from krm-foyer's [requests](investigations/krm-stream-shared-watches.md),
+   so the second is krm-stream's own now.
    The hello example's notes are shared, and the rehearsal runs both ways. A
    [decision guide](watches.md) says when to share, stream per-user, or use a native
    watch, which stays available but is not where the work goes.
@@ -295,8 +296,9 @@ Security items need tests that try to get past the boundary.
 
 ### Seeing what happened
 
-- [ ] One log line per refusal (policy denial, upstream 401, 403, 409 or 422) with
-      subject, route and reason
+- [x] One log line per refusal (krm-foyer's own, the API server's 401, 403, 409 or 422,
+      and a stream's refusals) with user, route and reason, and who refused (unit
+      tests, each checked against a build broken on purpose)
 - [x] Metrics on every bound, requests in flight, why responses are cut short, and
       interruptions by reason, on a listener of their own (step 4; see
       [metrics](bounds.md#metrics))

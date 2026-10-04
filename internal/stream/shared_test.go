@@ -334,6 +334,9 @@ func TestASharedStreamAsksAboutEachUser(t *testing.T) {
 	if strings.Contains(carol.raw.String(), "note first") {
 		t.Errorf("carol was sent the shared watch's notes: %s", carol.raw.String())
 	}
+	if refusals := logLines(f.logs.String(), map[string]any{"msg": "refused", "by": gate.ByKubernetes, "code": "FORBIDDEN"}); len(refusals) != 1 {
+		t.Errorf("carol's refusal logged %d times as Kubernetes':\n%s", len(refusals), f.logs.String())
+	}
 
 	var carols []authorizationv1.SubjectAccessReviewSpec
 	for _, spec := range api.subjectReviews() {
@@ -360,8 +363,9 @@ func TestASharedStreamAsksAboutEachUser(t *testing.T) {
 }
 
 // Decisions are reused across label selectors because the reviews ask about none
-// (see decisions.Authorize). This fails if they start to, for a stream that asks for
-// a selector: the key must then take it.
+// (see decisions.Authorize). krm-stream documents that since 0.7.0 and announces a
+// change to it; this fails if one comes anyway, for a stream that asks for a
+// selector: the key must then take it.
 func TestTheReviewsAskAboutNoSelector(t *testing.T) {
 	api := newSharedAPI(t)
 	f := sharedFoyer(t, api, byHeader{}, nil, time.Minute)
@@ -373,9 +377,9 @@ func TestTheReviewsAskAboutNoSelector(t *testing.T) {
 			t.Fatalf("a review without resource attributes: %+v", spec)
 		}
 		verbs[attrs.Verb] = true
-		if attrs.LabelSelector != nil || attrs.FieldSelector != nil {
-			t.Errorf("the %s review asks about selectors (%+v, %+v): key decisions on them",
-				attrs.Verb, attrs.LabelSelector, attrs.FieldSelector)
+		if attrs.LabelSelector != nil || attrs.FieldSelector != nil || attrs.Subresource != "" {
+			t.Errorf("the %s review asks about selectors or a subresource (%+v, %+v, %q): key decisions on them",
+				attrs.Verb, attrs.LabelSelector, attrs.FieldSelector, attrs.Subresource)
 		}
 	}
 	if !verbs["list"] || !verbs["watch"] {
@@ -774,8 +778,13 @@ func TestAStuckOpeningHoldsUpNoOtherScope(t *testing.T) {
 			return
 		}
 		stuck <- struct{}{}
-		<-r.Context().Done() // no answer, not even headers, until krm-foyer gives up
-		released <- struct{}{}
+		// No answer, not even headers, until krm-foyer gives up; or until the test
+		// ends, so a krm-foyer that never gives up fails it rather than hangs it.
+		select {
+		case <-r.Context().Done():
+			released <- struct{}{}
+		case <-t.Context().Done():
+		}
 	}
 	m := metrics.New()
 	f := sharedFoyer(t, api, byHeader{}, m, time.Minute)

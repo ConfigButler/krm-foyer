@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/ConfigButler/krm-stream/gateway"
 )
 
 func get(t *testing.T, path string) *httptest.ResponseRecorder {
@@ -180,5 +182,40 @@ func TestStreamRoute(t *testing.T) {
 	}
 	if rec := get(t, "/stream/v1"); rec.Code != http.StatusNotFound {
 		t.Errorf("without streams, /stream/v1 = %d", rec.Code)
+	}
+}
+
+// A stream gets a response writer it can flush and give write deadlines, over
+// HTTP/1.1 and HTTP/2, through every route krm-foyer puts in front of it. The write
+// timeout that bounds a stalled browser, and with it a shared stream's recheck,
+// depends on both; a wrapper that hid them would end every stream at once.
+func TestStreamsCanFlushAndSetWriteDeadlines(t *testing.T) {
+	got := make(chan error, 1)
+	h := New(Config{Version: "test", Kubernetes: http.NotFoundHandler(), Stream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		got <- gateway.CheckHTTPStreaming(w)
+	})})
+	h1 := httptest.NewServer(h)
+	t.Cleanup(h1.Close)
+	h2 := httptest.NewUnstartedServer(h)
+	h2.EnableHTTP2 = true
+	h2.StartTLS()
+	t.Cleanup(h2.Close)
+
+	for name, srv := range map[string]*httptest.Server{"HTTP/1.1": h1, "HTTP/2": h2} {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/stream/v1?resource=notes&version=v1", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if want := name[len("HTTP/")] - '0'; resp.ProtoMajor != int(want) {
+			t.Errorf("%s: served over %s", name, resp.Proto)
+		}
+		if err := <-got; err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
