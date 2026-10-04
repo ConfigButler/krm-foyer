@@ -124,10 +124,12 @@ docker run --rm -p 8080:8080 ghcr.io/configbutler/krm-foyer:$(git describe --tag
 ```
 
 Or in a cluster, with the [Helm chart](charts/krm-foyer), which the e2e suite installs
-too:
+too. Each release publishes it beside the image (from a checkout, `charts/krm-foyer`
+works in its place):
 
 ```bash
-helm install krm-foyer charts/krm-foyer --namespace krm-foyer --create-namespace \
+helm install krm-foyer oci://ghcr.io/configbutler/charts/krm-foyer --version <release> \
+  --namespace krm-foyer --create-namespace \
   --set publicURL=https://app.example.com \
   --set oidc.issuer=https://issuer.example.com,oidc.clientID=krm-foyer \
   --set oidc.clientSecret.secretName=krm-foyer-oidc,tls.secretName=krm-foyer-tls

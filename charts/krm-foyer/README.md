@@ -8,7 +8,8 @@ With `sharedWatches.resources` set, it also creates the
 ```bash
 kubectl -n krm-foyer create secret generic krm-foyer-oidc --from-literal=client-secret=...
 kubectl -n krm-foyer create secret tls krm-foyer-tls --cert tls.crt --key tls.key
-helm install krm-foyer charts/krm-foyer --namespace krm-foyer \
+helm install krm-foyer oci://ghcr.io/configbutler/charts/krm-foyer --version <release> \
+  --namespace krm-foyer \
   --set publicURL=https://app.example.com \
   --set oidc.issuer=https://issuer.example.com,oidc.clientID=krm-foyer \
   --set oidc.clientSecret.secretName=krm-foyer-oidc,tls.secretName=krm-foyer-tls

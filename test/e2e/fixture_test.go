@@ -132,7 +132,7 @@ func loadFixture() *fixture {
 	// The names the suite reaches without DNS: Dex through the port-forward on this
 	// container's loopback (port-forward.sh), as a browser does, and krm-foyer directly
 	// through its NodePort on the node: the foyer specs test krm-foyer, not the front door.
-	// The brief instance (foyer-brief.yaml) answers under the same name, on another
+	// The brief instance (foyer-brief-values.yaml) answers under the same name, on another
 	// NodePort.
 	transportTo := func(foyerAddr string) *http.Transport {
 		addrs := map[string]string{
