@@ -4,8 +4,8 @@ description: >-
   Browser login, Kubernetes API access and live resources on one origin, with
   every access decision left to the API server
 type: application
-version: 0.1.0
-appVersion: 0.1.0
+version: 0.2.0
+appVersion: 0.2.0
 keywords:
   - kubernetes
   - oidc
