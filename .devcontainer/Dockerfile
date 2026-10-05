@@ -56,6 +56,7 @@ RUN apt-get update \
 # HELM_VERSION / HELM_SHA256 -> https://github.com/helm/helm/releases; the checksum is
 #   get.helm.sh/helm-<version>-linux-amd64.tar.gz.sha256sum. The e2e fixture installs
 #   Traefik with it.
+# ORAS_VERSION          -> https://github.com/oras-project/oras/releases
 ENV PATH="/go/bin:/usr/local/go/bin:${PATH}" \
     GOLANGCI_LINT_VERSION=v2.13.2 \
     TASK_VERSION=v3.53.1 \
@@ -64,7 +65,8 @@ ENV PATH="/go/bin:/usr/local/go/bin:${PATH}" \
     ACTIONLINT_VERSION=1.7.12 \
     HADOLINT_VERSION=2.15.1 \
     HELM_VERSION=v4.3.0 \
-    HELM_SHA256=86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb
+    HELM_SHA256=86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb \
+    ORAS_VERSION=1.3.4
 
 RUN test "$(dpkg --print-architecture)" = "amd64" \
     || (echo "This devcontainer currently supports amd64 only." && exit 1)
@@ -91,6 +93,20 @@ RUN curl -fsSL -o /tmp/helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-lin
     && chmod +x /usr/local/bin/helm \
     && rm /tmp/helm.tar.gz \
     && helm version --short
+
+# oras pushes charts/artifacthub-repo.yml beside the chart under the `artifacthub.io` tag
+# (release.yml), a plain OCI artifact that `helm push` cannot produce. The checksum file
+# comes from the same release as the archive.
+RUN asset="oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
+    && base="https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}" \
+    && curl -fsSL -o /tmp/oras.tar.gz "${base}/${asset}" \
+    && curl -fsSL -o /tmp/oras-checksums.txt "${base}/oras_${ORAS_VERSION}_checksums.txt" \
+    && awk -v a="${asset}" '$2 == a { print $1 "  /tmp/oras.tar.gz" }' /tmp/oras-checksums.txt \
+       | sha256sum -c - \
+    && tar -xzO -f /tmp/oras.tar.gz oras > /usr/local/bin/oras \
+    && chmod +x /usr/local/bin/oras \
+    && rm /tmp/oras.tar.gz /tmp/oras-checksums.txt \
+    && oras version
 
 RUN curl -fsSL -o /usr/local/bin/hadolint "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64" \
     && chmod +x /usr/local/bin/hadolint \

@@ -1,0 +1,17 @@
+# Artifact Hub repository metadata, as gitops-reverser publishes its own.
+#
+# This is not part of the Helm chart. It describes the repository
+# oci://ghcr.io/configbutler/charts/krm-foyer to Artifact Hub, and the chart job in
+# .github/workflows/release.yml pushes it to that repository under the fixed
+# `artifacthub.io` tag on every release, so this file stays the source of truth. It lives
+# outside charts/krm-foyer/ so `helm package` does not bundle it into the chart.
+#
+# Format: https://github.com/artifacthub/hub/blob/master/docs/metadata/artifacthub-repo.yml
+#
+# Once the repository is added in the Artifact Hub control panel, its repositoryID goes
+# here to earn the Verified Publisher badge.
+
+# Claims repository ownership. The email must match an Artifact Hub account exactly.
+owners:
+  - name: Simon Koudijs
+    email: simonkoudijs@gmail.com

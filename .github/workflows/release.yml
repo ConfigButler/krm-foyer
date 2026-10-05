@@ -149,6 +149,28 @@ jobs:
           digest="$(awk '/^Digest:/ { print $2 }' "$RUNNER_TEMP/push.log")"
           [ -n "$digest" ] || { echo "no digest in helm push's output" >&2; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      # Artifact Hub reads the repository metadata (ownership claim, verified publisher)
+      # from a plain OCI artifact under the fixed `artifacthub.io` tag of the chart
+      # repository, recognised by its media types. `helm push` cannot produce that shape,
+      # so oras does, as gitops-reverser does:
+      # https://artifacthub.io/docs/topics/repositories/helm-charts/
+      - name: push the Artifact Hub repository metadata
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:$CI_WORKDIR" -w "$CI_WORKDIR/charts" \
+            -e GITHUB_TOKEN -e GITHUB_ACTOR -e CHART "$CI_IMAGE" bash -lc '
+              set -euo pipefail
+              echo "$GITHUB_TOKEN" | oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+              oras push "$CHART:artifacthub.io" \
+                --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
+                artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
+            '
+      # Every login above happened inside the CI container. The attestation is pushed
+      # from the runner, which needs its own: without it the 0.1.0 release failed with
+      # "No credentials found for registry ghcr.io" after the chart itself was pushed.
+      - name: log in to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.CHART }}
