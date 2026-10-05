@@ -26,6 +26,20 @@ oidc:
     name: ""
     key: ca.crt
 
+# The Secret holding the keys session cookies are sealed with. Required. The chart
+# never creates or changes it, so the keys, and every session, survive an upgrade or
+# a restart. Create it once, with one key:
+#   kubectl create secret generic krm-foyer-session-keys \
+#     --from-literal=session-keys="$(head -c 32 /dev/urandom | base64)"
+# The value holds up to four keys, one per line: the first seals new cookies, every
+# one opens them. To rotate, put a new key first, keep the old one until the cookies
+# it sealed have expired (sessionAbsoluteTimeout), and restart krm-foyer after each
+# change: it reads the keys when it starts. Whoever reads this Secret can read every
+# user's token from their cookie, and make sessions of their own. See docs/design.md.
+sessionKeys:
+  secretName: ""
+  key: session-keys
+
 # The API server every request goes to, with the user's own token.
 kubernetes:
   server: https://kubernetes.default.svc
@@ -52,7 +66,7 @@ networkPolicy:
 
 # Bounds on what one session, and the replica, may use (docs/bounds.md). Each one left
 # out keeps krm-foyer's own default, which `krm-foyer -h` prints.
-#   sessionIdleTimeout, sessionAbsoluteTimeout, sessionCheckInterval,
+#   sessionAbsoluteTimeout, sessionCheckInterval,
 #   maxResponseDuration, streamWriteTimeout: Go durations, such as 30s or 8h
 #   maxSessionConcurrentRequests, maxConcurrentRequests, maxSessionStreams,
 #   maxStreams, sessionRequestBurst, maxResponseBytes: whole numbers
@@ -104,8 +118,9 @@ service:
   type: ClusterIP
   nodePort: null
 
-# Sessions live in memory, so there is one replica, and an update replaces it: every
-# session ends then. See docs/roadmap.md for shared storage.
+# One replica, which an update replaces. Sessions are in their cookies and survive
+# that; logins in progress and open responses do not. See docs/roadmap.md for more
+# replicas.
 
 podAnnotations: {}
 # Measured (docs/bounds.md): about 30 MiB idle, 250 to 330 MiB with 1800 small streams.

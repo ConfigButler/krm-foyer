@@ -1,5 +1,5 @@
 // Package auth is krm-foyer's login half: OIDC authorization code with PKCE, state and
-// nonce against one configured issuer, ending in a server-side session. It serves
+// nonce against one configured issuer, ending in a session sealed into a cookie. It serves
 // /auth/login, /auth/callback, /auth/session, /auth/logout and /auth/logged-out, and
 // gives the API half its credential: the token of the session a request may use, or
 // the answer to give instead. docs/design.md, "Login and sessions", is the contract.
@@ -202,17 +202,16 @@ type loginError struct {
 }
 
 var (
-	errNotLocal       = loginError{http.StatusBadRequest, "return-path-not-local", "The page to return to after signing in must be a path on this site."}
-	errNotReady       = loginError{http.StatusServiceUnavailable, "issuer-unavailable", "The sign-in service has not been reached yet. Try again in a moment."}
-	errNoTransaction  = loginError{http.StatusBadRequest, "login-not-in-progress", "This sign-in was not started in this browser, has expired, or has been used already."}
-	errMalformed      = loginError{http.StatusBadRequest, "malformed-callback", "The sign-in service sent back an incomplete answer."}
-	errState          = loginError{http.StatusBadRequest, "state-mismatch", "This answer does not belong to the sign-in this browser started."}
-	errIssuerRefused  = loginError{http.StatusBadRequest, "issuer-refused", "The sign-in service did not sign you in."}
-	errExchange       = loginError{http.StatusBadGateway, "token-exchange-failed", "The sign-in service did not issue a token."}
-	errIDToken        = loginError{http.StatusBadGateway, "id-token-invalid", "The sign-in service issued a token krm-foyer cannot accept."}
-	errNonce          = loginError{http.StatusBadGateway, "nonce-mismatch", "The sign-in service issued a token for a different sign-in."}
-	errSessionStorage = loginError{http.StatusServiceUnavailable, "session-store-unavailable", "Your session could not be stored. Try again in a moment."}
-	errTooMany        = loginError{http.StatusServiceUnavailable, "too-many-sessions", "Too many people are signed in. Try again later."}
+	errNotLocal      = loginError{http.StatusBadRequest, "return-path-not-local", "The page to return to after signing in must be a path on this site."}
+	errNotReady      = loginError{http.StatusServiceUnavailable, "issuer-unavailable", "The sign-in service has not been reached yet. Try again in a moment."}
+	errNoTransaction = loginError{http.StatusBadRequest, "login-not-in-progress", "This sign-in was not started in this browser, has expired, or has been used already."}
+	errMalformed     = loginError{http.StatusBadRequest, "malformed-callback", "The sign-in service sent back an incomplete answer."}
+	errState         = loginError{http.StatusBadRequest, "state-mismatch", "This answer does not belong to the sign-in this browser started."}
+	errIssuerRefused = loginError{http.StatusBadRequest, "issuer-refused", "The sign-in service did not sign you in."}
+	errExchange      = loginError{http.StatusBadGateway, "token-exchange-failed", "The sign-in service did not issue a token."}
+	errIDToken       = loginError{http.StatusBadGateway, "id-token-invalid", "The sign-in service issued a token krm-foyer cannot accept."}
+	errNonce         = loginError{http.StatusBadGateway, "nonce-mismatch", "The sign-in service issued a token for a different sign-in."}
+	errTooLarge      = loginError{http.StatusBadGateway, "session-too-large", "The sign-in service issued a token too large to keep in a session cookie."}
 )
 
 // issuerErrors are the error codes RFC 6749 and OIDC define for an authorization
@@ -407,18 +406,19 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = a.cfg.Sessions.Start(r.Context(), w, r, session.Session{
+	err = a.cfg.Sessions.Start(w, r, session.Session{
 		Issuer: idToken.Issuer, Subject: idToken.Subject, Email: claims.Email,
 		IDToken: raw, TokenExpiry: idToken.Expiry,
 	})
-	if errors.Is(err, session.ErrFull) {
-		a.logger.Warn("no room for another session")
-		a.fail(w, errTooMany, t.ReturnTo, "")
+	if errors.Is(err, session.ErrTooLarge) {
+		// The issuer's token, with its groups, is too large for a cookie: an
+		// integration problem to fix there, not here. The error says by how much.
+		a.logger.Warn("session does not fit in a cookie", "err", err)
+		a.fail(w, errTooLarge, t.ReturnTo, "")
 		return
 	}
 	if err != nil {
-		a.logger.Error("starting a session failed", "err", err)
-		a.fail(w, errSessionStorage, t.ReturnTo, "")
+		a.fail(w, errIDToken, t.ReturnTo, "")
 		return
 	}
 	// Not http.Redirect: it cleans a relative target with path.Clean, and the
@@ -447,7 +447,7 @@ func (a *Auth) session(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		a.refusal(err).Write(w)
 	default:
-		expires := a.cfg.Sessions.ExpiresAt(s)
+		expires := s.Expires
 		writeJSON(w, http.StatusOK, sessionState{
 			Authenticated: true, Issuer: s.Issuer, Subject: s.Subject, Email: s.Email,
 			ExpiresAt: &expires, CSRFToken: s.CSRFToken, CSRFHeader: session.CSRFHeader,
@@ -455,25 +455,24 @@ func (a *Auth) session(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// logout ends the session and answers 204. It needs the same proof as any
-// mutation, so another site cannot sign the user out. Without a session there is
-// nothing to protect: the cookie is cleared and the answer is the same.
+// logout clears the session cookie, ends the responses the session has open in this
+// process, and answers 204. It needs the same proof as any mutation, so another site
+// cannot sign the user out. Without a session there is nothing to protect: the
+// cookie is cleared and the answer is the same. It revokes nothing: a copy of the
+// cookie is a session until it expires (docs/design.md, "Sessions").
 func (a *Auth) logout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if _, err := a.cfg.Sessions.Use(r); err != nil && !errors.Is(err, session.ErrNoSession) {
 		a.refusal(err).Write(w)
 		return
 	}
-	if err := a.cfg.Sessions.End(r.Context(), w, r); err != nil {
-		a.refusal(err).Write(w)
-		return
-	}
+	a.cfg.Sessions.End(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // Token is the API half's credential (gate.Credentials): the ID token of the session
-// r may use, or the interruption to answer r with instead. Its Live asks the store
-// again, by r's cookie, whether that session still exists.
+// r may use, or the interruption to answer r with instead. Its Live says whether the
+// session has expired, or been ended in this process, since.
 func (a *Auth) Token(r *http.Request) (gate.Credential, *interruption.Interruption) {
 	s, err := a.cfg.Sessions.Use(r)
 	if err != nil {
@@ -483,20 +482,16 @@ func (a *Auth) Token(r *http.Request) (gate.Credential, *interruption.Interrupti
 	if user == "" {
 		user = s.Subject
 	}
-	return gate.Credential{Token: s.IDToken, User: user, Session: session.Handle(r), Live: func(ctx context.Context) bool {
-		err := a.cfg.Sessions.Check(r.WithContext(ctx))
-		if err != nil && !errors.Is(err, session.ErrNoSession) {
-			a.logger.Warn("session store failed during a session check", "err", err)
-		}
-		// An answer that came too late is no answer: fail closed.
-		return err == nil && ctx.Err() == nil
+	live := a.cfg.Sessions.Watch(r.Context(), s)
+	return gate.Credential{Token: s.IDToken, User: user, Session: s.Handle(), Live: func(ctx context.Context) bool {
+		return live() && ctx.Err() == nil
 	}}, nil
 }
 
 // refusal is the answer to a request the session manager did not let through. This
 // is the one place a session error becomes HTTP. Its refusals are 403s with reasons of
-// their own, never RBAC's Forbidden; any error that is not one of them means the
-// store could not say, and nothing is decided from it.
+// their own, never RBAC's Forbidden; any other error, which the manager does not
+// give, decides nothing.
 func (a *Auth) refusal(err error) *interruption.Interruption {
 	switch {
 	case errors.Is(err, session.ErrNoSession):
@@ -512,7 +507,7 @@ func (a *Auth) refusal(err error) *interruption.Interruption {
 			Message: "this request needs the session's CSRF token in the " + session.CSRFHeader + " header; see /auth/session",
 		}
 	default:
-		a.logger.Error("session store failed", "err", err)
+		a.logger.Error("session check failed", "err", err)
 		return &interruption.Interruption{
 			Status: http.StatusServiceUnavailable, Reason: "ServiceUnavailable",
 			Message: "the session could not be checked; try again later",

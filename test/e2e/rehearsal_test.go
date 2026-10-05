@@ -5,7 +5,6 @@ package e2e
 import (
 	"bufio"
 	"fmt"
-	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -123,28 +122,7 @@ func rehearse(ctx SpecContext, r rehearsal, name string) {
 	fx.kubectl(args...)
 
 	By("starting from a fresh krm-foyer, whose resident memory only grows while this runs")
-	fx.kubectl("-n", fx.foyerNamespace, "rollout", "restart", "deployment/krm-foyer")
-	fx.kubectl("-n", fx.foyerNamespace, "rollout", "status", "deployment/krm-foyer", "--timeout=120s")
-	// The old pod stops listening as soon as it is told to stop, and may still be
-	// routed to for a moment: wait until it is gone, and the new one answers.
-	eventually(ctx, func() string {
-		return fx.kubectl("-n", fx.foyerNamespace, "get", "pods", "-l", "app.kubernetes.io/instance=krm-foyer", "-o", "jsonpath={.items[*].status.phase}")
-	}).WithTimeout(time.Minute).Should(Equal("Running"))
-	eventually(ctx, func() error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fx.foyerURL+"/auth/session", nil)
-		if err != nil {
-			return err
-		}
-		resp, err := fx.browser().client.Do(req)
-		if err != nil {
-			return err
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusUnauthorized {
-			return fmt.Errorf("/auth/session answered %d", resp.StatusCode)
-		}
-		return nil
-	}).Should(Succeed())
+	fx.replaceFoyer(ctx, "rollout", "restart", "deployment/krm-foyer")
 	idleResident := fx.metric("process_resident_memory_bytes")
 	baseStreams := fx.metric("krm_foyer_streams_open")
 	baseUser, baseShared := fx.metric(userWatches), fx.metric(sharedWatches)
@@ -231,6 +209,28 @@ func rehearse(ctx SpecContext, r rehearsal, name string) {
 			askedOpening, reusedOpening, hold, askedHold, 2*askedHold/hold.Seconds(), reusedHold)
 	}
 
+	By("measuring the session cookies: the user's token, sealed, is the whole session")
+	var cookieBytes []int
+	for _, u := range users {
+		cookieBytes = append(cookieBytes, len(sessionCookie)+1+len(u.b.cookie(sessionCookie)))
+	}
+	slices.Sort(cookieBytes)
+
+	By("replacing krm-foyer with every stream open, and every identity reconnecting with the cookie it had")
+	fx.replaceFoyer(ctx, "rollout", "restart", "deployment/krm-foyer")
+	replaced := time.Now()
+	// Each ended when its pod stopped, by now: end fails the spec if one is open.
+	inParallel(total, total, func(i int) { _, _ = streams[i].end(time.Minute) })
+	// 200 at a time: browsers reconnect after a wait of their own, not all in one
+	// burst at a pod that has just started listening.
+	inParallel(total, 200, func(i int) {
+		streams[i] = users[i/streamsEach].open(ctx, r.stream(ns))
+		Expect(streams[i].resp.StatusCode).To(Equal(200), "a stream was refused after the restart")
+		streams[i].until("synced")
+	})
+	reconnectAll := time.Since(replaced)
+	Expect(fx.metric("krm_foyer_streams_open")).To(Equal(float64(total)))
+
 	By("every identity signing out: each stream ends within the session-check interval")
 	ended := make([]time.Duration, total)
 	inParallel(n, n, func(i int) {
@@ -258,12 +258,14 @@ func rehearse(ctx SpecContext, r rehearsal, name string) {
   opening every stream, at once:  %v until every snapshot was complete
   one change reaching all:        first %v, p50 %v, p99 %v, slowest %v (from kubectl's start)
   logout to stream ended:         slowest %v
+  session cookie, name and value: %d to %d bytes
+  reconnecting every stream:      %v after a restart, 200 at a time, with the cookies from before it, no new login
   per stream, while open:         %.1f goroutines, at most %.0f KiB resident
   resident memory:                %.0f MiB idle, %.0f MiB with %d sessions, %.0f MiB with every stream open
   watches at the API server:      %.0f more while open%s`,
 		name, n, streamsEach, total, signInAll.Round(time.Millisecond), openAll.Round(time.Millisecond),
 		first.Round(time.Millisecond), p50.Round(time.Millisecond), p99.Round(time.Millisecond), slowest.Round(time.Millisecond),
-		endSlowest.Round(time.Millisecond),
+		endSlowest.Round(time.Millisecond), cookieBytes[0], cookieBytes[len(cookieBytes)-1], reconnectAll.Round(time.Millisecond),
 		(goroutines-baseGoroutines)/float64(total), (resident-signedInResident)/float64(total)/1024,
 		idleResident/(1<<20), signedInResident/(1<<20), n, resident/(1<<20),
 		apiWatches-baseAPIWatches, steady)

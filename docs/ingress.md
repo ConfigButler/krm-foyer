@@ -173,10 +173,10 @@ everything on it **one trust boundary**:
   Kubernetes access. Anything else belongs on its own host name: the session cookie is
   host-only, so it never reaches a subdomain.
 - **The session cookie reaches every service on the host.** The `__Host-` prefix requires
-  `Path=/`, so the browser sends the cookie with every request. The ID is opaque, but it
-  is a bearer credential: anyone who holds it can call krm-foyer as the user, from
-  anywhere, until the session ends. A co-hosted service that logs `Cookie` headers hands
-  sessions to whoever reads those logs. Co-hosted services must not log or keep it.
+  `Path=/`, so the browser sends the cookie with every request. Its contents are sealed,
+  but it is a bearer credential: anyone who holds it can call krm-foyer as the user, from
+  anywhere, until the session expires, logout or not. A co-hosted service that logs
+  `Cookie` headers hands sessions to whoever reads those logs. Co-hosted services must not log or keep it.
 - **Every hop on the origin needs the protection of the hop to krm-foyer**, re-encrypted
   and verified or isolated as [above](#decision-2026-10-01-both-tls-models). The cookie
   crosses each one, and so do the answers: a script tampered with on the way to the
@@ -256,8 +256,8 @@ browser, whose API calls then get 401. That is why the gate does not break
 the [one-parser rule](#why-routing-by-path-is-safe-when-forward-auth-is-not): it grants
 nothing, so there is no decision for two parsers to disagree on.
 
-It does not remove all frontend code either. A session can end while a page is open: the
-idle timeout runs out, or a refresh fails. Then `/k8s` answers 401 and the application
+It does not remove all frontend code either. A session can end while a page is open: it
+reaches its absolute timeout or its token's expiry, or, later, a refresh fails. Then `/k8s` answers 401 and the application
 decides what happens next. An editor first offers to keep the user's draft, as
 [Login and sessions](design.md#login-and-sessions) requires, and then calls
 `login(returnTo)` from the helper. The gate handles arriving signed out; the helper
@@ -314,7 +314,7 @@ with a standard SSO proxy will ask for it. The costs are real, though:
 
 - **Most of [Login and sessions](design.md#login-and-sessions) moves out of krm-foyer
   and out of its tests:**
-  - per-session revocation and logout that closes the session's streams;
+  - logout that closes the session's streams, and the session lifecycle;
   - refresh serialization;
   - JSON 401 responses instead of redirects (oauth2-proxy redirects unless configured
     otherwise);

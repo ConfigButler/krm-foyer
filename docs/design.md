@@ -1,7 +1,7 @@
 # Service design
 
 krm-foyer is a backend for frontend (BFF) for browser applications built on Kubernetes
-APIs. It owns OIDC login and server-side sessions, proxies Kubernetes API requests with
+APIs. It owns OIDC login and sessions sealed into the browser's cookie, proxies Kubernetes API requests with
 the user's own credential, and hosts krm-stream resource
 streams on the frontend's origin.
 
@@ -50,7 +50,7 @@ never decides on `/k8s` or `/stream` traffic. The [ingress decision](ingress.md)
 more worth revisiting.
 
 krm-foyer has two halves. The **login half** (`/auth/...`) obtains the user's OIDC token
-and keeps it in the server-side session. The **API half** (`/k8s`, `/stream`) takes the
+and seals it into the session cookie, which only krm-foyer can open. The **API half** (`/k8s`, `/stream`) takes the
 user's token from one credential interface and sends the request with that token, and
 the API server validates it and decides. The API half's contract is the user's own
 token, checked by Kubernetes. Login is a convenience behind that interface: it could
@@ -89,7 +89,7 @@ come from krm-stream, not from a reimplementation here.
 | `/auth/login` | Start OIDC authorization-code login with PKCE, state and nonce; `return_to` names a local path to come back to |
 | `/auth/callback` | Validate the callback and establish a session, then `303` to the return path |
 | `/auth/session` | Return minimal identity/session state and CSRF information, never bearer tokens: `200` with `authenticated`, `issuer`, `subject`, `email`, `expiresAt`, `csrfToken` and `csrfHeader`, or `401` with `{"authenticated":false}` |
-| `/auth/logout` | CSRF-protected POST that destroys the server session and answers `204`; the caller then goes where it likes, `/auth/logged-out` by default |
+| `/auth/logout` | CSRF-protected POST that clears the session cookie, ends the session's open responses in this process and answers `204`; it revokes no copy of the cookie ([sessions](#sessions)). The caller then goes where it likes, `/auth/logged-out` by default |
 | `/auth/check` **(planned)** | 204 or 401 (or 302 to login on request) for an ingress gating the application's pages; never a token or identity. See the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages) |
 | `/k8s/api/...` | Proxy core Kubernetes APIs after stripping `/k8s` |
 | `/k8s/apis/...` | Proxy grouped APIs, including CRDs and aggregated APIs |
@@ -193,7 +193,7 @@ answer, it says so in a form the requester can read:
 | No session | 401 | `Status`, reason `Unauthorized` | A page with a **Sign in** link that returns to this URL | No |
 | Upstream redirect | 502 | `Status` with the target in `details` | A notice naming the full target, with a link the user can follow when it is an absolute `http` or `https` URL; any other target is shown as text only | Yes |
 | Upstream content held back | 502 | `Status` with the content type | A page naming the content type. Later: the response as escaped text, truncated at a bound | Yes |
-| Session store unavailable | 503 | `Status` | A page saying so, with no retry loop | No |
+| Session cannot be checked | 503 | `Status` | A page saying so, with no retry loop | No |
 | Non-canonical path | 400 | `Status` naming the [path rule](#access) | A page saying so | No |
 | Path under `/k8s` that is not an [API route](#api-contract) | 404 | `Status`, reason `NotFound` | A page saying so | No |
 | Missing CSRF proof or cross-origin request | 403 | `Status` with reason `CSRFProofRequired` or `CrossOriginRequest`, never RBAC's `Forbidden` | A page saying so | No |
@@ -321,17 +321,24 @@ what may be stored and what may be processed before exposing creates.
 
 ## Login and sessions
 
-Tokens and session contents stay server-side. The browser holds only an opaque session ID
-in a Secure, HttpOnly, host-scoped cookie with appropriate SameSite settings. Server-side
-sessions support per-session revocation. Refresh-token custody and shared storage
-across replicas are planned, with bounded logout propagation and a defined failure policy.
+Sessions live in the browser: the session, the user's ID token included, is sealed
+(AES-256-GCM) into a Secure, HttpOnly, host-scoped cookie with keys only krm-foyer
+holds. Page scripts cannot read it and the browser cannot open or change it, so the
+token still never reaches the page in a form it can use; krm-foyer stores nothing per
+session, and a session survives a restart, or a replacement of the pod, with the same
+keys. The price is revocation: krm-foyer keeps no list of sessions, so logout clears
+the browser's cookie and ends what is open in the process, and a copy of the cookie is
+a session until it expires. The [audience release plan](investigations/audience-release-plan.md)
+records that choice. Refresh is planned, with its own lifecycle requirements below.
 
-**The session ID is a bearer credential.** Whoever holds it can call krm-foyer as the
-user, from anywhere, until the session ends. `HttpOnly` keeps it from page scripts and
-`Secure` from plain-HTTP requests; neither keeps it out of a log file, a co-hosted
-service that sees the `Cookie` header, or an unencrypted proxy hop. So krm-foyer treats it
-like a token: it never logs it or puts it in a URL or error page, and the session store
-keys sessions by a hash of the ID, so reading the store does not yield usable IDs.
+**The session cookie is a bearer credential.** Whoever holds it can call krm-foyer as the
+user, from anywhere, until the session expires, logout or not. `HttpOnly` keeps it from
+page scripts and `Secure` from plain-HTTP requests; neither keeps it out of a log file, a
+co-hosted service that sees the `Cookie` header, or an unencrypted proxy hop. So
+krm-foyer treats it like a token: it never logs it or puts it in a URL or error page.
+**The session keys are worth every session.** Whoever reads them can open every cookie,
+and with it read the user's token, and seal sessions of their own. They come from a
+Secret the deployment creates and the chart only mounts.
 
 ### Login
 
@@ -354,7 +361,8 @@ keys sessions by a hash of the ID, so reading the store does not yield usable ID
   cookie put back, which takes the browser itself, carries a code the issuer has already
   redeemed and refuses: authorization codes are single use. A browser keeps at most three
   logins in progress; starting a fourth ends the oldest. A restart ends every login in
-  progress, as it ends every session.
+  progress: its key is the process's own, and a callback after one is refused as
+  `login-not-in-progress`, so the user starts again. Established sessions survive it.
 - **The ID token** must come from the configured issuer, for krm-foyer's client ID,
   unexpired, signed by a key the issuer publishes and carrying this login's nonce. Its
   `email` is shown; the API server decides who it belongs to.
@@ -382,31 +390,62 @@ keys sessions by a hash of the ID, so reading the store does not yield usable ID
   set it) and `SameSite=Lax`. Lax rather than Strict, because the browser arrives back from
   the issuer by a cross-site navigation, and a link to a `/k8s` URL should open signed in;
   every request that changes state needs CSRF proof regardless.
-- **The ID** is 32 random bytes in unpadded base64url, with exactly one spelling. The
-  store keys a session by the SHA-256 of those bytes. A request with more than one
-  session cookie has no session: choosing between them would be a guess.
-- **Login rotates the ID.** A new ID is issued at every login, and any session named by a
-  cookie the browser already held is ended, so an ID planted before login never becomes
-  a signed-in session.
-- **A session ends** at the first of: its idle timeout since the last request that used
-  it, its absolute timeout since login, and the expiry of its ID token. There is no
-  refresh yet, so the token's expiry is a hard end; the cookie's `Max-Age` is the time to
-  the earlier of the last two. An expired session is deleted when it is next presented,
-  whatever the store's own expiry does. A request the session refuses, for missing CSRF
-  proof or another origin, does not count as use; one a [bound](bounds.md) refuses does,
-  since the session had let it through.
-- **The store is in memory**, so this release runs one replica, and a restart signs
-  everyone out. It holds at most 20,000 sessions ([bounds](bounds.md)). Shared storage, and refresh with it, are a later step on the
-  [roadmap](roadmap.md#order-of-work).
-
-An encrypted HttpOnly cookie can also keep tokens unreadable by JavaScript; the reason
-for choosing opaque sessions is revocation and lifecycle control. Clearing a browser cookie
-alone does not invalidate a copied stateless session. The BFF pattern is described in [OAuth 2.0 for Browser-Based Applications](https://www.rfc-editor.org/rfc/rfc10017.html).
+- **Its value** is unpadded base64url, with exactly one spelling, of a format version, the
+  ID of the key that sealed it, a random nonce, and the session encrypted and
+  authenticated with AES-256-GCM: issuer, subject and email, the ID token, a random
+  session ID, the CSRF token, and when it was issued and when it ends. The version, the
+  key's ID and the cookie's name are authenticated with it, so a cookie of another
+  version, key or purpose is no session. Anything that does not open, holds anything
+  but a whole session, or has more than one cookie of that name, is no session, and
+  never reaches the API server: choosing between two cookies would be a guess.
+- **The keys** come from `-session-keys-file`: one to four keys, one per line, 32
+  random bytes each in standard base64. The first seals every new cookie; every one opens
+  the cookies it sealed. Each is used through keys derived from it (HKDF-SHA256), one
+  to encrypt and one for the ID a cookie names it by, never as it is. Without the file,
+  with a key that is not 32 bytes, or with a key repeated, krm-foyer does not start: it
+  never makes keys of its own, which would end every session at the next restart.
+  **To rotate,** put the new key first and keep the old one after it until the cookies
+  it sealed have expired, which takes at most `-session-absolute-timeout`, restarting
+  krm-foyer after each change. Removing a key at once ends every session it sealed: that
+  is the emergency switch, and it is all or nothing, never one user. Putting a removed
+  key back makes its unexpired cookies sessions again, so a rollback to an old key is a
+  decision, not a default.
+- **Login issues a new session**, with a new ID and CSRF token, and ends the responses
+  the browser's previous session has open here. A session an attacker planted in the
+  browser before login never becomes the signed-in one. The previous cookie is not
+  revoked: a copy of it stays the session it was.
+- **A session ends** at its absolute timeout after login (`-session-absolute-timeout`,
+  8 hours by default) or its ID token's expiry, whichever is first, in whole seconds, by
+  krm-foyer's clock, on every request. That is fixed at login: no request, restart or
+  reconnect renews it, and there is no idle timeout and no refresh yet. The cookie's
+  `Max-Age` is the same time; a browser that keeps the cookie longer gains nothing.
+  Lowering the timeout shortens sessions already issued too: it is measured from the
+  time the cookie was issued.
+- **The cookie is set only at login** and cleared only at logout. No ordinary response
+  renews it, so a response that races a logout cannot set the cookie again.
+- **It fits in a cookie,** or the login is refused. Browsers keep a cookie whose name
+  and value are 4,096 bytes at most and drop a longer one silently; krm-foyer seals at
+  most 3,800 bytes of value, which leaves the token about 2,600 bytes: a Dex token with
+  30 groups is about 2,100. A login whose session does not fit gets
+  `session-too-large` (502) and no cookie: the token is never cut short, split across
+  cookies or kept on the server. Ask the issuer for fewer claims, not krm-foyer for a
+  larger cookie.
+- **Logout** is a CSRF-protected `POST /auth/logout` that clears the cookie and answers
+  204. It ends the responses the session has open in this process, within the
+  [session-check interval](bounds.md#the-session-check): a registry of open responses
+  that forgets each when it ends, and holds no session or revocation. It revokes
+  nothing. A copy of the cookie, taken before, authenticates until the session's end:
+  after logout, after another login, after a restart, and on any process with the key.
+  A request already in flight when the logout arrives may complete. The frontend closes
+  its streams and forgets its session and CSRF token on logout.
+- **One replica**, replaced on update. The sessions survive it; a login in progress, the
+  per-session [bounds](bounds.md) and logout's reach are each process's own. More
+  replicas need a design for those first ([roadmap](roadmap.md#order-of-work)).
 
 Use a maintained OIDC library. Bind login transactions to the browser; validate issuer,
-audience and callback state; accept only validated local return paths. Rotate session IDs
-at login, enforce idle/absolute expiry and serialize supported refreshes per session. Reject
-requests when session validity cannot be established. The configured issuer must provide a
+audience and callback state; accept only validated local return paths. Issue a new
+session at login, enforce absolute and token expiry and serialize supported refreshes per
+session. Reject requests when session validity cannot be established. The configured issuer must provide a
 credential accepted by the cluster; an arbitrary OIDC login or access token is insufficient.
 
 Unauthenticated API requests return a documented 401 login-required response, not an HTML
@@ -438,24 +477,27 @@ from making requests as the user.
 
 ### Session lifecycle
 
-Revocation is as fast as its slowest path. The table includes future requirements:
-refresh and shared storage do not exist yet. Logout and open-response cancellation
-are tested with the current in-memory store on one replica; store failures are tested
-with unit-test doubles. The [roadmap](roadmap.md#login-and-sessions) tracks the rest.
+A session is its cookie, so what ends one is its expiry; logout ends what the browser
+holds and what is open here. The table includes future requirements: refresh does not
+exist yet. Logout, expiry, restart and open-response cancellation are tested on one
+replica, in unit tests and end to end. The [roadmap](roadmap.md#login-and-sessions)
+tracks the rest.
 
 | Event | Required behavior |
 | --- | --- |
-| Logout | The session is deleted from shared storage before the logout response is sent. No replica caches a session's validity, so every replica refuses the ID on its next request |
-| Logout during a refresh | Logout wins. The refreshed tokens are discarded, never written back into a deleted session |
-| Session store unavailable | Fail closed: API and stream requests get 503. Never a stale local copy, never anonymous, never the service account |
-| Responses and streams open at logout | Cut short on every replica within the [session-check interval](bounds.md#the-session-check) (`-session-check-interval`, 5 seconds by default, twice that at worst when the check itself hangs), and cancelled at the API server |
-| Token expiry or failed refresh | API requests get 401; open responses and streams are cut short within the session-check interval of the token's expiry or the session's, whichever comes first |
+| Logout | The browser's cookie is cleared before the 204. Nothing is revoked: a copy of the cookie stays a session until its expiry, on this process and any other with the key |
+| Responses and streams open at logout | Those in this process are cut short within the [session-check interval](bounds.md#the-session-check) (`-session-check-interval`, 5 seconds by default, twice that at worst), and cancelled at the API server. A copy of the cookie may open new ones |
+| Restart or replacement, same keys | Established sessions go on, with the same CSRF token and end; open responses end with the process and reconnect. A login in progress is refused and starts again |
+| A key removed | Every session it sealed ends at once, for everyone; there is no per-user revocation |
+| Token or session expiry | API requests get 401; open responses and streams are cut short within the session-check interval of the token's expiry or the session's, whichever comes first, whether or not krm-foyer ran in between |
+| Logout during a refresh | Planned with refresh: logout wins, and a refreshed token never becomes a cookie the logout cleared |
 | RBAC change | Kubernetes applies it on the next request. A shared stream applies it within the [full reauthorization budget](watches.md#revocation), 60 seconds at defaults, including decision reuse, a check and a write; a per-user watch is checked again when it reopens |
-| Issuer refuses a refresh | The session ends at once: API requests get 401 and its streams close. krm-foyer never retries a refusal into a success or keeps using the old token past its expiry |
+| Issuer refuses a refresh | Planned with refresh: the session ends at once, API requests get 401 and its streams close. krm-foyer never retries a refusal into a success or keeps using the old token past its expiry |
 | User disabled at the issuer | Provider-dependent; see below. The only bound krm-foyer itself guarantees is the session's absolute expiry |
 
 Today, without refresh, disablement at the issuer does not actively end a session:
-the earlier of session expiry and ID-token expiry ends its use here. A shared stream's
+the earlier of session expiry and ID-token expiry ends its use here, and so for a copied
+cookie. A shared stream's
 reviews recheck permissions for the subject captured when it opened; they do not
 re-resolve issuer group membership.
 
@@ -471,7 +513,7 @@ refused. Elsewhere the documented bound is the absolute session expiry. Operator
 need a tighter one shorten the token lifetime or the absolute expiry, or choose an issuer
 that checks the account on every refresh.
 
-Revoking a session does not revoke tokens the issuer handed to other clients, and does
+Ending a session does not revoke tokens the issuer handed to other clients, and does
 not undo writes Kubernetes already accepted.
 
 ## Streams and editing

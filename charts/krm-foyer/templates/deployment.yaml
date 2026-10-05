@@ -8,8 +8,9 @@ metadata:
   labels:
     {{- include "krm-foyer.labels" . | nindent 4 }}
 spec:
-  # Sessions live in memory, so one replica, replaced on update rather than run beside
-  # its successor: a browser sent to the other pod would find no session.
+  # One replica, replaced on update rather than run beside its successor. Sessions are
+  # in their cookies and survive it, but a login in progress is sealed with a key of
+  # the pod's own, and the bounds and logout's reach are the pod's: see docs/roadmap.md.
   replicas: 1
   strategy:
     type: Recreate
@@ -51,6 +52,7 @@ spec:
             - {{ printf "-oidc-issuer=%s" .Values.oidc.issuer | quote }}
             - {{ printf "-oidc-client-id=%s" .Values.oidc.clientID | quote }}
             - -oidc-client-secret-file=/etc/krm-foyer/oidc/client-secret
+            - -session-keys-file=/etc/krm-foyer/session-keys/keys
             {{- with .Values.oidc.scopes }}
             - {{ printf "-oidc-scopes=%s" (join "," .) | quote }}
             {{- end }}
@@ -62,7 +64,6 @@ spec:
             - -kubernetes-ca-file=/etc/krm-foyer/kubernetes-ca/ca.crt
             {{- end }}
             {{- with include "krm-foyer.flags" (list .Values.bounds (list
-                (list "sessionIdleTimeout" "session-idle-timeout")
                 (list "sessionAbsoluteTimeout" "session-absolute-timeout")
                 (list "sessionCheckInterval" "session-check-interval")
                 (list "maxResponseDuration" "max-response-duration")
@@ -122,6 +123,9 @@ spec:
             - name: oidc
               mountPath: /etc/krm-foyer/oidc
               readOnly: true
+            - name: session-keys
+              mountPath: /etc/krm-foyer/session-keys
+              readOnly: true
             {{- if .Values.oidc.caConfigMap.name }}
             - name: issuer-ca
               mountPath: /etc/krm-foyer/issuer-ca
@@ -149,6 +153,12 @@ spec:
             items:
               - key: {{ .Values.oidc.clientSecret.key }}
                 path: client-secret
+        - name: session-keys
+          secret:
+            secretName: {{ .Values.sessionKeys.secretName }}
+            items:
+              - key: {{ .Values.sessionKeys.key }}
+                path: keys
         {{- with .Values.oidc.caConfigMap }}
         {{- if .name }}
         - name: issuer-ca

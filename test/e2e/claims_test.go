@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -156,8 +157,10 @@ func configMap(name string) []byte {
 // credentialLeaks scans every response krm-foyer sent the suite, and everything
 // krm-foyer logged, for credentials: anything shaped like a JWT (which covers the ID
 // tokens krm-foyer holds and never showed the suite, and its own service-account
-// token), every token the suite obtained, the client secrets, and every session ID
-// krm-foyer issued. A session ID may appear only as the value of its own Set-Cookie.
+// token), every token the suite obtained, the client secrets, and every session cookie
+// krm-foyer issued. A session cookie may appear only as the value of its own
+// Set-Cookie, and even there it is scanned, as is what it decodes to: it holds the
+// user's token sealed, never in the clear.
 func (f *fixture) credentialLeaks() (leaks []string, responses int) {
 	f.seenMu.Lock()
 	seen := slices.Clone(f.seen)
@@ -179,7 +182,7 @@ func (f *fixture) credentialLeaks() (leaks []string, responses int) {
 			}
 		}
 	}
-	check := func(where, text string) {
+	credentials := func(where, text string) {
 		if m := jwt.FindString(text); m != "" {
 			leaks = append(leaks, fmt.Sprintf("%s: something shaped like a JWT (%.24s...)", where, m))
 		}
@@ -188,9 +191,12 @@ func (f *fixture) credentialLeaks() (leaks []string, responses int) {
 				leaks = append(leaks, where+": "+what)
 			}
 		}
+	}
+	check := func(where, text string) {
+		credentials(where, text)
 		for _, id := range sessionIDs {
 			if strings.Contains(text, id) {
-				leaks = append(leaks, where+": a session ID")
+				leaks = append(leaks, where+": a session cookie")
 			}
 		}
 	}
@@ -199,10 +205,17 @@ func (f *fixture) credentialLeaks() (leaks []string, responses int) {
 		for k, vs := range r.header {
 			for _, v := range vs {
 				if k == "Set-Cookie" {
-					// The one place a session ID belongs: as the value of the cookie
-					// that issues it.
+					// The one place a session cookie belongs: as the value of the
+					// cookie that issues it. Still no credential in it, sealed or not.
 					if rest, ok := strings.CutPrefix(v, sessionCookie+"="); ok {
-						_, v, _ = strings.Cut(rest, ";")
+						var value string
+						value, v, _ = strings.Cut(rest, ";")
+						credentials("the session cookie set by "+r.target, value)
+						raw, err := base64.RawURLEncoding.DecodeString(value)
+						if value != "" && err != nil {
+							leaks = append(leaks, "the session cookie set by "+r.target+" is not base64url")
+						}
+						credentials("the session cookie set by "+r.target+", decoded", string(raw))
 					}
 				}
 				check(k+" of "+r.target, k+": "+v)

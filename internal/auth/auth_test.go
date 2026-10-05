@@ -6,8 +6,9 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -51,7 +52,8 @@ type harness struct {
 	issuer   *fakeIssuer
 	auth     *Auth
 	sessions *session.Manager
-	store    *flakyStore
+	keys     *session.Keys
+	handler  atomic.Pointer[http.Handler]
 	foyer    *httptest.Server
 	// logs is everything krm-foyer logged, for the leak scan.
 	logs syncBuffer
@@ -96,20 +98,42 @@ func newUndiscovered(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{t: t, clock: &clock{t: time.Now().Truncate(time.Second)}}
 	h.issuer = newFakeIssuer(t, h.clock.Now)
-	var handler http.Handler
 	h.foyer = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handler.ServeHTTP(w, r)
+		(*h.handler.Load()).ServeHTTP(w, r)
 	}))
 	h.foyer.StartTLS()
 	t.Cleanup(h.foyer.Close)
+	h.keys = testKeys(t, sessionKey)
+	h.start()
+	t.Cleanup(h.scan)
+	return h
+}
 
-	h.store = &flakyStore{Memory: session.NewMemory(h.clock.Now)}
-	var err error
-	h.sessions, err = session.New(session.Config{
-		Store: h.store, Origin: h.foyer.URL, IdleTimeout: time.Hour, AbsoluteTimeout: 8 * time.Hour, Now: h.clock.Now,
-	})
+// sessionKey and otherKey are session keys, as a deployment writes them.
+const (
+	sessionKey = "c2Vzc2lvbi1rZXktZm9yLWtybS1mb3llci10ZXN0cyE=" //nolint:gosec // a test key
+	otherKey   = "YW5vdGhlci1zZXNzaW9uLWtleS1mb3ItdGhlLXRlc3Q=" //nolint:gosec // a test key
+)
+
+func testKeys(t *testing.T, lines ...string) *session.Keys {
+	t.Helper()
+	ks, err := session.ParseKeys([]byte(strings.Join(lines, "\n")))
 	if err != nil {
 		t.Fatal(err)
+	}
+	return ks
+}
+
+// start starts krm-foyer, or starts it again, with h.keys: a new process, which
+// shares nothing with the one before but the keys, the issuer and the address.
+func (h *harness) start() {
+	h.t.Helper()
+	var err error
+	h.sessions, err = session.New(session.Config{
+		Keys: h.keys, Origin: h.foyer.URL, AbsoluteTimeout: 8 * time.Hour, Now: h.clock.Now,
+	})
+	if err != nil {
+		h.t.Fatal(err)
 	}
 	issuerCA := x509.NewCertPool()
 	issuerCA.AddCert(h.issuer.Certificate())
@@ -119,11 +143,21 @@ func newUndiscovered(t *testing.T) *harness {
 		Logger: slog.New(slog.NewJSONHandler(&h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {
-		t.Fatal(err)
+		h.t.Fatal(err)
 	}
-	handler = h.auth.Handler()
-	t.Cleanup(h.scan)
-	return h
+	handler := h.auth.Handler()
+	h.handler.Store(&handler)
+}
+
+// restart replaces krm-foyer with a new process with these keys, and discovers the
+// issuer again.
+func (h *harness) restart(keys *session.Keys) {
+	h.t.Helper()
+	h.keys = keys
+	h.start()
+	if err := h.auth.Discover(h.t.Context()); err != nil {
+		h.t.Fatal(err)
+	}
 }
 
 // browser is a cookie jar over TLS that does not follow redirects, so each test
@@ -268,8 +302,9 @@ func assertLoginError(t *testing.T, resp response, status int, reason string) {
 
 // scan runs after every test: no response a browser received and no line krm-foyer
 // logged holds an ID token, an access token, the client secret, an authorization
-// code or a PKCE verifier anywhere, and a session ID appears only in the Set-Cookie
-// that issues it.
+// code or a PKCE verifier anywhere, not even in a session cookie's decoded bytes, and
+// a session cookie appears only in the Set-Cookie that issues it. The cookie is the
+// token sealed; nothing is exempt from the scan for being a Set-Cookie.
 func (h *harness) scan() {
 	h.issuer.mu.Lock()
 	secrets := map[string]string{clientSecret: "the client secret"}
@@ -300,6 +335,17 @@ func (h *harness) scan() {
 				if id, _, _ := strings.Cut(v, ";"); id != "" {
 					sessionIDs = append(sessionIDs, id)
 				}
+			}
+		}
+	}
+	for _, id := range sessionIDs {
+		raw, err := base64.RawURLEncoding.DecodeString(id)
+		if err != nil {
+			h.t.Errorf("a session cookie is not base64url: %v", err)
+		}
+		for secret, what := range secrets {
+			if bytes.Contains(raw, []byte(secret)) {
+				h.t.Errorf("%s is in a session cookie unsealed", what)
 			}
 		}
 	}
@@ -827,21 +873,110 @@ func TestIssuerErrorNeedsTheState(t *testing.T) {
 	}
 }
 
-// Logging in again rotates the session: the previous ID is worthless.
-func TestLoginAgainRotates(t *testing.T) {
+// Logging in again starts a new session, with a new CSRF token. The previous cookie
+// is not revoked: a copy of it is the session it was until it expires. That is the
+// limit of sessions kept in cookies, recorded here.
+func TestLoginAgainStartsANewSession(t *testing.T) {
 	h := newHarness(t)
 	b := h.browser()
 	b.login(alice, "/")
 	first := b.cookie(session.CookieName)
+	_, before := b.session()
 	b.login(alice, "/")
-	if second := b.cookie(session.CookieName); second == first || second == "" {
-		t.Fatal("the session ID did not change")
+	_, after := b.session()
+	if second := b.cookie(session.CookieName); second == first || second == "" || after.CSRFToken == before.CSRFToken {
+		t.Fatal("the session did not change")
 	}
 	old := h.browser()
-	u, _ := url.Parse(h.foyer.URL)
-	old.jar.SetCookies(u, []*http.Cookie{{Name: session.CookieName, Value: first}}) //nolint:gosec // a request cookie has no attributes
-	if code, _ := old.session(); code != http.StatusUnauthorized {
-		t.Fatalf("the previous session still answers %d", code)
+	old.setSession(first)
+	if code, s := old.session(); code != http.StatusOK || s.CSRFToken != before.CSRFToken {
+		t.Fatalf("a copy of the previous cookie answers %d: this test records that it stays a session", code)
+	}
+}
+
+// setSession puts a session cookie in b, as a copy of someone's would be.
+func (b *browser) setSession(value string) {
+	u, _ := url.Parse(b.h.foyer.URL)
+	b.jar.SetCookies(u, []*http.Cookie{{Name: session.CookieName, Value: value, Path: "/"}}) //nolint:gosec // a request cookie has no attributes
+}
+
+// A restart, with the same keys, keeps every session: the same user, CSRF token and
+// end, from the cookie alone. A login in progress does not survive one: its key lives
+// only in the process, and the callback is refused; a fresh login then succeeds.
+func TestRestart(t *testing.T) {
+	h := newHarness(t)
+	b := h.browser()
+	b.login(alice, "/")
+	_, before := b.session()
+	pending := h.browser()
+	location := pending.startLogin("/after")
+
+	h.clock.Advance(30 * time.Minute) // the fake issuer's tokens last an hour
+	h.restart(h.keys)
+
+	code, after := b.session()
+	if code != http.StatusOK || after.CSRFToken != before.CSRFToken || !after.ExpiresAt.Equal(*before.ExpiresAt) ||
+		after.Subject != before.Subject || after.Email != before.Email {
+		t.Fatalf("after a restart /auth/session = %d %+v, was %+v", code, after, before)
+	}
+	// Its CSRF proof still works, here on logout.
+	if resp := b.do(http.MethodPost, "/auth/logout", http.Header{"Origin": {h.foyer.URL}, session.CSRFHeader: {after.CSRFToken}}); resp.code != http.StatusNoContent {
+		t.Fatalf("logout with the proof from before the restart: %d", resp.code)
+	}
+
+	assertLoginError(t, pending.get(h.issuer.authorize(location, alice)), http.StatusBadRequest, "login-not-in-progress")
+	if resp := pending.login(alice, "/"); resp.code != http.StatusSeeOther {
+		t.Fatalf("a fresh login after the restart answered %d", resp.code)
+	}
+}
+
+// Keys: a restart with the new key in front and the old one behind keeps every
+// session, and seals new ones with the new key; once the old key is gone, its
+// sessions are gone too, and krm-foyer asks for a login.
+func TestRestartRotatingKeys(t *testing.T) {
+	h := newHarness(t)
+	b := h.browser()
+	b.login(alice, "/")
+
+	h.restart(testKeys(t, otherKey, sessionKey))
+	if code, _ := b.session(); code != http.StatusOK {
+		t.Fatalf("during the overlap: %d", code)
+	}
+	fresh := h.browser()
+	fresh.login(alice, "/")
+
+	h.restart(testKeys(t, otherKey))
+	if code, _ := b.session(); code != http.StatusUnauthorized {
+		t.Fatalf("a cookie of a removed key answers %d", code)
+	}
+	if code, _ := fresh.session(); code != http.StatusOK {
+		t.Fatalf("a cookie of the remaining key answers %d", code)
+	}
+
+	// Another deployment's keys open none of these sessions.
+	h.restart(testKeys(t, "b3RoZXItZGVwbG95bWVudHMta2V5LW5vdC1vdXJzLi4="))
+	if code, _ := fresh.session(); code != http.StatusUnauthorized {
+		t.Fatalf("a cookie of another deployment's key answers %d", code)
+	}
+}
+
+// A token too large for the cookie ends the login with a reason, and no cookie: the
+// token is never cut short, split or kept on the server.
+func TestTokenTooLargeForACookie(t *testing.T) {
+	h := newHarness(t)
+	h.issuer.mu.Lock()
+	h.issuer.tamper = func(claims map[string]any) {
+		groups := make([]string, 200)
+		for i := range groups {
+			groups[i] = fmt.Sprintf("a-rather-long-group-name-%03d", i)
+		}
+		claims["groups"] = groups
+	}
+	h.issuer.mu.Unlock()
+	b := h.browser()
+	assertLoginError(t, b.login(alice, "/"), http.StatusBadGateway, "session-too-large")
+	if b.cookie(session.CookieName) != "" {
+		t.Error("a session cookie was set")
 	}
 }
 
@@ -856,7 +991,8 @@ func TestSessionWithoutOne(t *testing.T) {
 }
 
 // Logout needs the same proof as any mutation, so another site cannot sign the user
-// out; with it, the session is gone before the answer, and the cookie is cleared.
+// out; with it, the cookie is cleared. A copy of the cookie is not revoked: it is the
+// session until it expires, the deliberate limit this test records.
 func TestLogout(t *testing.T) {
 	h := newHarness(t)
 	b := h.browser()
@@ -893,12 +1029,19 @@ func TestLogout(t *testing.T) {
 	if b.cookie(session.CookieName) != "" {
 		t.Error("the cookie was not cleared")
 	}
-	// A copy of the cookie is worthless now.
+	if code, _ := b.session(); code != http.StatusUnauthorized {
+		t.Errorf("the browser that logged out still has a session: %d", code)
+	}
+	// A copy of the cookie still is one.
 	replay := h.browser()
-	u, _ := url.Parse(h.foyer.URL)
-	replay.jar.SetCookies(u, []*http.Cookie{{Name: session.CookieName, Value: id}}) //nolint:gosec // a request cookie has no attributes
+	replay.setSession(id)
+	if code, _ := replay.session(); code != http.StatusOK {
+		t.Fatalf("a copy of the cookie answers %d after logout: this test records that it stays a session", code)
+	}
+	// Until it expires, with nothing kept by krm-foyer.
+	h.clock.Advance(time.Hour)
 	if code, _ := replay.session(); code != http.StatusUnauthorized {
-		t.Fatalf("a replayed cookie answers %d after logout", code)
+		t.Fatalf("a copy of the cookie answers %d past its expiry", code)
 	}
 	// Signing out when not signed in is not an error.
 	if resp := h.browser().do(http.MethodPost, "/auth/logout", http.Header{"Origin": {h.foyer.URL}}); resp.code != http.StatusNoContent {
@@ -964,90 +1107,6 @@ func TestLoginFloodLocksNobodyOut(t *testing.T) {
 	}
 }
 
-// flakyStore is a memory store that can be made to fail.
-type flakyStore struct {
-	*session.Memory
-	down atomic.Bool
-	// deleteFails makes only Delete fail: the session can be read, not ended.
-	deleteFails atomic.Bool
-}
-
-var errStoreDown = errors.New("store: connection refused")
-
-func (f *flakyStore) Create(ctx context.Context, key session.Key, s session.Session, expires time.Time) error {
-	if f.down.Load() {
-		return errStoreDown
-	}
-	return f.Memory.Create(ctx, key, s, expires)
-}
-
-func (f *flakyStore) Get(ctx context.Context, key session.Key) (session.Session, error) {
-	if f.down.Load() {
-		return session.Session{}, errStoreDown
-	}
-	return f.Memory.Get(ctx, key)
-}
-
-func (f *flakyStore) Delete(ctx context.Context, key session.Key) error {
-	if f.down.Load() || f.deleteFails.Load() {
-		return errStoreDown
-	}
-	return f.Memory.Delete(ctx, key)
-}
-
-// With the store full, a login says so, and starts nothing.
-func TestSessionsFull(t *testing.T) {
-	h := newHarness(t)
-	until := h.clock.Now().Add(time.Hour)
-	for i := range session.MaxMemorySessions {
-		if err := h.store.Memory.Create(t.Context(), session.Key{byte(i), byte(i >> 8), byte(i >> 16)}, session.Session{}, until); err != nil {
-			t.Fatal(err)
-		}
-	}
-	b := h.browser()
-	assertLoginError(t, b.login(alice, "/"), http.StatusServiceUnavailable, "too-many-sessions")
-	if b.cookie(session.CookieName) != "" {
-		t.Error("a session cookie was set")
-	}
-}
-
-// With the store down, nothing pretends: login does not claim success, the session
-// is not reported missing, and logout does not report a session ended that is not.
-func TestStoreDown(t *testing.T) {
-	h := newHarness(t)
-	b := h.browser()
-	b.login(alice, "/")
-	_, s := b.session()
-	h.store.down.Store(true)
-
-	if code, _ := b.session(); code != http.StatusServiceUnavailable {
-		t.Errorf("/auth/session = %d, want 503", code)
-	}
-	resp := b.do(http.MethodPost, "/auth/logout", http.Header{"Origin": {h.foyer.URL}, session.CSRFHeader: {s.CSRFToken}})
-	if resp.code != http.StatusServiceUnavailable {
-		t.Errorf("logout = %d, want 503", resp.code)
-	}
-	if b.cookie(session.CookieName) == "" {
-		t.Error("logout cleared the cookie of a session it could not end")
-	}
-
-	other := h.browser()
-	assertLoginError(t, other.login(alice, "/"), http.StatusServiceUnavailable, "session-store-unavailable")
-
-	h.store.down.Store(false)
-	if code, _ := b.session(); code != http.StatusOK {
-		t.Errorf("the session did not survive the outage: %d", code)
-	}
-
-	// The session can be read but not deleted: logout must not answer as if it
-	// had ended it.
-	h.store.deleteFails.Store(true)
-	resp = b.do(http.MethodPost, "/auth/logout", http.Header{"Origin": {h.foyer.URL}, session.CSRFHeader: {s.CSRFToken}})
-	if resp.code != http.StatusServiceUnavailable || b.cookie(session.CookieName) == "" {
-		t.Errorf("logout that could not delete = %d, cookie kept %v", resp.code, b.cookie(session.CookieName) != "")
-	}
-}
-
 // The issuer is reached only over verified TLS and never through a proxy from the
 // environment: without its CA, discovery fails, and the transport has no proxy
 // function. That is read from the transport, because Go never proxies the loopback
@@ -1074,7 +1133,7 @@ func TestIssuerTransport(t *testing.T) {
 }
 
 func TestNewRejectsBadConfig(t *testing.T) {
-	sessions, err := session.New(session.Config{Store: session.NewMemory(nil), Origin: "https://foyer.example.test", IdleTimeout: time.Hour, AbsoluteTimeout: time.Hour})
+	sessions, err := session.New(session.Config{Keys: testKeys(t, sessionKey), Origin: "https://foyer.example.test", AbsoluteTimeout: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -73,6 +73,14 @@ apply create secret tls krm-foyer-tls --cert "$E2E_DIR/foyer/tls.crt" --key "$E2
 # The client secret of the static client in dex.yaml.
 apply create secret generic krm-foyer-oidc --from-literal=client-secret=krm-foyer-e2e-secret
 apply create configmap krm-foyer-issuer-ca --from-file=ca.crt="$E2E_DIR/ca.crt"
+# Session keys, one per release, made once and never replaced: a redeploy keeps every
+# session, as an upgrade must.
+for keys in krm-foyer-session-keys krm-foyer-brief-session-keys; do
+  if ! kubectl -n krm-foyer get secret "$keys" >/dev/null 2>&1; then
+    kubectl -n krm-foyer create secret generic "$keys" \
+      --from-literal=session-keys="$(head -c 32 /dev/urandom | base64)" >/dev/null
+  fi
+done
 kubectl apply -f "$here/foyer-bait.yaml" >/dev/null
 config_hash="$(cat "$E2E_DIR/foyer/tls.crt" "$E2E_DIR/ca.crt" | sha256sum | cut -c1-16)"
 # install RELEASE VALUES...: the chart, with the image imported above. A new certificate
