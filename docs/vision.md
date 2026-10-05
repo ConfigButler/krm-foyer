@@ -92,6 +92,18 @@ The project stays useful by staying small, so these stay out:
 
 A feature that needs any of these belongs in the application or in krm-stream.
 
+## Revisit when
+
+- **krm-foyer is the only host of krm-stream's Go gateway.** Today voter embeds it too.
+  If voter moves onto krm-foyer and nobody else embeds the gateway, split the two
+  projects by side instead of by feature: the gateway moves into krm-foyer, and
+  krm-stream keeps the browser library (connectors, store, editor), the protocol spec and
+  the conformance corpus that both sides test against. The lasting value of krm-stream is
+  in the browser; SSE was never the point
+  ([investigation](investigations/sse-and-native-watches.md)). Not before: a
+  policy-free gateway library is what a team with its own Go backend would use instead of
+  krm-foyer.
+
 ## How we will know it works
 
 Two frontends with different API groups run on krm-foyer with no application-specific
