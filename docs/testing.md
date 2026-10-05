@@ -104,6 +104,18 @@ bugs are here, where they are cheap to find:
   new login end the open responses of that session, and of no other, while a copy of
   the cookie stays a session: the tests record that limit rather than hide it. A session
   too large for its cookie is refused before a cookie is set.
+- **Login parameters and identity** ([internal/auth](../internal/auth),
+  [internal/stream](../internal/stream)): the same code forwards two issuers'
+  differently named parameters, defaults and values with spaces, `&`, `=`, `%` and
+  non-ASCII intact; every way past the configuration, krm-foyer's own parameters among
+  them, is the same 400 before any login starts, with the value neither shown nor logged;
+  a retry link repeats a listed choice and never a free hint. Session claims come from
+  the verified token in a fixed shape, and a requested connector never becomes the
+  session's. `/auth/whoami` sends one SelfSubjectReview with the user's token alone,
+  passes the API server's refusals on, fails closed on errors, empty answers and
+  redirects, and never forwards a browser's identity headers. End to end, Dex receives a
+  link's approved options, and the attribution extras appear in `/auth/whoami`, the audit
+  event and the admission request of an accepted write, whatever the browser claims.
 - **Open responses end with their session** ([internal/proxy](../internal/proxy)), over
   every pair of HTTP/1.1 and HTTP/2 towards the browser and towards the API server: when
   the session ends, the browser's response is aborted, never ended cleanly, and the

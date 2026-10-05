@@ -86,16 +86,16 @@ come from krm-stream, not from a reimplementation here.
 
 | Route | Behavior |
 | --- | --- |
-| `/auth/login` | Start OIDC authorization-code login with PKCE, state and nonce; `return_to` names a local path to come back to |
+| `/auth/login` | Start OIDC authorization-code login with PKCE, state and nonce; `return_to` names a local path to come back to, and `oidc.<name>` gives a configured [login parameter](#login-parameters) for the issuer |
 | `/auth/callback` | Validate the callback and establish a session, then `303` to the return path |
-| `/auth/session` | Return minimal identity/session state and CSRF information, never bearer tokens: `200` with `authenticated`, `issuer`, `subject`, `email`, `expiresAt`, `csrfToken` and `csrfHeader`, or `401` with `{"authenticated":false}` |
+| `/auth/session` | Return minimal identity/session state and CSRF information, never bearer tokens: `200` with `authenticated`, `issuer`, `subject`, `email`, `displayName`, `groups`, `connector` when configured, `expiresAt`, `csrfToken` and `csrfHeader`, or `401` with `{"authenticated":false}`. See [session claims](#session-claims) |
 | `/auth/logout` | CSRF-protected POST that clears the session cookie, ends the session's open responses in this process and answers `204`; it revokes no copy of the cookie ([sessions](#sessions)). The caller then goes where it likes, `/auth/logged-out` by default |
 | `/auth/check` **(planned)** | 204 or 401 (or 302 to login on request) for an ingress gating the application's pages; never a token or identity. See the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages) |
 | `/k8s/api/...` | Proxy core Kubernetes APIs after stripping `/k8s` |
 | `/k8s/apis/...` | Proxy grouped APIs, including CRDs and aggregated APIs |
 | `/k8s/api`, `/k8s/apis`, `/k8s/version`, `/k8s/openapi/...` | Proxy discovery and schema endpoints |
 | `/stream/v1` | A [krm-stream](https://github.com/ConfigButler/krm-stream/blob/main/spec/v1.md) resource stream (`GET`, the scope in the query): a watch opened as the user, or an opt-in shared watch guarded by API-server reviews. See [streams and editing](#streams-and-editing) |
-| `/auth/whoami` **(planned)** | Who Kubernetes takes the user to be, from a SelfSubjectReview, plus the session's issuer and expiry. Never tokens |
+| `/auth/whoami` | Who Kubernetes takes the user to be: a fresh SelfSubjectReview with the user's own token, answered as `200` with the API server's `userInfo` (username, UID, groups, extra), the session's `issuer` and `expiresAt`, `no-store`. Never tokens. See [whoami](#whoami) |
 | `/_foyer/access` **(planned)** | A page showing what the user may do, from Kubernetes' own reviews. See [what may I do](#what-may-i-do) |
 
 Planned routes currently return 404. The start page (`/`), logout confirmation
@@ -382,6 +382,116 @@ Secret the deployment creates and the chart only mounts.
   the token's claims and the issuer's key-set response.
 - **Until the issuer's discovery document has been read,** `/auth/login` answers 503 and
   `/readyz` fails; `/healthz` does not. krm-foyer keeps trying in the background.
+
+### Login parameters
+
+An application chooses login options in its own links and QR codes; the deployment
+decides which options exist. `-login-config-file` (chart: `login`) names extra query
+parameters for the issuer's authorization endpoint, by the issuer's own names:
+
+```yaml
+authorizationParameters:
+  connector_id: {default: audience, allowFromRequest: true, allowedValues: [audience, operator]}
+  login_hint: {allowFromRequest: true}
+sessionClaims:
+  connector: /federated_claims/connector_id
+```
+
+A link gives a value as `oidc.<name>`:
+`/auth/login?return_to=%2F&oidc.connector_id=audience&oidc.login_hint=opaque-value`.
+krm-foyer recognizes no product and interprets no value; the names above are Dex's.
+
+- **Only what is configured is sent.** A parameter's default is sent when the link gives
+  none, and a value the link gives replaces it when `allowFromRequest` allows. With
+  `allowedValues`, only those values are sent, the default among them. A link carries
+  values, never permission: a QR generator's own list is a convenience, not a check.
+- **Anything else is refused before a login starts**, with a 400 `login-parameter-refused`
+  and nothing sent to the issuer: an unknown `oidc.*` name, a value for a
+  configuration-only parameter, a value not on the list, a repeated or empty value, a
+  value over 512 bytes, more than 1,024 bytes of names and values in all, or a query Go
+  would only read in part. A login whose cookie, holding the return path and the
+  values once escaped, sealed and encoded, would exceed 4,000 bytes gets a 400
+  `login-too-large` instead of a cookie the browser would drop. The error page never repeats the value, and no value is
+  logged.
+- **krm-foyer's own parameters cannot be configured**, so no link can reach them:
+  `client_id`, `redirect_uri`, `response_type`, `response_mode`, `scope`, `state`, `nonce`,
+  `code_challenge` and `code_challenge_method`; `request` and `request_uri`, which would
+  replace the request; and the credentials `client_secret`, `client_assertion` and
+  `client_assertion_type`. Such a configuration stops krm-foyer at start. Scopes stay
+  `-oidc-scopes`, trusted configuration; the endpoint stays the discovered one.
+- **A value is query data, encoded once,** never trimmed, folded or otherwise changed.
+  `return_to` is krm-foyer's and never goes to the issuer.
+- **A failed login offers the same choice again** for the transaction's lifetime: its
+  retry link repeats the values of parameters with `allowedValues`, such as a connector,
+  and never a free value such as a hint, which is opaque and may be anyone's. After
+  that, the application gives a fresh link.
+
+Whether a hint or a room code is valid, and which connector makes someone a voter, is
+for the issuer and its integration to decide; krm-foyer has no tests of their meaning.
+An issuer that needs state of its own across its redirects, such as a handoff cookie,
+keeps it in that integration.
+
+### Session claims
+
+`/auth/session` shows who the issuer says the user is, from the verified ID token only:
+`displayName` (a string, at the JSON Pointer `sessionClaims.displayName`, `/name` by
+default), `groups` (a list of strings, `/groups` by default) and, when
+`sessionClaims.connector` is set, `connector` (a string). A claim that is missing, or
+null, is empty: `displayName` is `""` and `groups` is `[]`, always present, and
+`connector` is left out. A claim of another type fails the login with
+`session-claims-invalid` (502). The shape is fixed: never a bag of whatever the token
+carries.
+
+The connector a link asked for is a request; the one `/auth/session` shows is the
+token's claim, and the first never becomes the second. These are for the application
+to show. Kubernetes decides access, by its own mapping of the token, which
+[`/auth/whoami`](#whoami) shows.
+
+### Whoami
+
+`GET /auth/whoami` creates a SelfSubjectReview with the session's own token, through
+the gate, so the per-session bounds hold, to the configured API server over verified
+TLS, bounded at 10 seconds, refusing redirects. It answers the API server's `userInfo`
+as it gave it, with the session's `issuer` and `expiresAt`. Its groups are the API
+server's mapping, apart from the issuer's groups `/auth/session` shows. A missing,
+invalid or expired cookie gets the 401 [interruption](#interruptions). A refusal from the
+API server is passed on with its status and `Status`. A failure, or an answer naming no
+user, is a 503: krm-foyer never infers a username from a claim and has no other
+credential to try. It shares one implementation with the reviews of
+[shared watches](#shared-watches).
+
+### Attribution
+
+[gitops-reverser](https://github.com/ConfigButler/gitops-reverser) names a commit's
+author from two fixed keys of the Kubernetes user's `extra`, in audit events and
+admission requests:
+
+| Key | Signed claim | Use |
+| --- | --- | --- |
+| `configbutler.ai/claims/display-name` | `name` | Git author name |
+| `configbutler.ai/claims/email` | `email` | Git author email |
+
+They are UserInfo extras, not HTTP headers. krm-foyer already sends the user's signed
+ID token, which carries both claims; the cluster operator adds the mapping to the JWT
+authenticator's `claimMappings` in the API server's
+[structured authentication configuration](https://kubernetes.io/docs/reference/access-authn-authz/authentication/#using-authentication-configuration):
+
+```yaml
+extra:
+  - key: configbutler.ai/claims/display-name
+    valueExpression: "claims.?name.orValue('')"
+  - key: configbutler.ai/claims/email
+    valueExpression: "claims.?email.orValue('')"
+```
+
+That is a fragment to merge into the authenticator, not a replacement of its issuer,
+audiences, username, groups or validation rules; keep its email verification policy.
+A missing claim maps to an empty value, which leaves the key out. krm-foyer sets no
+`Impersonate-Extra-*` or `X-Remote-*` header, and strips any a browser sends:
+impersonation or front-proxy authentication would change who establishes identity.
+Nothing a link, a query or a header says reaches the author. `/auth/whoami` shows the
+mapped extras; the e2e suite also checks them in the audit event of an accepted write
+and in the admission request a validating admission policy received.
 
 ### Sessions
 

@@ -33,7 +33,7 @@ return 404; they are requirements, not configuration switches.
 | `/auth/login?return_to=/path` | No page: a redirect to the OIDC provider | The return path is validated as a local path before it is stored in the login transaction. |
 | `/auth/callback` | A redirect to the stored return path on success. On failure, an error page with a stable reason and a "try again" link | An application cannot render this: its code is not loaded yet. |
 | `/auth/logged-out` | Plain confirmation with a "sign in again" link, and a note that the issuer may still have the user signed in | Where logout lands when the application does not supply its own destination. `POST /auth/logout` answers `204`, and the caller navigates here or to its own page. |
-| `/auth/whoami` **(planned)** | Who Kubernetes takes you to be (username, groups and extra, from a SelfSubjectReview), with the session's issuer and expiry. Never tokens | A way to investigate a 403. `/auth/session` already returns login/session information, but does not resolve the Kubernetes identity. |
+| `/auth/whoami` | Who Kubernetes takes you to be (username, groups and extra, from a SelfSubjectReview), with the session's issuer and expiry, as JSON. Never tokens | A way to investigate a 403, and to see the [attribution](design.md#attribution) extras. `/auth/session` shows the issuer's claims; this shows what Kubernetes made of them. |
 | `/_foyer/access` **(planned)** | What you may do in a namespace, from a SelfSubjectRulesReview, and a "can I?" form answered by a SelfSubjectAccessReview | `kubectl auth can-i` for someone with only a browser. Code asks the same reviews natively. See [what may I do](design.md#what-may-i-do). |
 | `/k8s/...`, `/stream` when krm-foyer interrupts | For a browser navigation only: sign in, redirect notice, held-back content, store unavailable. Same status code as the JSON form | The proxy is explorable in a tab. These say what krm-foyer decided, as opposed to what Kubernetes answered. See [interruptions](design.md#interruptions). |
 | `/healthz`, `/readyz` | Plain text | For probes, not people. |
@@ -70,8 +70,12 @@ separate:
    a Vite dev-server proxy that put the application and krm-foyer on one origin. These are
    documentation and examples, not code in krm-foyer.
 2. **A tiny browser helper** at `/_foyer/foyer.js`, served by krm-foyer as a plain ES
-   module ([source](../internal/pages/assets/foyer.js)). It has five calls: `session()`,
-   `login(returnTo)`, `logout(next)`, `requireSession()` and `k8s(path, options)`. The
+   module ([source](../internal/pages/assets/foyer.js)). It has six calls: `session()`,
+   `login(returnTo, params)`, `loginURL(returnTo, params)`, `logout(next)`,
+   `requireSession()` and `k8s(path, options)`. `params` are
+   [login parameters](design.md#login-parameters) for the issuer, sent as `oidc.<name>`;
+   `loginURL` is the same link for an `<a>` or a QR code, which works without the
+   helper. The
    last puts the CSRF header on every change and reports each answer as an outcome
    (`ok`, `signed-out`, `refused`, `missing`, `conflict`, `invalid`, `error`) with the
    `Status` message, without retrying anything Kubernetes answered. Its one resend is of

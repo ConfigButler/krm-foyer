@@ -29,7 +29,10 @@ const (
 	otherToken = "other-token-7d2e0b" //nolint:gosec // a marker to search for, not a credential
 	// within bounds how long a test waits for what must happen.
 	within = 5 * time.Second
-	// checkEvery is the session-check interval in these tests.
+	// checkEvery is the session-check interval of the tests that end a session: short,
+	// so they are fast. The others keep the gate's default, because a check that does not
+	// answer within an interval counts as an ended session, and on a loaded CI runner
+	// 20ms is not always enough for one that would: the stream is then cut short.
 	checkEvery = 20 * time.Millisecond
 )
 
@@ -179,8 +182,8 @@ func newFoyer(t *testing.T, api *apiServer, creds gate.Credentials, adjust func(
 	t.Helper()
 	logs := &lockedLog{}
 	gcfg := gate.Config{
-		Credentials: creds, SessionCheckInterval: checkEvery,
-		Logger: slog.New(slog.NewJSONHandler(logs, nil)),
+		Credentials: creds,
+		Logger:      slog.New(slog.NewJSONHandler(logs, nil)),
 	}
 	server, _ := url.Parse(api.URL)
 	roots := x509.NewCertPool()
@@ -202,6 +205,9 @@ func newFoyer(t *testing.T, api *apiServer, creds gate.Credentials, adjust func(
 	t.Cleanup(front.Close)
 	return foyer{url: front.URL, logs: logs}
 }
+
+// checkSessionsOften is the newFoyer adjustment of a test that ends a session.
+func checkSessionsOften(_ *Config, g *gate.Config) { g.SessionCheckInterval = checkEvery }
 
 // event is one krm-stream event, as the browser receives it.
 type event struct {
@@ -565,7 +571,7 @@ func TestAStreamEndsWithItsSession(t *testing.T) {
 	api := newAPIServer(t, nil)
 	live := &atomic.Bool{}
 	live.Store(true)
-	f := newFoyer(t, api, credentials{token: userToken, live: live}, nil)
+	f := newFoyer(t, api, credentials{token: userToken, live: live}, checkSessionsOften)
 	s := f.open(t.Context(), t, notes, nil)
 	s.until(t, "synced")
 	live.Store(false)

@@ -26,6 +26,11 @@
         "key": { "type": "string", "minLength": 1 }
       }
     },
+    "jsonPointer": {
+      "type": "string",
+      "pattern": "^(/([^~/]|~[01])*)+$",
+      "description": "A JSON Pointer (RFC 6901) into the ID token's claims, such as /groups."
+    },
     "stringMap": {
       "type": "object",
       "additionalProperties": { "type": "string" }
@@ -64,6 +69,42 @@
           "items": { "type": "string", "pattern": "^[^\\s,]+$" }
         },
         "caConfigMap": { "$ref": "#/$defs/configMapRef" }
+      }
+    },
+
+    "login": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Login options. See docs/design.md, Login parameters.",
+      "properties": {
+        "authorizationParameters": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": { "pattern": "^[A-Za-z0-9_.-]{1,64}$" },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "default": { "type": "string", "maxLength": 512 },
+              "allowFromRequest": { "type": "boolean" },
+              "allowedValues": {
+                "type": "array",
+                "maxItems": 64,
+                "uniqueItems": true,
+                "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+              }
+            }
+          }
+        },
+        "sessionClaims": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "displayName": { "$ref": "#/$defs/jsonPointer" },
+            "groups": { "$ref": "#/$defs/jsonPointer" },
+            "connector": { "$ref": "#/$defs/jsonPointer" }
+          }
+        }
       }
     },
 

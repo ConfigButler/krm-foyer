@@ -1,6 +1,7 @@
 {{- $tls := ne .Values.tls.secretName "" }}
 {{- $scheme := ternary "https" "http" $tls }}
 {{- $shared := gt (len .Values.sharedWatches.resources) 0 }}
+{{- $login := include "krm-foyer.login" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,9 +22,15 @@ spec:
     metadata:
       labels:
         {{- include "krm-foyer.selectorLabels" . | nindent 8 }}
-      {{- with .Values.podAnnotations }}
+      {{- if or .Values.podAnnotations $login }}
       annotations:
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if $login }}
+        # krm-foyer reads its login configuration at start: a change restarts it.
+        checksum/login: {{ $login | sha256sum }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "krm-foyer.serviceAccountName" . }}
@@ -53,6 +60,9 @@ spec:
             - {{ printf "-oidc-client-id=%s" .Values.oidc.clientID | quote }}
             - -oidc-client-secret-file=/etc/krm-foyer/oidc/client-secret
             - -session-keys-file=/etc/krm-foyer/session-keys/keys
+            {{- if $login }}
+            - -login-config-file=/etc/krm-foyer/login/login.json
+            {{- end }}
             {{- with .Values.oidc.scopes }}
             - {{ printf "-oidc-scopes=%s" (join "," .) | quote }}
             {{- end }}
@@ -126,6 +136,11 @@ spec:
             - name: session-keys
               mountPath: /etc/krm-foyer/session-keys
               readOnly: true
+            {{- if $login }}
+            - name: login
+              mountPath: /etc/krm-foyer/login
+              readOnly: true
+            {{- end }}
             {{- if .Values.oidc.caConfigMap.name }}
             - name: issuer-ca
               mountPath: /etc/krm-foyer/issuer-ca
@@ -159,6 +174,11 @@ spec:
             items:
               - key: {{ .Values.sessionKeys.key }}
                 path: keys
+        {{- if $login }}
+        - name: login
+          configMap:
+            name: {{ include "krm-foyer.fullname" . }}-login
+        {{- end }}
         {{- with .Values.oidc.caConfigMap }}
         {{- if .name }}
         - name: issuer-ca

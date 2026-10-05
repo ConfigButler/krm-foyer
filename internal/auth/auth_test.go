@@ -53,6 +53,7 @@ type harness struct {
 	auth     *Auth
 	sessions *session.Manager
 	keys     *session.Keys
+	login    LoginConfig
 	handler  atomic.Pointer[http.Handler]
 	foyer    *httptest.Server
 	// logs is everything krm-foyer logged, for the leak scan.
@@ -96,7 +97,22 @@ func newHarness(t *testing.T) *harness {
 
 func newUndiscovered(t *testing.T) *harness {
 	t.Helper()
-	h := &harness{t: t, clock: &clock{t: time.Now().Truncate(time.Second)}}
+	return newUndiscoveredWith(t, LoginConfig{})
+}
+
+// newHarnessWith is newHarness with a login configuration.
+func newHarnessWith(t *testing.T, login LoginConfig) *harness {
+	t.Helper()
+	h := newUndiscoveredWith(t, login)
+	if err := h.auth.Discover(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+func newUndiscoveredWith(t *testing.T, login LoginConfig) *harness {
+	t.Helper()
+	h := &harness{t: t, clock: &clock{t: time.Now().Truncate(time.Second)}, login: login}
 	h.issuer = newFakeIssuer(t, h.clock.Now)
 	h.foyer = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		(*h.handler.Load()).ServeHTTP(w, r)
@@ -139,7 +155,7 @@ func (h *harness) start() {
 	issuerCA.AddCert(h.issuer.Certificate())
 	h.auth, err = New(Config{
 		PublicURL: h.foyer.URL, Issuer: h.issuer.URL, ClientID: clientID, ClientSecret: clientSecret,
-		RootCAs: issuerCA, Sessions: h.sessions, Now: h.clock.Now,
+		RootCAs: issuerCA, Sessions: h.sessions, Now: h.clock.Now, Login: h.login,
 		Logger: slog.New(slog.NewJSONHandler(&h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {

@@ -48,6 +48,9 @@ type Config struct {
 	// Scopes are asked for at login. Nil means DefaultScopes. openid is required;
 	// offline_access is refused.
 	Scopes []string
+	// Login is the deployment's login configuration: extra parameters for the
+	// issuer, and the claims /auth/session shows.
+	Login LoginConfig
 	// RootCAs verifies the issuer's certificate. Nil means the system roots.
 	RootCAs *x509.CertPool
 	// Sessions is where a login ends.
@@ -68,6 +71,8 @@ type Auth struct {
 	now          func() time.Time
 	logger       *slog.Logger
 	transactions *transactions
+	parameters   parameters
+	claims       claimPaths
 	issuer       atomic.Pointer[issuer]
 }
 
@@ -103,6 +108,14 @@ func New(cfg Config) (*Auth, error) {
 	if slices.Contains(scopes, oidc.ScopeOfflineAccess) {
 		return nil, fmt.Errorf("scope %q asks for a refresh token, which krm-foyer does not use yet", oidc.ScopeOfflineAccess)
 	}
+	params, err := newParameters(cfg.Login.AuthorizationParameters)
+	if err != nil {
+		return nil, err
+	}
+	claims, err := newClaimPaths(cfg.Login.SessionClaims)
+	if err != nil {
+		return nil, err
+	}
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
@@ -119,6 +132,8 @@ func New(cfg Config) (*Auth, error) {
 		now:          now,
 		logger:       logger,
 		transactions: newTransactions(now),
+		parameters:   params,
+		claims:       claims,
 	}, nil
 }
 
@@ -212,6 +227,9 @@ var (
 	errIDToken       = loginError{http.StatusBadGateway, "id-token-invalid", "The sign-in service issued a token krm-foyer cannot accept."}
 	errNonce         = loginError{http.StatusBadGateway, "nonce-mismatch", "The sign-in service issued a token for a different sign-in."}
 	errTooLarge      = loginError{http.StatusBadGateway, "session-too-large", "The sign-in service issued a token too large to keep in a session cookie."}
+	errParameter     = loginError{http.StatusBadRequest, "login-parameter-refused", "This sign-in link asks for an option this site does not offer."}
+	errLoginTooLarge = loginError{http.StatusBadRequest, "login-too-large", "This sign-in link is too long to keep while you sign in."}
+	errClaims        = loginError{http.StatusBadGateway, "session-claims-invalid", "The sign-in service issued a token whose claims krm-foyer cannot read."}
 )
 
 // issuerErrors are the error codes RFC 6749 and OIDC define for an authorization
@@ -223,11 +241,13 @@ var issuerErrors = []string{
 	"login_required", "account_selection_required", "consent_required",
 }
 
-func (a *Auth) fail(w http.ResponseWriter, e loginError, retry, issuerError string) {
+// fail answers a refused login with the error page. retry and given are the login to
+// try again: its return path, and those of its parameters that may be repeated.
+func (a *Auth) fail(w http.ResponseWriter, e loginError, retry string, given map[string]string, issuerError string) {
 	a.logger.Info("login refused", "reason", e.reason, "issuer_error", issuerError)
 	pages.Render(w, e.status, "login-error.html", struct {
 		Reason, Message, IssuerError, Retry string
-	}{e.reason, e.message, issuerError, "/auth/login?" + url.Values{"return_to": {retry}}.Encode()})
+	}{e.reason, e.message, issuerError, a.parameters.retry(retry, given)})
 }
 
 // tokenErrors are the error codes RFC 6749 defines for a token response. Only these
@@ -307,27 +327,53 @@ func single(q url.Values, key string) (string, bool) {
 }
 
 func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
+	// Strictly: a query Go would read only in part is refused, not half read.
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		a.fail(w, errParameter, "/", nil, "")
+		return
+	}
 	returnTo := "/"
-	if _, given := r.URL.Query()["return_to"]; given {
-		v, ok := single(r.URL.Query(), "return_to")
+	if _, given := q["return_to"]; given {
+		v, ok := single(q, "return_to")
 		if !ok || !localPath(v) {
-			a.fail(w, errNotLocal, "/", "")
+			a.fail(w, errNotLocal, "/", nil, "")
 			return
 		}
 		returnTo = v
 	}
-	iss := a.issuer.Load()
-	if iss == nil {
-		a.fail(w, errNotReady, returnTo, "")
+	given, err := a.parameters.fromRequest(q)
+	if err != nil {
+		a.fail(w, errParameter, returnTo, nil, "")
 		return
 	}
-	cookie, t := a.transactions.begin(returnTo)
+	iss := a.issuer.Load()
+	if iss == nil {
+		a.fail(w, errNotReady, returnTo, given, "")
+		return
+	}
+	cookie, t, err := a.transactions.begin(returnTo, given)
+	if err != nil {
+		// Within each bound, but too large together once sealed: refused here, not
+		// dropped by the browser and lost at the callback.
+		a.fail(w, errLoginTooLarge, "/", nil, "")
+		return
+	}
 	for _, name := range a.transactions.excess(r) {
 		http.SetCookie(w, transactionCookie(name, "", -1))
 	}
 	http.SetCookie(w, cookie)
 	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, iss.oauth.AuthCodeURL(t.State, oidc.Nonce(t.Nonce), oauth2.S256ChallengeOption(t.Verifier)), http.StatusFound)
+	// The extra parameters go first: oauth2 applies options in order, so nonce and
+	// PKCE, which come after, could not be replaced even by a name New had let
+	// through. state, client_id, redirect_uri and scope are set before any option,
+	// which is why New refuses those names.
+	var opts []oauth2.AuthCodeOption
+	for name, v := range a.parameters.send(given) {
+		opts = append(opts, oauth2.SetAuthURLParam(name, v))
+	}
+	opts = append(opts, oidc.Nonce(t.Nonce), oauth2.S256ChallengeOption(t.Verifier))
+	http.Redirect(w, r, iss.oauth.AuthCodeURL(t.State, opts...), http.StatusFound)
 }
 
 func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
@@ -335,7 +381,7 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	state, ok := single(q, "state")
 	if !ok || state == "" {
-		a.fail(w, errMalformed, "/", "")
+		a.fail(w, errMalformed, "/", nil, "")
 		return
 	}
 	// The state names the login this answers. It is used up by this request,
@@ -344,16 +390,16 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, transactionCookie(name, "", -1))
 	cookies := r.CookiesNamed(name)
 	if len(cookies) != 1 {
-		a.fail(w, errNoTransaction, "/", "")
+		a.fail(w, errNoTransaction, "/", nil, "")
 		return
 	}
 	t, ok := a.transactions.open(name, cookies[0].Value)
 	if !ok {
-		a.fail(w, errNoTransaction, "/", "")
+		a.fail(w, errNoTransaction, "/", nil, "")
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(state), []byte(t.State)) != 1 {
-		a.fail(w, errState, t.ReturnTo, "")
+		a.fail(w, errState, t.ReturnTo, t.Params, "")
 		return
 	}
 	// Only now is the answer known to belong to this login, error or not.
@@ -362,47 +408,58 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 		if !slices.Contains(issuerErrors, code) {
 			code = "unknown"
 		}
-		a.fail(w, errIssuerRefused, t.ReturnTo, code)
+		a.fail(w, errIssuerRefused, t.ReturnTo, t.Params, code)
 		return
 	}
 	code, okCode := single(q, "code")
 	if !okCode || code == "" {
-		a.fail(w, errMalformed, t.ReturnTo, "")
+		a.fail(w, errMalformed, t.ReturnTo, t.Params, "")
 		return
 	}
 
 	iss := a.issuer.Load()
 	if iss == nil { // cannot happen: begin needs a discovered issuer
-		a.fail(w, errNotReady, t.ReturnTo, "")
+		a.fail(w, errNotReady, t.ReturnTo, t.Params, "")
 		return
 	}
 	ctx := context.WithValue(r.Context(), oauth2.HTTPClient, a.client)
 	token, err := iss.oauth.Exchange(ctx, code, oauth2.VerifierOption(t.Verifier))
 	if err != nil {
 		a.logger.Warn("token exchange failed", exchangeFailure(err)...)
-		a.fail(w, errExchange, t.ReturnTo, "")
+		a.fail(w, errExchange, t.ReturnTo, t.Params, "")
 		return
 	}
 	raw, _ := token.Extra("id_token").(string)
 	if raw == "" {
-		a.fail(w, errIDToken, t.ReturnTo, "")
+		a.fail(w, errIDToken, t.ReturnTo, t.Params, "")
 		return
 	}
 	idToken, err := iss.verifier.Verify(ctx, raw)
 	if err != nil {
 		a.logger.Warn("ID token refused", idTokenFailure(err)...)
-		a.fail(w, errIDToken, t.ReturnTo, "")
+		a.fail(w, errIDToken, t.ReturnTo, t.Params, "")
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(t.Nonce)) != 1 {
-		a.fail(w, errNonce, t.ReturnTo, "")
+		a.fail(w, errNonce, t.ReturnTo, t.Params, "")
 		return
 	}
 	var claims struct {
 		Email string `json:"email"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
-		a.fail(w, errIDToken, t.ReturnTo, "")
+		a.fail(w, errIDToken, t.ReturnTo, t.Params, "")
+		return
+	}
+	// What /auth/session will show must be readable now, or the login fails here
+	// rather than every page later.
+	all, err := tokenClaims(raw)
+	if err == nil {
+		_, err = a.claims.extract(all)
+	}
+	if err != nil {
+		a.logger.Warn("the ID token's claims do not match sessionClaims")
+		a.fail(w, errClaims, t.ReturnTo, t.Params, "")
 		return
 	}
 
@@ -414,11 +471,11 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 		// The issuer's token, with its groups, is too large for a cookie: an
 		// integration problem to fix there, not here. The error says by how much.
 		a.logger.Warn("session does not fit in a cookie", "err", err)
-		a.fail(w, errTooLarge, t.ReturnTo, "")
+		a.fail(w, errTooLarge, t.ReturnTo, t.Params, "")
 		return
 	}
 	if err != nil {
-		a.fail(w, errIDToken, t.ReturnTo, "")
+		a.fail(w, errIDToken, t.ReturnTo, t.Params, "")
 		return
 	}
 	// Not http.Redirect: it cleans a relative target with path.Clean, and the
@@ -428,12 +485,18 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusSeeOther)
 }
 
-// sessionState is /auth/session's answer. It never holds a token.
+// sessionState is /auth/session's answer. It never holds a token. Signed in, it
+// always has displayName and groups, empty when the token has no such claim, and
+// connector only when one is configured and the token has it: a fixed shape, never a
+// bag of whatever claims the token carries.
 type sessionState struct {
 	Authenticated bool       `json:"authenticated"`
 	Issuer        string     `json:"issuer,omitempty"`
 	Subject       string     `json:"subject,omitempty"`
 	Email         string     `json:"email,omitempty"`
+	DisplayName   *string    `json:"displayName,omitempty"`
+	Groups        *[]string  `json:"groups,omitempty"`
+	Connector     string     `json:"connector,omitempty"`
 	ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
 	CSRFToken     string     `json:"csrfToken,omitempty"`
 	CSRFHeader    string     `json:"csrfHeader,omitempty"`
@@ -448,8 +511,22 @@ func (a *Auth) session(w http.ResponseWriter, r *http.Request) {
 		a.refusal(err).Write(w)
 	default:
 		expires := s.Expires
+		// Read again from the token, which krm-foyer verified at login and sealed into
+		// the session, rather than kept beside it: the cookie has no room for a second
+		// copy of the groups. The login checked they can be read.
+		var id identity
+		claims, err := tokenClaims(s.IDToken)
+		if err == nil {
+			id, err = a.claims.extract(claims)
+		}
+		if err != nil {
+			// sessionClaims changed since this login. Show nothing rather than a guess.
+			a.logger.Warn("a session's claims do not match sessionClaims")
+			id = identity{Groups: []string{}}
+		}
 		writeJSON(w, http.StatusOK, sessionState{
 			Authenticated: true, Issuer: s.Issuer, Subject: s.Subject, Email: s.Email,
+			DisplayName: &id.DisplayName, Groups: &id.Groups, Connector: id.Connector,
 			ExpiresAt: &expires, CSRFToken: s.CSRFToken, CSRFHeader: session.CSRFHeader,
 		})
 	}
@@ -483,7 +560,7 @@ func (a *Auth) Token(r *http.Request) (gate.Credential, *interruption.Interrupti
 		user = s.Subject
 	}
 	live := a.cfg.Sessions.Watch(r.Context(), s)
-	return gate.Credential{Token: s.IDToken, User: user, Session: s.Handle(), Live: func(ctx context.Context) bool {
+	return gate.Credential{Token: s.IDToken, User: user, Session: s.Handle(), Issuer: s.Issuer, Expires: s.Expires, Live: func(ctx context.Context) bool {
 		return live() && ctx.Err() == nil
 	}}, nil
 }

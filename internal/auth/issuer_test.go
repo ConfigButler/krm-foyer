@@ -56,6 +56,8 @@ type fakeIssuer struct {
 	failDiscovery int
 	// failKeys answers every key-set request with a 500 whose body is failKeys.
 	failKeys string
+	// authorized is the query of every authorization request, in order.
+	authorized []url.Values
 }
 
 type grant struct {
@@ -137,6 +139,7 @@ func (f *fakeIssuer) authorize(location, user string) string {
 	}
 	code := random()
 	f.mu.Lock()
+	f.authorized = append(f.authorized, q)
 	f.codes[code] = grant{challenge: q.Get("code_challenge"), nonce: q.Get("nonce"), redirectURI: q.Get("redirect_uri"), email: user}
 	f.issuedCodes = append(f.issuedCodes, code)
 	f.mu.Unlock()

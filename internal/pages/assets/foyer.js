@@ -10,7 +10,9 @@ let csrf = null;
 
 /**
  * Who is signed in, from /auth/session: {authenticated: false}, or
- * {authenticated: true, email, issuer, subject, expiresAt}.
+ * {authenticated: true, email, issuer, subject, displayName, groups, expiresAt}, and
+ * connector when the deployment configures one. These are the issuer's claims, for
+ * showing; Kubernetes decides access.
  */
 export async function session() {
   const res = await fetch('/auth/session', { cache: 'no-store' });
@@ -22,9 +24,24 @@ export async function session() {
   return s;
 }
 
-/** Sends the browser to sign in, and back to returnTo afterwards: this page by default. */
-export function login(returnTo = location.pathname + location.search) {
-  location.assign('/auth/login?' + new URLSearchParams({ return_to: returnTo }));
+/**
+ * Sends the browser to sign in, and back to returnTo afterwards: this page by default.
+ * params are extra parameters for the issuer, such as {connector_id: 'audience'}, sent
+ * as oidc.<name>; krm-foyer passes on only those its configuration allows.
+ */
+export function login(returnTo = location.pathname + location.search, params = {}) {
+  location.assign(loginURL(returnTo, params));
+}
+
+/**
+ * The URL login() goes to, for a link or a QR code that signs in without this script.
+ */
+export function loginURL(returnTo = '/', params = {}) {
+  const q = new URLSearchParams({ return_to: returnTo });
+  for (const [name, value] of Object.entries(params)) {
+    q.append('oidc.' + name, value);
+  }
+  return '/auth/login?' + q;
 }
 
 /**

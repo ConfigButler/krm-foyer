@@ -40,6 +40,21 @@ sessionKeys:
   secretName: ""
   key: session-keys
 
+# Login options (docs/design.md, "Login parameters"). Empty sends the issuer nothing
+# extra, and /auth/session shows the name and groups claims.
+login:
+  # Extra query parameters of the authorization request, by the issuer's own names,
+  # such as Dex's connector_id. A parameter not named here is never sent. Each has a
+  # default, allowFromRequest (a login link may give it as oidc.<name>), and
+  # allowedValues, the only values sent when set. krm-foyer interprets none of them.
+  #   connector_id: {default: audience, allowFromRequest: true, allowedValues: [audience, operator]}
+  #   login_hint: {allowFromRequest: true}
+  authorizationParameters: {}
+  # JSON Pointers into the verified ID token for /auth/session: displayName (default
+  # /name), groups (default /groups) and connector (none by default), such as
+  # /federated_claims/connector_id with Dex.
+  sessionClaims: {}
+
 # The API server every request goes to, with the user's own token.
 kubernetes:
   server: https://kubernetes.default.svc

@@ -1,7 +1,8 @@
 # Release plan: encrypted cookie sessions and configurable login
 
-**Planned 2026-10-05. PR 1 is implemented; PR 2 is planned.** Where the
-implementation of PR 1 differs from this plan, [PR 1 as built](#pr-1-as-built) says so.
+**Planned 2026-10-05. Both PRs are implemented.** Where the implementation differs
+from this plan, [PR 1 as built](#pr-1-as-built) and [PR 2 as built](#pr-2-as-built) say
+so; [service design](../design.md) is the contract.
 
 The next two PRs make foyer usable for a live audience: deployments preserve
 sessions, applications can carry configured login options in their own links and
@@ -147,7 +148,7 @@ records that migration while the project remains below 1.0.
 | Expiry, including during downtime | Expired cookies are rejected; open responses end within the expiry-check bound |
 | Modified, duplicate, oversized, wrong-key or unsupported-version cookie | Refused without an upstream request; oversized login emits no session cookie |
 | Stable keys and key rotation | Restart and planned overlap preserve sessions; removing the old key rejects its cookies |
-| Credential exposure | Tokens occur only inside authenticated ciphertext in the HttpOnly cookie; plaintext tokens, cookie values and keys do not leak through logs, URLs or script-readable responses |
+| Credential exposure | In the browser, tokens occur only inside authenticated ciphertext in the HttpOnly cookie; krm-foyer sends the plaintext token only to the configured API server, as the bearer credential. Plaintext tokens, cookie values and keys do not leak through logs, URLs or script-readable responses |
 | Existing audience rehearsal | Record cookie/header overhead, encryption cost and reconnect behavior with 200 identities and 1,800 streams |
 
 Run `task verify`, including real-cluster restart evidence, browser cookie/CSRF
@@ -358,6 +359,26 @@ foyer must not invent author information from query parameters or headers.
 Use a generic test issuer for parameter forwarding, and the cluster fixture for
 identity and attribution. The QR generator's image tests and the real provider's
 handoff tests belong to their respective projects. Run `task verify` for the PR.
+
+### PR 2 as built
+
+- **Configuration** is `-login-config-file`, YAML or JSON with the shape above minus
+  the `login:` wrapper; the chart's `login` values render it into a ConfigMap whose
+  checksum rolls the pod. Unknown keys stop startup.
+- **Bounds:** at most 16 parameters and 64 allowed values each; a value is at most 512
+  bytes, and a login request adds at most 1,024 bytes of names and values. Empty values
+  are refused. `client_assertion` and `client_assertion_type` are reserved too.
+- **Retry:** a failed login's link repeats only values of parameters that have
+  `allowedValues`; a free value such as `login_hint` is never echoed.
+- **Session claims** are not stored beside the token: `/auth/session` reads them from
+  the token sealed in the cookie, which login verified, so groups are not paid for twice
+  in the cookie budget. Login checks they can be read.
+- **`/auth/whoami`** lives with the stream code, whose shared-watch reviews already sent
+  the same SelfSubjectReview; both now use one function. It goes through the gate, so
+  the per-session rate and concurrency bounds hold.
+- **Admission evidence** comes from a ValidatingAdmissionPolicy in `Warn` mode that
+  reports the admission request's `userInfo` in a warning on an accepted write. The API
+  server gives a webhook, such as gitops-reverser's, the same `userInfo`.
 
 ## Application migration and release checks
 

@@ -11,6 +11,12 @@ oidc:
     name: krm-foyer-issuer-ca
 tls:
   secretName: krm-foyer-tls
+# Login links may choose Dex's connector, from a list of one, and pass a hint Dex reads
+# as the login form's default: what an application's QR code would carry.
+login:
+  authorizationParameters:
+    connector_id: {allowFromRequest: true, allowedValues: [local]}
+    login_hint: {allowFromRequest: true}
 # Created once by deploy-foyer.sh and kept, so sessions survive a redeploy.
 sessionKeys:
   secretName: krm-foyer-session-keys

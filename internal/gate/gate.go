@@ -40,6 +40,9 @@ type Credential struct {
 	// Session names the session the token came from, for the bounds kept per
 	// session. It is opaque, and never logged or sent anywhere.
 	Session string
+	// Issuer and Expires are the session's issuer and end, for /auth/whoami to show.
+	Issuer  string
+	Expires time.Time
 	// Live reports whether the token may still be used, without counting as use:
 	// false once the session it came from has ended, and false when that cannot be
 	// told before ctx ends. Every open response asks it once per session-check

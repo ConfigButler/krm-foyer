@@ -340,8 +340,9 @@ type auditEvent struct {
 	Verb                     string    `json:"verb"`
 	UserAgent                string    `json:"userAgent"`
 	User                     struct {
-		Username string   `json:"username"`
-		Groups   []string `json:"groups"`
+		Username string              `json:"username"`
+		Groups   []string            `json:"groups"`
+		Extra    map[string][]string `json:"extra"`
 	} `json:"user"`
 	ImpersonatedUser *struct {
 		Username string `json:"username"`
@@ -443,6 +444,28 @@ func kubectlOut(dir string, args ...string) string {
 	out, err := cmd.Output()
 	Expect(err).NotTo(HaveOccurred(), "kubectl %s: %s", strings.Join(args, " "), stderr.String())
 	return strings.TrimSpace(string(out))
+}
+
+// kubectlApply applies a manifest as the fixture's admin, for setup only.
+func (f *fixture) kubectlApply(manifest string) {
+	GinkgoHelper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", filepath.Join(f.dir, "kubeconfig"), "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	out, err := cmd.CombinedOutput()
+	Expect(err).NotTo(HaveOccurred(), "kubectl apply: %s", out)
+}
+
+// kubectlWithWarnings runs kubectl as the fixture's admin and returns what it printed,
+// the API server's warnings, which kubectl writes to stderr, included.
+func (f *fixture) kubectlWithWarnings(args ...string) string {
+	GinkgoHelper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "kubectl", append([]string{"--kubeconfig", filepath.Join(f.dir, "kubeconfig")}, args...)...).CombinedOutput()
+	Expect(err).NotTo(HaveOccurred(), "kubectl %s: %s", strings.Join(args, " "), out)
+	return string(out)
 }
 
 func randomID() string {

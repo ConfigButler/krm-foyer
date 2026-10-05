@@ -19,6 +19,8 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"sigs.k8s.io/yaml"
+
+	"github.com/ConfigButler/krm-foyer/internal/auth"
 )
 
 const chartDir = "../../charts/krm-foyer"
@@ -71,6 +73,7 @@ type rendered struct {
 	bindings        []rbacv1.ClusterRoleBinding
 	roleBindings    []rbacv1.RoleBinding
 	networkPolicies []networkingv1.NetworkPolicy
+	configMaps      []corev1.ConfigMap
 }
 
 func render(t *testing.T, valueFiles []string, set ...string) rendered {
@@ -107,6 +110,8 @@ func render(t *testing.T, valueFiles []string, set ...string) rendered {
 			target = appendNew(&r.roleBindings)
 		case "NetworkPolicy":
 			target = appendNew(&r.networkPolicies)
+		case "ConfigMap":
+			target = appendNew(&r.configMaps)
 		default:
 			t.Fatalf("the chart renders a %s this test does not know: check it, then add it here", meta.Kind)
 		}
@@ -149,6 +154,24 @@ func parseRendered(t *testing.T, r rendered) config {
 		}
 		mounted[m.MountPath+"/keys"] = "c2Vzc2lvbi1rZXktZm9yLWtybS1mb3llci10ZXN0cyE=\n"
 	}
+	// The chart's own ConfigMaps, as the pod mounts them.
+	for _, v := range r.deployment.Spec.Template.Spec.Volumes {
+		if v.ConfigMap == nil {
+			continue
+		}
+		for _, cm := range r.configMaps {
+			if cm.Name != v.ConfigMap.Name {
+				continue
+			}
+			for _, m := range r.container(t).VolumeMounts {
+				if m.Name == v.Name {
+					for key, data := range cm.Data {
+						mounted[m.MountPath+"/"+key] = data
+					}
+				}
+			}
+		}
+	}
 	cfg, err := parseConfig(r.container(t).Args, files(mounted), io.Discard)
 	if err != nil {
 		t.Fatalf("the binary refuses the chart's arguments %q: %v", r.container(t).Args, err)
@@ -172,6 +195,9 @@ func TestChartRendersArgsTheBinaryAccepts(t *testing.T) {
 		}
 		if cfg.login.kubernetes.RootCAs == nil || cfg.login.auth.RootCAs != nil {
 			t.Fatal("want the API server's CA from kube-root-ca.crt, and the system's for the issuer")
+		}
+		if l := cfg.login.auth.Login; l.AuthorizationParameters != nil || l.SessionClaims != (auth.SessionClaims{}) {
+			t.Fatalf("login configuration %+v without login values", l)
 		}
 	})
 	t.Run("e2e fixture", func(t *testing.T) {
@@ -217,6 +243,11 @@ bounds:
 sharedWatches:
   resources: [notes.hello.krm-foyer.example, configmaps]
   tuning: {recheckInterval: 1m, decisionTTL: 20s, qps: 2500000}
+login:
+  authorizationParameters:
+    connector_id: {default: audience, allowFromRequest: true, allowedValues: [audience, operator]}
+    login_hint: {allowFromRequest: true}
+  sessionClaims: {displayName: /name, groups: /groups, connector: /federated_claims/connector_id}
 `), 0o600)
 		if err != nil {
 			t.Fatal(err)
@@ -238,6 +269,12 @@ sharedWatches:
 			s.QPS != 2500000 {
 			t.Fatalf("shared %+v", s)
 		}
+		p := l.auth.Login.AuthorizationParameters
+		if c := p["connector_id"]; c.Default != "audience" || !c.AllowFromRequest || !slices.Equal(c.AllowedValues, []string{"audience", "operator"}) ||
+			!p["login_hint"].AllowFromRequest || len(p) != 2 ||
+			l.auth.Login.SessionClaims != (auth.SessionClaims{DisplayName: "/name", Groups: "/groups", Connector: "/federated_claims/connector_id"}) {
+			t.Fatalf("login %+v", l.auth.Login)
+		}
 	})
 }
 
@@ -249,21 +286,25 @@ func TestChartRefusesValues(t *testing.T) {
 		set  []string
 		want string
 	}{
-		"no public URL":                 {[]string{"publicURL="}, "/publicURL"},
-		"a public URL with a path":      {[]string{"publicURL=https://foyer.example.test/app"}, "/publicURL"},
-		"an issuer over plain HTTP":     {[]string{"oidc.issuer=http://dex.example.test"}, "/oidc/issuer"},
-		"no client secret":              {[]string{"oidc.clientSecret.secretName="}, "/oidc/clientSecret/secretName"},
-		"no session keys":               {[]string{"sessionKeys.secretName="}, "/sessionKeys/secretName"},
-		"the idle timeout of 0.1":       {[]string{"bounds.sessionIdleTimeout=1h"}, "sessionIdleTimeout"},
-		"a misspelt key":                {[]string{"publicUrl=https://foyer.example.test"}, "publicUrl"},
-		"a misspelt bound":              {[]string{"bounds.maxStream=10"}, "maxStream"},
-		"a duration without a unit":     {[]string{"bounds.sessionAbsoluteTimeout=45"}, "/bounds/sessionAbsoluteTimeout"},
-		"a bound of zero":               {[]string{"bounds.maxStreams=0"}, "/bounds/maxStreams"},
-		"a resource with a wildcard":    {[]string{"sharedWatches.resources={*}"}, "/sharedWatches/resources/0"},
-		"a resource with a subresource": {[]string{"sharedWatches.resources={pods/log}"}, "/sharedWatches/resources/0"},
-		"two replicas":                  {[]string{"replicaCount=2"}, "replicaCount"},
-		"plain HTTP open to anyone":     {[]string{"networkPolicy.from=null"}, "networkPolicy.from must name the ingress"},
-		"an account named by no one":    {[]string{"serviceAccount.create=false"}, "/serviceAccount"},
+		"no public URL":                   {[]string{"publicURL="}, "/publicURL"},
+		"a public URL with a path":        {[]string{"publicURL=https://foyer.example.test/app"}, "/publicURL"},
+		"an issuer over plain HTTP":       {[]string{"oidc.issuer=http://dex.example.test"}, "/oidc/issuer"},
+		"no client secret":                {[]string{"oidc.clientSecret.secretName="}, "/oidc/clientSecret/secretName"},
+		"no session keys":                 {[]string{"sessionKeys.secretName="}, "/sessionKeys/secretName"},
+		"a misspelt login option":         {[]string{"login.authorizationParameters.x.allowFromRequests=true"}, "allowFromRequests"},
+		"a parameter name with a space":   {[]string{"login.authorizationParameters.a\\ b.allowFromRequest=true"}, "invalid propertyName 'a b'"},
+		"a claim path that is no pointer": {[]string{"login.sessionClaims.groups=groups"}, "/login/sessionClaims/groups"},
+		"a numeric default":               {[]string{"login.authorizationParameters.x.default=1"}, "/login/authorizationParameters/x/default"},
+		"the idle timeout of 0.1":         {[]string{"bounds.sessionIdleTimeout=1h"}, "sessionIdleTimeout"},
+		"a misspelt key":                  {[]string{"publicUrl=https://foyer.example.test"}, "publicUrl"},
+		"a misspelt bound":                {[]string{"bounds.maxStream=10"}, "maxStream"},
+		"a duration without a unit":       {[]string{"bounds.sessionAbsoluteTimeout=45"}, "/bounds/sessionAbsoluteTimeout"},
+		"a bound of zero":                 {[]string{"bounds.maxStreams=0"}, "/bounds/maxStreams"},
+		"a resource with a wildcard":      {[]string{"sharedWatches.resources={*}"}, "/sharedWatches/resources/0"},
+		"a resource with a subresource":   {[]string{"sharedWatches.resources={pods/log}"}, "/sharedWatches/resources/0"},
+		"two replicas":                    {[]string{"replicaCount=2"}, "replicaCount"},
+		"plain HTTP open to anyone":       {[]string{"networkPolicy.from=null"}, "networkPolicy.from must name the ingress"},
+		"an account named by no one":      {[]string{"serviceAccount.create=false"}, "/serviceAccount"},
 		"the pod's account as the shared identity": {
 			[]string{"sharedWatches.resources={configmaps}", "sharedWatches.serviceAccount.name=krm-foyer"},
 			"must not be the pod's own service account",

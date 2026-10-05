@@ -105,6 +105,8 @@ proxy and streams come together, and need:
 | `-kubernetes-server` | The API server, such as `https://kubernetes.default.svc` |
 
 Optional: `-oidc-ca-file` and `-kubernetes-ca-file` (CAs to trust), `-oidc-scopes`,
+`-login-config-file` ([login parameters](docs/design.md#login-parameters) and
+[session claims](docs/design.md#session-claims)),
 `-session-absolute-timeout` (8h), `-tls-cert-file` and
 `-tls-key-file` to serve TLS, `-listen` (`:8080`) and `-metrics-listen` (`:9090`). The
 [bounds](docs/bounds.md) each have a flag and a documented default: the request rate and
