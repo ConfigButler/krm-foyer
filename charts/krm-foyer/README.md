@@ -28,6 +28,18 @@ To rotate, put a new key on the first line and keep the old one after it until t
 sessions it sealed have expired, restarting krm-foyer after each change
 ([sessions](../../docs/design.md#sessions)).
 
+Login links may choose issuer options, such as Dex's connector, when `login` allows
+them ([login parameters](../../docs/design.md#login-parameters)):
+
+```yaml
+login:
+  authorizationParameters:
+    connector_id: {default: audience, allowFromRequest: true, allowedValues: [audience, operator]}
+    login_hint: {allowFromRequest: true}
+  sessionClaims:
+    connector: /federated_claims/connector_id
+```
+
 **Upgrading from 0.1:** `sessionKeys.secretName` is new and required, and
 `bounds.sessionIdleTimeout` is gone; the schema refuses it. Everyone signs in again once,
 after the first upgrade: the in-memory sessions of 0.1 end with its pod.

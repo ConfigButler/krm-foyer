@@ -160,6 +160,28 @@ func TestAuthRoutes(t *testing.T) {
 	}
 }
 
+// GET /auth/whoami reaches its own handler, and every other request under /auth/
+// reaches Auth, whoami's other methods included.
+func TestWhoAmIRoute(t *testing.T) {
+	var reached []string
+	record := func(who string) http.Handler {
+		return http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			reached = append(reached, who+" "+r.Method+" "+r.URL.Path)
+		})
+	}
+	h := New(Config{Version: "test", Auth: record("auth"), WhoAmI: record("whoami")})
+	for _, r := range []struct{ method, target string }{
+		{http.MethodGet, "/auth/whoami"}, {http.MethodHead, "/auth/whoami"}, {http.MethodPost, "/auth/whoami"},
+		{http.MethodGet, "/auth/whoami/x"}, {http.MethodGet, "/auth/session"},
+	} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), r.method, r.target, nil))
+	}
+	want := "whoami GET /auth/whoami, whoami HEAD /auth/whoami, auth POST /auth/whoami, auth GET /auth/whoami/x, auth GET /auth/session"
+	if got := strings.Join(reached, ", "); got != want {
+		t.Errorf("reached %s, want %s", got, want)
+	}
+}
+
 // /stream/v1 reaches the stream with any method, so that it answers the ones it
 // refuses itself; no other path under /stream does.
 func TestStreamRoute(t *testing.T) {

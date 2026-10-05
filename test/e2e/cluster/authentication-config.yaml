@@ -21,6 +21,15 @@ CA_PEM
       groups:
         claim: groups
         prefix: "oidc:"
+      # The two keys gitops-reverser reads from user.extra, in audit events and
+      # admission requests, for a commit's author (docs/design.md, "Attribution"):
+      # from the signed token, here and nowhere else. A claim that is missing maps to
+      # an empty string, which leaves the key out.
+      extra:
+        - key: configbutler.ai/claims/display-name
+          valueExpression: "claims.?name.orValue('')"
+        - key: configbutler.ai/claims/email
+          valueExpression: "claims.?email.orValue('')"
     claimValidationRules: &claimValidationRules
       # Mapping the username from email makes the API server check email_verified on
       # its own, but that check is claims.?email_verified.orValue(true): a token without

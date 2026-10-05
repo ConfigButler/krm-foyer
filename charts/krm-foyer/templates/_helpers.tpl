@@ -39,6 +39,14 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 {{- end }}
 
+{{/* The login configuration as JSON, or nothing when no login value is set. */}}
+{{- define "krm-foyer.login" -}}
+{{- $login := dict }}
+{{- with .Values.login.authorizationParameters }}{{ $_ := set $login "authorizationParameters" . }}{{ end }}
+{{- with .Values.login.sessionClaims }}{{ $_ := set $login "sessionClaims" . }}{{ end }}
+{{- if $login }}{{ toJson $login }}{{ end }}
+{{- end }}
+
 {{/* The shared-watch identity: never the pod's own account. */}}
 {{- define "krm-foyer.sharedAccountName" -}}
 {{- $name := default (printf "%s-shared" (include "krm-foyer.fullname" .)) .Values.sharedWatches.serviceAccount.name }}

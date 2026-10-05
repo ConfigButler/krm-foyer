@@ -104,3 +104,19 @@ test('reads carry no proof and are never resent', async () => {
   assert.equal(sent.length, 1);
   assert.equal(sent[0].headers.get(csrfHeader), null);
 });
+
+test('login goes to /auth/login with the return path, and extra parameters as oidc.<name>', async () => {
+  foyer(() => json(200, {}));
+  const assigned = [];
+  globalThis.location = { pathname: '/room', search: '?code=7', assign: (url) => assigned.push(url) };
+  const { login, loginURL } = await helper();
+  login();
+  login('/after', { connector_id: 'audience', login_hint: 'a b&c=d/é' });
+  assert.deepEqual(assigned, [
+    '/auth/login?return_to=%2Froom%3Fcode%3D7',
+    '/auth/login?return_to=%2Fafter&oidc.connector_id=audience&oidc.login_hint=a+b%26c%3Dd%2F%C3%A9',
+  ]);
+  const q = new URL(loginURL('/x', { login_hint: 'a b&c=d/é' }), 'https://foyer.example').searchParams;
+  assert.equal(q.get('oidc.login_hint'), 'a b&c=d/é');
+  assert.equal(q.get('return_to'), '/x');
+});

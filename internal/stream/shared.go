@@ -239,20 +239,9 @@ func (u *upstream) principal(ctx context.Context, cred gate.Credential) (gateway
 	if cred.Token == "" {
 		return nil, gateway.Unauthenticated("not signed in")
 	}
-	cfg := u.userConfig(cred)
-	httpClient, err := kube.HTTPClientFor(cfg)
-	if err != nil {
-		return nil, unknownSubject(err)
-	}
-	client, err := kubernetes.NewForConfigAndClient(cfg, httpClient)
-	if err != nil {
-		return nil, unknownSubject(err)
-	}
-	ctx, cancel := context.WithTimeout(ctx, subjectTimeout)
-	defer cancel()
-	review, err := client.AuthenticationV1().SelfSubjectReviews().Create(ctx, &authenticationv1.SelfSubjectReview{}, metav1.CreateOptions{})
+	info, err := u.selfSubjectReview(ctx, cred)
 	switch {
-	case err == nil && review.Status.UserInfo.Username != "":
+	case err == nil && info.Username != "":
 	case err == nil:
 		m.SubjectReview(metrics.SubjectError)
 		u.streams.logger.Warn("the API server named no user for a shared stream's caller")
@@ -271,7 +260,6 @@ func (u *upstream) principal(ctx context.Context, cred gate.Credential) (gateway
 		return nil, unknownSubject(err)
 	}
 	m.SubjectReview(metrics.SubjectResolved)
-	info := review.Status.UserInfo
 	sub := subscriber{subject: kube.Subject{User: info.Username, UID: info.UID, Groups: slices.Clone(info.Groups)}}
 	if len(info.Extra) > 0 {
 		sub.subject.Extra = make(map[string]authorizationv1.ExtraValue, len(info.Extra))
@@ -280,6 +268,29 @@ func (u *upstream) principal(ctx context.Context, cred gate.Credential) (gateway
 		}
 	}
 	return sub, nil
+}
+
+// selfSubjectReview asks the API server, with the user's own token and nothing else,
+// who that token belongs to. It is the one place krm-foyer asks: for a shared
+// stream's reviews, and for /auth/whoami. The call is bounded by subjectTimeout, and
+// a redirect is refused, not followed.
+func (u *upstream) selfSubjectReview(ctx context.Context, cred gate.Credential) (authenticationv1.UserInfo, error) {
+	cfg := u.userConfig(cred)
+	httpClient, err := kube.HTTPClientFor(cfg)
+	if err != nil {
+		return authenticationv1.UserInfo{}, err
+	}
+	client, err := kubernetes.NewForConfigAndClient(cfg, httpClient)
+	if err != nil {
+		return authenticationv1.UserInfo{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, subjectTimeout)
+	defer cancel()
+	review, err := client.AuthenticationV1().SelfSubjectReviews().Create(ctx, &authenticationv1.SelfSubjectReview{}, metav1.CreateOptions{})
+	if err != nil {
+		return authenticationv1.UserInfo{}, err
+	}
+	return review.Status.UserInfo, nil
 }
 
 // retryable reports whether err may pass: the API server busy, failing or out of

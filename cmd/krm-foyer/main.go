@@ -83,7 +83,7 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		cfg                            config
 		publicURL, issuer, clientID    string
 		secretFile, issuerCAFile       string
-		sessionKeysFile                string
+		sessionKeysFile, loginFile     string
 		scopes, apiServer, apiServerCA string
 		absolute, checkEvery           time.Duration
 		maxDuration                    time.Duration
@@ -111,6 +111,9 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	fs.StringVar(&sessionKeysFile, "session-keys-file", "",
 		"a file of the keys session cookies are sealed with, one per line in standard base64, 32 bytes each: "+
 			"the first seals new cookies, every one opens them. See docs/design.md, \"Sessions\"")
+	fs.StringVar(&loginFile, "login-config-file", "",
+		"a YAML file of extra authorization parameters for the issuer and the claims /auth/session shows; "+
+			"see docs/design.md, \"Login parameters\"")
 	fs.DurationVar(&absolute, "session-absolute-timeout", 8*time.Hour,
 		"end any session this long after login, however it is used; the token's expiry ends it sooner")
 	fs.DurationVar(&checkEvery, "session-check-interval", gate.DefaultSessionCheckInterval,
@@ -168,8 +171,8 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	}
 	switch {
 	case len(missing) == len(required):
-		if issuerCAFile != "" || apiServerCA != "" || sharedResources != "" || sharedToken != "" {
-			return config{}, errors.New("-oidc-ca-file, -kubernetes-ca-file and the -shared-watch flags need the sign-in flags too")
+		if issuerCAFile != "" || apiServerCA != "" || loginFile != "" || sharedResources != "" || sharedToken != "" {
+			return config{}, errors.New("-oidc-ca-file, -kubernetes-ca-file, -login-config-file and the -shared-watch flags need the sign-in flags too")
 		}
 		return cfg, nil // no sign-in and no API proxy: the start page and probes only
 	case len(missing) > 0:
@@ -203,6 +206,19 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		}
 		if err := appendCAs(login.auth.RootCAs, issuerCAFile, readFile); err != nil {
 			return config{}, err
+		}
+	}
+
+	if loginFile != "" {
+		text, err := readFile(loginFile)
+		if err != nil {
+			return config{}, fmt.Errorf("reading the login configuration: %w", err)
+		}
+		if login.auth.Login, err = auth.ParseLoginConfig(text); err != nil {
+			return config{}, fmt.Errorf("-login-config-file: %w", err)
+		}
+		if err := login.auth.Login.Validate(); err != nil {
+			return config{}, fmt.Errorf("-login-config-file: %w", err)
 		}
 	}
 
@@ -337,7 +353,7 @@ func handler(cfg config, logger *slog.Logger, m *metrics.Metrics) (http.Handler,
 		return nil, nil, err
 	}
 	return server.New(server.Config{
-		Version: version, Kubernetes: api, Stream: streams, Auth: login.Handler(), Ready: login.Ready,
+		Version: version, Kubernetes: api, Stream: streams, WhoAmI: streams.WhoAmI(), Auth: login.Handler(), Ready: login.Ready,
 	}), login.Run, nil
 }
 

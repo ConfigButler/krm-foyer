@@ -63,6 +63,26 @@ func TestParseConfigWithLogin(t *testing.T) {
 	}
 }
 
+// The login configuration is optional, and read from its file when given.
+func TestParseConfigLogin(t *testing.T) {
+	cfg, err := parseConfig(loginArgs, files(map[string]string{"/secret": "s", "/keys": testSessionKeys}), io.Discard)
+	if err != nil || cfg.login.auth.Login.AuthorizationParameters != nil {
+		t.Fatalf("without the flag: %+v, %v", cfg.login.auth.Login, err)
+	}
+	cfg, err = parseConfig(append(loginArgs, "-login-config-file", "/login"), files(map[string]string{
+		"/secret": "s", "/keys": testSessionKeys,
+		"/login": `{"authorizationParameters":{"connector_id":{"default":"audience","allowFromRequest":true}},` +
+			`"sessionClaims":{"connector":"/federated_claims/connector_id"}}`,
+	}), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := cfg.login.auth.Login; l.AuthorizationParameters["connector_id"].Default != "audience" ||
+		l.SessionClaims.Connector != "/federated_claims/connector_id" {
+		t.Fatalf("%+v", l)
+	}
+}
+
 // Shared watches are off unless asked for, and take the resources and the token
 // file they are given, with the recheck defaults.
 func TestParseConfigSharedWatches(t *testing.T) {
@@ -113,26 +133,34 @@ func TestParseConfigRefuses(t *testing.T) {
 		"session keys empty":      {loginArgs, map[string]string{"/secret": "s", "/keys": "\n"}, "no session key"},
 		"a session key too short": {loginArgs, map[string]string{"/secret": "s", "/keys": "c2hvcnQ="}, "-session-keys-file: line 1"},
 		"the idle timeout of 0.1": {append(loginArgs, "-session-idle-timeout", "1h"), secret, "session-idle-timeout"},
-		"no session timeout":      {append(loginArgs, "-session-absolute-timeout", "0s"), secret, "-session-absolute-timeout"},
-		"secret file missing":     {loginArgs, nil, "client secret"},
-		"secret file empty":       {loginArgs, map[string]string{"/secret": "\n", "/keys": testSessionKeys}, "empty"},
-		"only a cert":             {[]string{"-tls-cert-file", "/c"}, nil, "-tls-key-file"},
-		"only a key":              {[]string{"-tls-key-file", "/k"}, nil, "-tls-cert-file"},
-		"CA without login":        {[]string{"-kubernetes-ca-file", "/ca"}, nil, "sign-in flags"},
-		"CA not PEM":              {append(loginArgs, "-kubernetes-ca-file", "/ca"), map[string]string{"/secret": "s", "/keys": testSessionKeys, "/ca": "nope"}, "no PEM"},
-		"stray argument":          {[]string{"serve"}, nil, "unexpected"},
-		"no session checks":       {append(loginArgs, "-session-check-interval", "0s"), secret, "-session-check-interval"},
-		"no response duration":    {append(loginArgs, "-max-response-duration", "0s"), secret, "-max-response-duration"},
-		"no concurrency":          {append(loginArgs, "-max-concurrent-requests", "0"), secret, "-max-concurrent-requests"},
-		"no session concurrency":  {append(loginArgs, "-max-session-concurrent-requests", "-1"), secret, "-max-session-concurrent-requests"},
-		"no session streams":      {append(loginArgs, "-max-session-streams", "0"), secret, "-max-session-streams"},
-		"no streams":              {append(loginArgs, "-max-streams", "-1"), secret, "-max-streams"},
-		"no request rate":         {append(loginArgs, "-session-request-rate", "0"), secret, "-session-request-rate"},
-		"no request burst":        {append(loginArgs, "-session-request-burst", "0"), secret, "-session-request-burst"},
-		"shared without token":    {append(loginArgs, "-shared-watch-resources", "configmaps"), secret, "go together"},
-		"shared token alone":      {append(loginArgs, "-shared-watch-token-file", "/token"), secret, "go together"},
-		"shared resource bad":     {append(loginArgs, "-shared-watch-resources", "apps/deployments", "-shared-watch-token-file", "/token"), secret, "-shared-watch-resources"},
-		"shared names none":       {append(loginArgs, "-shared-watch-resources", ",", "-shared-watch-token-file", "/token"), secret, "names no resource"},
+		"login config missing":    {append(loginArgs, "-login-config-file", "/login"), secret, "reading the login configuration"},
+		"login config misspelt": {append(loginArgs, "-login-config-file", "/login"),
+			map[string]string{"/secret": "s", "/keys": testSessionKeys, "/login": "authorizationParameter: {}"}, "-login-config-file"},
+		"login config reserved": {append(loginArgs, "-login-config-file", "/login"),
+			map[string]string{"/secret": "s", "/keys": testSessionKeys, "/login": "authorizationParameters: {state: {allowFromRequest: true}}"}, "krm-foyer's own"},
+		"login config, bad pointer": {append(loginArgs, "-login-config-file", "/login"),
+			map[string]string{"/secret": "s", "/keys": testSessionKeys, "/login": "sessionClaims: {groups: groups}"}, "sessionClaims.groups"},
+		"login config without login": {[]string{"-login-config-file", "/login"}, nil, "need the sign-in flags"},
+		"no session timeout":         {append(loginArgs, "-session-absolute-timeout", "0s"), secret, "-session-absolute-timeout"},
+		"secret file missing":        {loginArgs, nil, "client secret"},
+		"secret file empty":          {loginArgs, map[string]string{"/secret": "\n", "/keys": testSessionKeys}, "empty"},
+		"only a cert":                {[]string{"-tls-cert-file", "/c"}, nil, "-tls-key-file"},
+		"only a key":                 {[]string{"-tls-key-file", "/k"}, nil, "-tls-cert-file"},
+		"CA without login":           {[]string{"-kubernetes-ca-file", "/ca"}, nil, "sign-in flags"},
+		"CA not PEM":                 {append(loginArgs, "-kubernetes-ca-file", "/ca"), map[string]string{"/secret": "s", "/keys": testSessionKeys, "/ca": "nope"}, "no PEM"},
+		"stray argument":             {[]string{"serve"}, nil, "unexpected"},
+		"no session checks":          {append(loginArgs, "-session-check-interval", "0s"), secret, "-session-check-interval"},
+		"no response duration":       {append(loginArgs, "-max-response-duration", "0s"), secret, "-max-response-duration"},
+		"no concurrency":             {append(loginArgs, "-max-concurrent-requests", "0"), secret, "-max-concurrent-requests"},
+		"no session concurrency":     {append(loginArgs, "-max-session-concurrent-requests", "-1"), secret, "-max-session-concurrent-requests"},
+		"no session streams":         {append(loginArgs, "-max-session-streams", "0"), secret, "-max-session-streams"},
+		"no streams":                 {append(loginArgs, "-max-streams", "-1"), secret, "-max-streams"},
+		"no request rate":            {append(loginArgs, "-session-request-rate", "0"), secret, "-session-request-rate"},
+		"no request burst":           {append(loginArgs, "-session-request-burst", "0"), secret, "-session-request-burst"},
+		"shared without token":       {append(loginArgs, "-shared-watch-resources", "configmaps"), secret, "go together"},
+		"shared token alone":         {append(loginArgs, "-shared-watch-token-file", "/token"), secret, "go together"},
+		"shared resource bad":        {append(loginArgs, "-shared-watch-resources", "apps/deployments", "-shared-watch-token-file", "/token"), secret, "-shared-watch-resources"},
+		"shared names none":          {append(loginArgs, "-shared-watch-resources", ",", "-shared-watch-token-file", "/token"), secret, "names no resource"},
 		"decisions outlive check": {append(loginArgs, "-shared-watch-resources", "configmaps", "-shared-watch-token-file", "/token",
 			"-shared-watch-decision-ttl", "1m"), secret, "-shared-watch-decision-ttl"},
 		"no stream write timeout": {append(loginArgs, "-stream-write-timeout", "0s"), secret, "-stream-write-timeout"},

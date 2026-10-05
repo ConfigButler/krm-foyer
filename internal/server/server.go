@@ -20,6 +20,8 @@ type Config struct {
 	Stream http.Handler
 	// Auth serves /auth/: login, logout and the session. Nil leaves it unrouted.
 	Auth http.Handler
+	// WhoAmI serves GET /auth/whoami. Nil leaves it to Auth.
+	WhoAmI http.Handler
 	// Ready reports whether krm-foyer can serve logins yet. Nil means always.
 	Ready func() bool
 }
@@ -41,6 +43,9 @@ func New(cfg Config) http.Handler {
 	})
 	if cfg.Auth != nil {
 		mux.Handle("/auth/", cfg.Auth)
+	}
+	if cfg.WhoAmI != nil {
+		mux.Handle("GET /auth/whoami", cfg.WhoAmI)
 	}
 	if cfg.Stream != nil {
 		// Every method, so that the stream answers one that is not a GET with an

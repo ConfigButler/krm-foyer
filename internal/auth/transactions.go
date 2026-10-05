@@ -40,6 +40,9 @@ type transaction struct {
 	Verifier string    `json:"v"`
 	ReturnTo string    `json:"r"`
 	Expires  time.Time `json:"e"`
+	// Params are the values the login request gave for the issuer's parameters, so a
+	// failed login can offer the same choice again.
+	Params map[string]string `json:"p,omitempty"`
 }
 
 // transactions keeps logins in progress in the browser that started them, sealed
@@ -79,14 +82,14 @@ func transactionCookieName(state string) string {
 }
 
 // begin starts a transaction and returns the cookie that holds it.
-func (ts *transactions) begin(returnTo string) (*http.Cookie, transaction) {
+func (ts *transactions) begin(returnTo string, params map[string]string) (*http.Cookie, transaction) {
 	t := transaction{
 		State: random(), Nonce: random(), Verifier: oauth2.GenerateVerifier(),
-		ReturnTo: returnTo, Expires: ts.now().Add(transactionLifetime),
+		ReturnTo: returnTo, Expires: ts.now().Add(transactionLifetime), Params: params,
 	}
 	plain, err := json.Marshal(t)
 	if err != nil {
-		panic(err) // cannot happen: strings and a time
+		panic(err) // cannot happen: strings, a map of strings and a time
 	}
 	name := transactionCookieName(t.State)
 	nonce := make([]byte, ts.aead.NonceSize())

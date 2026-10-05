@@ -21,12 +21,12 @@ an implemented test, not just a design or a pending spec.
 
 For the audience release, two PRs are specified in the
 [encrypted cookie sessions and configurable login plan](investigations/audience-release-plan.md).
-The first is done: established sessions survive restarts in encrypted HttpOnly
+Both are done. The first: established sessions survive restarts in encrypted HttpOnly
 cookies sealed with stable keys, with no session database, and sliding idle expiry is
 gone. Logins in progress stay sealed with a key of the process's own. Logout clears the
 browser cookie and ends what is open in the process; copied cookies remain usable until
-their fixed expiry. The second adds configured login parameters, identity discovery and
-the fixed Kubernetes attribution mappings gitops-reverser consumes. QR generation and
+their fixed expiry. The second: configured login parameters, session claims,
+`/auth/whoami` and the fixed Kubernetes attribution mappings gitops-reverser consumes. QR generation and
 provider-specific handoff belong to the application/provider integration; coffee's
 backend work is separate. The broader backlog below remains subject to that decision;
 its shared-session store proposal is superseded, and distributed coordination needs a
@@ -53,8 +53,8 @@ new design only when multiple replicas or stronger revocation guarantees are req
    backend handlers, with a domain operator showing pending, accepted, rejected and
    failed outcomes. Document helper outcomes, conditional saves, unknown write results,
    stream errors and draft preservation at sign-out. State browser support: only
-   Chromium has browser e2e today. Add `/auth/whoami` and
-   `/_foyer/access` to make identity and RBAC problems diagnosable. This establishes
+   Chromium has browser e2e today. Add `/_foyer/access` beside `/auth/whoami` to make
+   identity and RBAC problems diagnosable. This establishes
    reuse and identifies which lifecycle features the application actually needs.
 4. **Refresh, when sessions must outlive short ID tokens.** Serialize refresh per
    session, bound it, make logout win every race, never replay a mutation, and scan
@@ -240,7 +240,16 @@ Security items need tests that try to get past the boundary.
 - [x] The same checks on logout
 - [x] An unauthenticated API request gets a JSON 401, not a redirect (unit tests; e2e against Dex)
 - [x] `/auth/session`
-- [ ] `/auth/whoami` from a SelfSubjectReview
+- [x] `/auth/whoami` from a SelfSubjectReview, sharing the shared watches' lookup
+      (unit tests; e2e against the API server, compared with a direct review)
+- [x] Login parameters: configured names, defaults and allowed values reach the issuer
+      from `oidc.*`; anything else, krm-foyer's own parameters included, is refused
+      before a login starts (unit tests under two issuers' names; e2e against Dex)
+- [x] Session claims: display name, groups and connector from the verified token, in a
+      fixed shape (unit tests; e2e against Dex)
+- [x] The attribution extras gitops-reverser reads, mapped by the API server from signed
+      claims, in `/auth/whoami`, the audit event and an admission request, with spoofed
+      headers changing nothing (e2e)
 - [ ] `/_foyer/access`: the rules for a namespace from a SelfSubjectRulesReview, and a
       "can I?" form answered by a SelfSubjectAccessReview. See
       [what may I do](design.md#what-may-i-do)

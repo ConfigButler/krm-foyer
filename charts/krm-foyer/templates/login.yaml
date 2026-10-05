@@ -1,0 +1,12 @@
+{{- if include "krm-foyer.login" . }}
+# The login configuration (docs/design.md, "Login parameters"), mounted as a file and
+# read at start. Its checksum is on the pod, so a change rolls it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "krm-foyer.fullname" . }}-login
+  labels:
+    {{- include "krm-foyer.labels" . | nindent 4 }}
+data:
+  login.json: {{ include "krm-foyer.login" . | quote }}
+{{- end }}
