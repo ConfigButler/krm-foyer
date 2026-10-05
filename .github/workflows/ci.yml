@@ -75,6 +75,8 @@ jobs:
             kubectl version --client
             k3d version
             helm version --short
+            cosign version
+            oras version
             docker --version
             openssl version
           '
