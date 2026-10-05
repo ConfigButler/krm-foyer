@@ -76,6 +76,16 @@
       }
     },
 
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "from": { "type": "array", "items": { "type": "object" }, "description": "NetworkPolicyPeers admitted to the origin port." },
+        "metricsFrom": { "type": "array", "items": { "type": "object" }, "description": "NetworkPolicyPeers admitted to the metrics port." }
+      }
+    },
+
     "tls": {
       "type": "object",
       "additionalProperties": false,

@@ -87,3 +87,26 @@ func TestMemoryStoreForgetsExpiredSessions(t *testing.T) {
 		t.Fatalf("%d sessions held, want 1", n)
 	}
 }
+
+// The store holds at most MaxMemorySessions live sessions; expired ones make room.
+func TestMemoryStoreIsBounded(t *testing.T) {
+	ctx := context.Background()
+	c := &clock{t: time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)}
+	m := NewMemory(c.Now)
+	until := c.Now().Add(time.Hour)
+	for i := range MaxMemorySessions {
+		if err := m.Create(ctx, Key{byte(i), byte(i >> 8), byte(i >> 16)}, Session{}, until); err != nil {
+			t.Fatalf("session %d: %v", i, err)
+		}
+	}
+	if err := m.Create(ctx, Key{0xff, 0xff, 0xff}, Session{}, until); !errors.Is(err, ErrFull) {
+		t.Fatalf("Create past the bound: %v", err)
+	}
+	c.Advance(time.Hour)
+	if err := m.Create(ctx, Key{0xff, 0xff, 0xff}, Session{}, c.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Create after the others expired: %v", err)
+	}
+	if n := m.len(); n != 1 {
+		t.Errorf("%d sessions held, want 1", n)
+	}
+}

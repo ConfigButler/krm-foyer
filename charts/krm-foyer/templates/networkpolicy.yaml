@@ -1,0 +1,36 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $tls := ne .Values.tls.secretName "" }}
+{{- if and (not $tls) (not .Values.networkPolicy.from) }}
+{{- fail "networkPolicy.from must name the ingress's pods when krm-foyer serves plain HTTP: that hop carries session cookies, and only the ingress may reach it (docs/ingress.md). Set tls.secretName instead, or networkPolicy.enabled=false to take that on yourself" }}
+{{- end }}
+# Admits traffic to krm-foyer's ports alone: the origin from networkPolicy.from (from
+# anywhere when that is empty, which needs TLS), and metrics from
+# networkPolicy.metricsFrom. Egress is left open: the issuer and the API server are
+# the cluster's to name.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "krm-foyer.fullname" . }}
+  labels:
+    {{- include "krm-foyer.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "krm-foyer.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: {{ ternary 8443 8080 $tls }}
+      {{- with .Values.networkPolicy.from }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- if .Values.metrics.enabled }}
+    - ports:
+        - port: 9090
+      {{- with .Values.networkPolicy.metricsFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+{{- end }}

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -360,13 +361,8 @@ func run(cfg config, logger *slog.Logger) error {
 		}()
 	}
 
-	srv := &http.Server{
-		Addr:              cfg.listen,
-		Handler:           h,
-		ReadHeaderTimeout: 10 * time.Second,
-		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
-		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
-	}
+	srv, endRequests := newServer(cfg.listen, h, logger)
+	srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 
 	go func() {
 		logger.Info("krm-foyer listening", "addr", cfg.listen, "version", version,
@@ -385,20 +381,63 @@ func run(cfg config, logger *slog.Logger) error {
 	}
 
 	// Kubernetes sends SIGTERM and waits terminationGracePeriodSeconds (30s by
-	// default) before killing the pod, so finish in-flight requests well inside that.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
+	// default) before killing the pod, so stop well inside that.
 	if metricsSrv != nil {
-		_ = metricsSrv.Shutdown(shutdownCtx)
+		metricsCtx, cancel := context.WithTimeout(context.Background(), shutdownDrain)
+		_ = metricsSrv.Shutdown(metricsCtx)
+		cancel()
 	}
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return err
-	}
+	shutdown(srv, endRequests, shutdownDrain, shutdownTimeout, logger)
 	if err := <-errs; !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
-	logger.Info("krm-foyer shut down cleanly")
 	return nil
+}
+
+// How krm-foyer stops: requests in flight get shutdownDrain to finish by
+// themselves. Streams never do, so then every request still open is ended, and
+// whatever remains at shutdownTimeout is cut.
+const (
+	shutdownDrain   = 5 * time.Second
+	shutdownTimeout = 20 * time.Second
+)
+
+// newServer serves h on addr. endRequests ends the context of every request it
+// serves, the streams too, which otherwise stay open until the browser leaves.
+func newServer(addr string, h http.Handler, logger *slog.Logger) (srv *http.Server, endRequests context.CancelFunc) {
+	requests, endRequests := context.WithCancel(context.Background())
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		// A keep-alive connection with no request on it is closed after this.
+		IdleTimeout: 2 * time.Minute,
+		BaseContext: func(net.Listener) context.Context { return requests },
+		ErrorLog:    slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+	}, endRequests
+}
+
+// shutdown stops srv: no new connections, drain for the requests in flight to
+// finish, then endRequests for the streams, and a hard close at timeout.
+func shutdown(srv *http.Server, endRequests context.CancelFunc, drain, timeout time.Duration, logger *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Shutdown(ctx) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(drain):
+		endRequests()
+		err = <-done
+	}
+	endRequests()
+	if err != nil {
+		logger.Warn("requests were still open when krm-foyer stopped; closing them", "after", timeout)
+		_ = srv.Close()
+		return
+	}
+	logger.Info("krm-foyer shut down cleanly")
 }
 
 // metricsHandler serves /metrics and nothing else.

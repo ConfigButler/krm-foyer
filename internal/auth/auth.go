@@ -204,7 +204,6 @@ type loginError struct {
 var (
 	errNotLocal       = loginError{http.StatusBadRequest, "return-path-not-local", "The page to return to after signing in must be a path on this site."}
 	errNotReady       = loginError{http.StatusServiceUnavailable, "issuer-unavailable", "The sign-in service has not been reached yet. Try again in a moment."}
-	errBusy           = loginError{http.StatusServiceUnavailable, "too-many-logins", "Too many sign-ins are in progress. Try again in a moment."}
 	errNoTransaction  = loginError{http.StatusBadRequest, "login-not-in-progress", "This sign-in was not started in this browser, has expired, or has been used already."}
 	errMalformed      = loginError{http.StatusBadRequest, "malformed-callback", "The sign-in service sent back an incomplete answer."}
 	errState          = loginError{http.StatusBadRequest, "state-mismatch", "This answer does not belong to the sign-in this browser started."}
@@ -213,6 +212,7 @@ var (
 	errIDToken        = loginError{http.StatusBadGateway, "id-token-invalid", "The sign-in service issued a token krm-foyer cannot accept."}
 	errNonce          = loginError{http.StatusBadGateway, "nonce-mismatch", "The sign-in service issued a token for a different sign-in."}
 	errSessionStorage = loginError{http.StatusServiceUnavailable, "session-store-unavailable", "Your session could not be stored. Try again in a moment."}
+	errTooMany        = loginError{http.StatusServiceUnavailable, "too-many-sessions", "Too many people are signed in. Try again later."}
 )
 
 // issuerErrors are the error codes RFC 6749 and OIDC define for an authorization
@@ -322,85 +322,88 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, errNotReady, returnTo, "")
 		return
 	}
-	id, t, ok := a.transactions.begin(returnTo)
-	if !ok {
-		a.fail(w, errBusy, returnTo, "")
-		return
+	cookie, t := a.transactions.begin(returnTo)
+	for _, name := range a.transactions.excess(r) {
+		http.SetCookie(w, transactionCookie(name, "", -1))
 	}
-	http.SetCookie(w, transactionCookie(id, int(transactionLifetime/time.Second)))
+	http.SetCookie(w, cookie)
 	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, iss.oauth.AuthCodeURL(t.state, oidc.Nonce(t.nonce), oauth2.S256ChallengeOption(t.verifier)), http.StatusFound)
+	http.Redirect(w, r, iss.oauth.AuthCodeURL(t.State, oidc.Nonce(t.Nonce), oauth2.S256ChallengeOption(t.Verifier)), http.StatusFound)
 }
 
 func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	// The transaction is used up by this request, whatever happens next: a second
-	// callback with the same cookie, state or code finds nothing.
-	http.SetCookie(w, transactionCookie("", -1))
-	var t transaction
-	found := 0
-	for _, c := range r.CookiesNamed(transactionCookieName) {
-		if got, ok := a.transactions.take(c.Value); ok {
-			t, found = got, found+1
-		}
+	q := r.URL.Query()
+	state, ok := single(q, "state")
+	if !ok || state == "" {
+		a.fail(w, errMalformed, "/", "")
+		return
 	}
-	if found != 1 || len(r.CookiesNamed(transactionCookieName)) != 1 {
+	// The state names the login this answers. It is used up by this request,
+	// whatever happens next; other logins in progress in this browser stay.
+	name := transactionCookieName(state)
+	http.SetCookie(w, transactionCookie(name, "", -1))
+	cookies := r.CookiesNamed(name)
+	if len(cookies) != 1 {
 		a.fail(w, errNoTransaction, "/", "")
 		return
 	}
-
-	q := r.URL.Query()
+	t, ok := a.transactions.open(name, cookies[0].Value)
+	if !ok {
+		a.fail(w, errNoTransaction, "/", "")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(state), []byte(t.State)) != 1 {
+		a.fail(w, errState, t.ReturnTo, "")
+		return
+	}
+	// Only now is the answer known to belong to this login, error or not.
 	if _, ok := q["error"]; ok {
 		code, _ := single(q, "error")
 		if !slices.Contains(issuerErrors, code) {
 			code = "unknown"
 		}
-		a.fail(w, errIssuerRefused, t.returnTo, code)
+		a.fail(w, errIssuerRefused, t.ReturnTo, code)
 		return
 	}
-	state, okState := single(q, "state")
 	code, okCode := single(q, "code")
-	if !okState || !okCode || code == "" {
-		a.fail(w, errMalformed, t.returnTo, "")
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(state), []byte(t.state)) != 1 {
-		a.fail(w, errState, t.returnTo, "")
+	if !okCode || code == "" {
+		a.fail(w, errMalformed, t.ReturnTo, "")
 		return
 	}
 
 	iss := a.issuer.Load()
 	if iss == nil { // cannot happen: begin needs a discovered issuer
-		a.fail(w, errNotReady, t.returnTo, "")
+		a.fail(w, errNotReady, t.ReturnTo, "")
 		return
 	}
 	ctx := context.WithValue(r.Context(), oauth2.HTTPClient, a.client)
-	token, err := iss.oauth.Exchange(ctx, code, oauth2.VerifierOption(t.verifier))
+	token, err := iss.oauth.Exchange(ctx, code, oauth2.VerifierOption(t.Verifier))
 	if err != nil {
 		a.logger.Warn("token exchange failed", exchangeFailure(err)...)
-		a.fail(w, errExchange, t.returnTo, "")
+		a.fail(w, errExchange, t.ReturnTo, "")
 		return
 	}
 	raw, _ := token.Extra("id_token").(string)
 	if raw == "" {
-		a.fail(w, errIDToken, t.returnTo, "")
+		a.fail(w, errIDToken, t.ReturnTo, "")
 		return
 	}
 	idToken, err := iss.verifier.Verify(ctx, raw)
 	if err != nil {
 		a.logger.Warn("ID token refused", idTokenFailure(err)...)
-		a.fail(w, errIDToken, t.returnTo, "")
+		a.fail(w, errIDToken, t.ReturnTo, "")
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(t.nonce)) != 1 {
-		a.fail(w, errNonce, t.returnTo, "")
+	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(t.Nonce)) != 1 {
+		a.fail(w, errNonce, t.ReturnTo, "")
 		return
 	}
 	var claims struct {
 		Email string `json:"email"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
-		a.fail(w, errIDToken, t.returnTo, "")
+		a.fail(w, errIDToken, t.ReturnTo, "")
 		return
 	}
 
@@ -408,15 +411,20 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 		Issuer: idToken.Issuer, Subject: idToken.Subject, Email: claims.Email,
 		IDToken: raw, TokenExpiry: idToken.Expiry,
 	})
+	if errors.Is(err, session.ErrFull) {
+		a.logger.Warn("no room for another session")
+		a.fail(w, errTooMany, t.ReturnTo, "")
+		return
+	}
 	if err != nil {
 		a.logger.Error("starting a session failed", "err", err)
-		a.fail(w, errSessionStorage, t.returnTo, "")
+		a.fail(w, errSessionStorage, t.ReturnTo, "")
 		return
 	}
 	// Not http.Redirect: it cleans a relative target with path.Clean, and the
 	// application gets back exactly the path it asked for. localPath allows no
 	// character that could end the header.
-	w.Header().Set("Location", t.returnTo)
+	w.Header().Set("Location", t.ReturnTo)
 	w.WriteHeader(http.StatusSeeOther)
 }
 

@@ -24,6 +24,11 @@ type entry struct {
 // sweepInterval is how often Create drops expired sessions.
 const sweepInterval = time.Minute
 
+// MaxMemorySessions bounds the sessions a Memory holds. Each holds an ID token, a
+// few kilobytes at most, so this is tens of megabytes. Only a user the issuer signed
+// in can start one, but one such user can start any number.
+const MaxMemorySessions = 20000
+
 // NewMemory returns an empty store. now is its clock; nil means time.Now.
 func NewMemory(now func() time.Time) *Memory {
 	if now == nil {
@@ -37,7 +42,7 @@ func (m *Memory) Create(_ context.Context, key Key, s Session, expires time.Time
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
-	if now.Sub(m.lastSweep) >= sweepInterval {
+	if now.Sub(m.lastSweep) >= sweepInterval || len(m.sessions) >= MaxMemorySessions {
 		for k, e := range m.sessions {
 			if !now.Before(e.expires) {
 				delete(m.sessions, k)
@@ -47,6 +52,9 @@ func (m *Memory) Create(_ context.Context, key Key, s Session, expires time.Time
 	}
 	if e, ok := m.sessions[key]; ok && now.Before(e.expires) {
 		return errors.New("session key already in use")
+	}
+	if len(m.sessions) >= MaxMemorySessions {
+		return ErrFull
 	}
 	m.sessions[key] = entry{session: s, expires: expires}
 	return nil

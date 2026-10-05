@@ -1,7 +1,8 @@
 # krm-foyer chart
 
 Installs [krm-foyer](../../README.md): one Deployment with one replica (sessions live in
-memory), a Service for the origin, a Service for metrics, and the pod's service account.
+memory), a Service for the origin, a Service for metrics, the pod's service account, and
+a NetworkPolicy that admits traffic to krm-foyer's ports alone.
 With `sharedWatches.resources` set, it also creates the
 [shared-watch identity](../../docs/watches.md) and its grants.
 
@@ -19,6 +20,29 @@ helm install krm-foyer oci://ghcr.io/configbutler/charts/krm-foyer --version <re
 The API server must accept ID tokens from that issuer for that client, and an ingress or
 gateway must route `/auth`, `/k8s`, `/stream` and `/_foyer` on the application's origin
 to the Service ([ingress](../../docs/ingress.md)).
+
+Ask the issuer for every claim the API server's authentication configuration reads. The
+default scopes are `openid email profile`; with Dex, a configuration that reads groups
+needs `groups`, and one that reads `federated_claims` needs `federated:id`, or the API
+server refuses every token after a login that succeeded:
+
+```yaml
+oidc:
+  scopes: [openid, email, profile, groups, federated:id]
+```
+
+Without `tls.secretName`, krm-foyer serves plain HTTP behind the ingress, and the chart
+needs `networkPolicy.from` to name the ingress's pods, since that hop carries session
+cookies:
+
+```yaml
+networkPolicy:
+  from:
+    - namespaceSelector:
+        matchLabels: { kubernetes.io/metadata.name: ingress }
+      podSelector:
+        matchLabels: { app.kubernetes.io/name: traefik }
+```
 
 [values.yaml](values.yaml) documents every value, and
 [values.schema.json](values.schema.json) checks them: a misspelt key or a missing

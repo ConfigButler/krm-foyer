@@ -12,11 +12,26 @@ import (
 )
 
 const (
-	sessionCookie = "__Host-krm-foyer-session"
-	loginCookie   = "__Host-krm-foyer-login"
+	sessionCookie     = "__Host-krm-foyer-session"
+	loginCookiePrefix = "__Host-krm-foyer-login-"
 	// jwtShape matches the start of a JWT: a base64url JSON header, then a dot.
 	jwtShape = `eyJ[A-Za-z0-9_-]{8,}\.`
 )
+
+// loginCookie is the browser's one login in progress.
+func (b *browser) loginCookie() (name, value string) {
+	GinkgoHelper()
+	u, err := url.Parse(fx.foyerURL)
+	Expect(err).NotTo(HaveOccurred())
+	for _, c := range b.jar.Cookies(u) {
+		if strings.HasPrefix(c.Name, loginCookiePrefix) {
+			Expect(name).To(BeEmpty(), "more than one login in progress")
+			name, value = c.Name, c.Value
+		}
+	}
+	Expect(name).NotTo(BeEmpty(), "no login in progress")
+	return name, value
+}
 
 func cookiesSet(a answer) []*http.Cookie {
 	return (&http.Response{Header: a.Header}).Cookies()
@@ -95,21 +110,21 @@ var _ = Describe("krm-foyer", Label("foyer"), func() {
 			Expect(q.Get("state")).NotTo(BeEmpty())
 			Expect(q.Get("nonce")).NotTo(BeEmpty())
 			Expect(q.Get("scope")).NotTo(ContainSubstring("offline_access"), "no refresh token while there is no refresh")
-			Expect(cookiesSet(start)).To(ConsistOf(HaveField("Name", loginCookie)))
+			Expect(cookiesSet(start)).To(ConsistOf(HaveField("Name", HavePrefix(loginCookiePrefix))))
 
 			By("coming back from Dex to the path it asked for, with only an opaque session cookie")
 			back := b.get(ctx, b.atDex(ctx, authorize, alice))
 			Expect(back.Code).To(Equal(http.StatusSeeOther), "%s", back.Body)
 			Expect(back.Header.Get("Location")).To(Equal("/apps/check?view=list"))
 			set := cookiesSet(back)
-			Expect(set).To(ConsistOf(HaveField("Name", loginCookie), HaveField("Name", sessionCookie)))
+			Expect(set).To(ConsistOf(HaveField("Name", HavePrefix(loginCookiePrefix)), HaveField("Name", sessionCookie)))
 			for _, c := range set {
 				Expect(c.Secure).To(BeTrue(), c.Name)
 				Expect(c.HttpOnly).To(BeTrue(), c.Name)
 				Expect(c.SameSite).To(Equal(http.SameSiteLaxMode), c.Name)
 				Expect(c.Path).To(Equal("/"), c.Name)
 				Expect(c.Domain).To(BeEmpty(), c.Name)
-				if c.Name == loginCookie {
+				if strings.HasPrefix(c.Name, loginCookiePrefix) {
 					Expect(c.MaxAge).To(BeNumerically("<", 0), "the login cookie outlives the callback")
 					continue
 				}
@@ -235,18 +250,19 @@ var _ = Describe("krm-foyer", Label("foyer"), func() {
 			q := callback.Query()
 			q.Set("state", "forged")
 			callback.RawQuery = q.Encode()
-			assertLoginRefused(b.get(ctx, callback.String()), http.StatusBadRequest, "state-mismatch")
+			assertLoginRefused(b.get(ctx, callback.String()), http.StatusBadRequest, "login-not-in-progress")
 			Expect(b.cookie(sessionCookie)).To(BeEmpty())
 
-			By("refusing a replayed callback, even with the login cookie put back")
+			By("refusing a replayed callback; with the login cookie put back, Dex refuses the used code")
 			b = fx.browser()
 			authorize := b.startLogin(ctx, "/")
-			loginID := b.cookie(loginCookie)
+			name, value := b.loginCookie()
 			replayed := b.atDex(ctx, authorize, alice)
 			Expect(b.get(ctx, replayed).Code).To(Equal(http.StatusSeeOther))
+			assertLoginRefused(b.get(ctx, replayed), http.StatusBadRequest, "login-not-in-progress")
 			again := fx.browser()
-			again.setCookie(loginCookie, loginID)
-			assertLoginRefused(again.get(ctx, replayed), http.StatusBadRequest, "login-not-in-progress")
+			again.setCookie(name, value)
+			assertLoginRefused(again.get(ctx, replayed), http.StatusBadGateway, "token-exchange-failed")
 			Expect(again.cookie(sessionCookie)).To(BeEmpty())
 
 			By("refusing an attacker's callback in a victim's browser (login CSRF)")
@@ -254,7 +270,7 @@ var _ = Describe("krm-foyer", Label("foyer"), func() {
 			planted := attacker.atDex(ctx, attacker.startLogin(ctx, "/"), bob)
 			assertLoginRefused(victim.get(ctx, planted), http.StatusBadRequest, "login-not-in-progress")
 			victim.startLogin(ctx, "/")
-			assertLoginRefused(victim.get(ctx, planted), http.StatusBadRequest, "state-mismatch")
+			assertLoginRefused(victim.get(ctx, planted), http.StatusBadRequest, "login-not-in-progress")
 			Expect(victim.cookie(sessionCookie)).To(BeEmpty())
 
 			By("refusing a return path that leaves the origin, before Dex is involved")

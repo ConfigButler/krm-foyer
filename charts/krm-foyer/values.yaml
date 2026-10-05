@@ -16,7 +16,9 @@ oidc:
   clientSecret:
     secretName: ""
     key: client-secret
-  # Scopes to ask for at login. Empty uses krm-foyer's own default.
+  # Scopes to ask for at login. Empty uses krm-foyer's own default, openid email
+  # profile. Ask for what the API server's authentication configuration needs: with
+  # Dex, groups for a groups claim, and federated:id for federated_claims.
   scopes: []
   # A ConfigMap with extra CA certificates (PEM) to trust for the issuer, besides the
   # system's. Empty trusts the system's only.
@@ -38,6 +40,15 @@ kubernetes:
 # the same host: that hop carries session cookies. See docs/ingress.md.
 tls:
   secretName: ""
+
+# A NetworkPolicy admitting traffic to krm-foyer's ports alone. With plain HTTP (no
+# tls.secretName), from must name the ingress's pods, as NetworkPolicyPeers: that hop
+# carries session cookies (docs/ingress.md). With TLS, empty admits the origin from
+# anywhere. metricsFrom limits who may scrape; empty admits anyone.
+networkPolicy:
+  enabled: true
+  from: []
+  metricsFrom: []
 
 # Bounds on what one session, and the replica, may use (docs/bounds.md). Each one left
 # out keeps krm-foyer's own default, which `krm-foyer -h` prints.
@@ -97,7 +108,14 @@ service:
 # session ends then. See docs/roadmap.md for shared storage.
 
 podAnnotations: {}
-resources: {}
+# Measured (docs/bounds.md): about 30 MiB idle, 250 to 330 MiB with 1800 small streams.
+# No CPU limit, so a burst is slowed by nothing but the node.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
 nodeSelector: {}
 tolerations: []
 affinity: {}

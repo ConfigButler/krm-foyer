@@ -228,6 +228,18 @@ func (b *browser) cookie(name string) string {
 	return ""
 }
 
+// loginCookies are the browser's logins in progress, by cookie name.
+func (b *browser) loginCookies() map[string]string {
+	u, _ := url.Parse(b.h.foyer.URL)
+	m := map[string]string{}
+	for _, c := range b.jar.Cookies(u) {
+		if strings.HasPrefix(c.Name, transactionCookiePrefix) {
+			m[c.Name] = c.Value
+		}
+	}
+	return m
+}
+
 func (b *browser) session() (int, sessionState) {
 	b.h.t.Helper()
 	resp := b.get("/auth/session")
@@ -354,8 +366,8 @@ func TestLogin(t *testing.T) {
 	if resp.code != http.StatusSeeOther || resp.header.Get("Location") != "/apps/coffee?view=list" {
 		t.Fatalf("callback answered %d, Location %q:\n%s", resp.code, resp.header.Get("Location"), resp.body)
 	}
-	if b.cookie(transactionCookieName) != "" {
-		t.Error("the login cookie outlived the callback")
+	if n := len(b.loginCookies()); n != 0 {
+		t.Errorf("%d login cookies outlived the callback", n)
 	}
 	if b.cookie(session.CookieName) == "" {
 		t.Fatal("no session cookie")
@@ -394,7 +406,7 @@ func TestTransactionCookie(t *testing.T) {
 		t.Fatalf("login set %v", cookies)
 	}
 	c := cookies[0]
-	if c.Name != transactionCookieName || !strings.HasPrefix(c.Name, "__Host-") || !c.Secure || !c.HttpOnly ||
+	if !strings.HasPrefix(c.Name, transactionCookiePrefix) || !strings.HasPrefix(c.Name, "__Host-") || !c.Secure || !c.HttpOnly ||
 		c.SameSite != http.SameSiteLaxMode || c.Path != "/" || c.Domain != "" || c.MaxAge != 600 {
 		t.Errorf("login cookie %+v", c)
 	}
@@ -416,48 +428,129 @@ func TestCallbackIsBoundToTheBrowser(t *testing.T) {
 		t.Fatal("the victim got a session")
 	}
 
-	victim.startLogin("/")
-	assertLoginError(t, victim.get(callback), http.StatusBadRequest, "state-mismatch")
+	own := victim.startLogin("/")
+	assertLoginError(t, victim.get(callback), http.StatusBadRequest, "login-not-in-progress")
 	if victim.cookie(session.CookieName) != "" {
 		t.Fatal("the victim got a session")
 	}
 	if n := h.issuer.exchanged(); n != 0 {
 		t.Errorf("%d codes were redeemed for a callback that did not belong", n)
 	}
+	// The attacker's callback did not use up the victim's own login.
+	if resp := victim.get(h.issuer.authorize(own, alice)); resp.code != http.StatusSeeOther {
+		t.Fatalf("the victim's own login then answered %d", resp.code)
+	}
 }
 
-// A callback is used once: replaying it, with the login cookie put back, finds no
-// login in progress, and the code is not offered to the issuer again.
+// One browser may have several logins in progress, as when two tabs find their
+// session gone at once: each callback finishes its own login, in any order.
+func TestLoginsInProgressInOneBrowser(t *testing.T) {
+	h := newHarness(t)
+	b := h.browser()
+	first, second := b.startLogin("/first"), b.startLogin("/second")
+	if n := len(b.loginCookies()); n != 2 {
+		t.Fatalf("%d login cookies for two logins", n)
+	}
+	for _, c := range []struct{ location, returnTo string }{{second, "/second"}, {first, "/first"}} {
+		resp := b.get(h.issuer.authorize(c.location, alice))
+		if resp.code != http.StatusSeeOther || resp.header.Get("Location") != c.returnTo {
+			t.Fatalf("callback for %s: %d %q\n%s", c.returnTo, resp.code, resp.header.Get("Location"), resp.body)
+		}
+	}
+	if n := len(b.loginCookies()); n != 0 {
+		t.Errorf("%d login cookies left", n)
+	}
+}
+
+// A browser keeps at most maxBrowserTransactions logins in progress, the newest:
+// every one is a cookie on every request.
+func TestLoginsInProgressPerBrowserAreBounded(t *testing.T) {
+	h := newHarness(t)
+	b := h.browser()
+	var locations []string
+	for range maxBrowserTransactions + 2 {
+		locations = append(locations, b.startLogin("/"))
+		h.clock.Advance(time.Second) // so that newest is well defined
+	}
+	if n := len(b.loginCookies()); n != maxBrowserTransactions {
+		t.Fatalf("%d login cookies, want %d", n, maxBrowserTransactions)
+	}
+	assertLoginError(t, b.get(h.issuer.authorize(locations[0], alice)), http.StatusBadRequest, "login-not-in-progress")
+	if resp := b.get(h.issuer.authorize(locations[len(locations)-1], alice)); resp.code != http.StatusSeeOther {
+		t.Fatalf("the newest login answered %d", resp.code)
+	}
+}
+
+// A callback is used once: the browser's login cookie goes with it. Replayed with
+// that cookie put back, which takes the browser itself, the code is the issuer's to
+// refuse, being single use, and no session starts.
 func TestCallbackIsSingleUse(t *testing.T) {
 	h := newHarness(t)
 	b := h.browser()
 	location := b.startLogin("/")
-	txn := b.cookie(transactionCookieName)
+	txn := b.loginCookies()
 	callback := h.issuer.authorize(location, alice)
 	if resp := b.get(callback); resp.code != http.StatusSeeOther {
 		t.Fatalf("first callback: %d", resp.code)
 	}
+	assertLoginError(t, b.get(callback), http.StatusBadRequest, "login-not-in-progress")
 
 	replay := h.browser()
 	u, _ := url.Parse(h.foyer.URL)
-	replay.jar.SetCookies(u, []*http.Cookie{{Name: transactionCookieName, Value: txn}}) //nolint:gosec // a request cookie has no attributes
-	assertLoginError(t, replay.get(callback), http.StatusBadRequest, "login-not-in-progress")
+	for name, value := range txn {
+		replay.jar.SetCookies(u, []*http.Cookie{{Name: name, Value: value}}) //nolint:gosec // a request cookie has no attributes
+	}
+	assertLoginError(t, replay.get(callback), http.StatusBadGateway, "token-exchange-failed")
+	if replay.cookie(session.CookieName) != "" {
+		t.Fatal("the replay got a session")
+	}
 	if n := h.issuer.exchanged(); n != 1 {
 		t.Errorf("the code was redeemed %d times", n)
 	}
 }
 
-// A refused callback uses the transaction up too: guessing states is one guess.
+// A refused callback uses its login up too. One with a state of no login in this
+// browser is refused without touching the logins that are.
 func TestRefusedCallbackEndsTheTransaction(t *testing.T) {
 	h := newHarness(t)
 	b := h.browser()
 	callback := h.issuer.authorize(b.startLogin("/"), alice)
-	u, _ := url.Parse(callback)
-	q := u.Query()
-	q.Set("state", "guess")
-	u.RawQuery = q.Encode()
-	assertLoginError(t, b.get(u.String()), http.StatusBadRequest, "state-mismatch")
+	with := func(key, value string) string {
+		u, _ := url.Parse(callback)
+		q := u.Query()
+		q.Set(key, value)
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
+	assertLoginError(t, b.get(with("state", "guess")), http.StatusBadRequest, "login-not-in-progress")
+	assertLoginError(t, b.get(with("code", "wrong")), http.StatusBadGateway, "token-exchange-failed")
 	assertLoginError(t, b.get(callback), http.StatusBadRequest, "login-not-in-progress")
+}
+
+// A login cookie krm-foyer did not seal, or sealed for another login, is no login.
+func TestForgedLoginCookie(t *testing.T) {
+	h := newHarness(t)
+	victim, attacker := h.browser(), h.browser()
+	attacker.startLogin("/")
+	var sealed string
+	for _, v := range attacker.loginCookies() {
+		sealed = v
+	}
+	location := victim.startLogin("/")
+	callback := h.issuer.authorize(location, alice)
+	name := ""
+	for n := range victim.loginCookies() {
+		name = n
+	}
+	u, _ := url.Parse(h.foyer.URL)
+	for _, value := range []string{sealed, sealed[:len(sealed)-2] + "AA", "", "%%%", "AAAA"} {
+		forged := h.browser()
+		forged.jar.SetCookies(u, []*http.Cookie{{Name: name, Value: value}}) //nolint:gosec // a request cookie has no attributes
+		assertLoginError(t, forged.get(callback), http.StatusBadRequest, "login-not-in-progress")
+	}
+	if n := h.issuer.exchanged(); n != 0 {
+		t.Errorf("%d codes were redeemed", n)
+	}
 }
 
 // Every malformed callback is refused before a code is redeemed.
@@ -491,8 +584,14 @@ func TestTwoLoginCookies(t *testing.T) {
 	a, b := h.browser(), h.browser()
 	a.startLogin("/")
 	callback := h.issuer.authorize(b.startLogin("/"), alice)
-	header := http.Header{"Cookie": {transactionCookieName + "=" + a.cookie(transactionCookieName) + "; " +
-		transactionCookieName + "=" + b.cookie(transactionCookieName)}}
+	var name, value, other string
+	for n, v := range b.loginCookies() {
+		name, value = n, v
+	}
+	for _, v := range a.loginCookies() {
+		other = v
+	}
+	header := http.Header{"Cookie": {name + "=" + other + "; " + name + "=" + value}}
 	assertLoginError(t, h.browser().do(http.MethodGet, callback, header), http.StatusBadRequest, "login-not-in-progress")
 	if h.issuer.exchanged() != 0 {
 		t.Error("a code was redeemed")
@@ -714,6 +813,20 @@ func TestIssuerError(t *testing.T) {
 	}
 }
 
+// An error answer is only shown for the login it belongs to: with another state it
+// is no login in progress, and the login that is stays.
+func TestIssuerErrorNeedsTheState(t *testing.T) {
+	h := newHarness(t)
+	b := h.browser()
+	location := b.startLogin("/")
+	u, _ := url.Parse(location)
+	callback := u.Query().Get("redirect_uri") + "?" + url.Values{"error": {"access_denied"}, "state": {"forged"}}.Encode()
+	assertLoginError(t, b.get(callback), http.StatusBadRequest, "login-not-in-progress")
+	if resp := b.get(h.issuer.authorize(location, alice)); resp.code != http.StatusSeeOther {
+		t.Fatalf("the login in progress then answered %d", resp.code)
+	}
+}
+
 // Logging in again rotates the session: the previous ID is worthless.
 func TestLoginAgainRotates(t *testing.T) {
 	h := newHarness(t)
@@ -834,19 +947,20 @@ func TestRunRetries(t *testing.T) {
 	}
 }
 
-// Logins in progress are bounded: anyone can start one.
-func TestTransactionsAreBounded(t *testing.T) {
+// Anyone can start a login, so starting many must not stop anyone else signing in:
+// a login in progress is held by its browser, not by krm-foyer.
+func TestLoginFloodLocksNobodyOut(t *testing.T) {
 	h := newHarness(t)
-	for range maxTransactions {
-		if _, _, ok := h.auth.transactions.begin("/"); !ok {
-			t.Fatal("refused below the bound")
+	handler := h.auth.Handler()
+	for range 20000 {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/auth/login", nil))
+		if w.Code != http.StatusFound {
+			t.Fatalf("a login was refused with %d", w.Code)
 		}
 	}
-	assertLoginError(t, h.browser().get("/auth/login"), http.StatusServiceUnavailable, "too-many-logins")
-	// Expired ones make room again.
-	h.clock.Advance(transactionLifetime)
-	if resp := h.browser().get("/auth/login"); resp.code != http.StatusFound {
-		t.Fatalf("after expiry: %d", resp.code)
+	if resp := h.browser().login(alice, "/"); resp.code != http.StatusSeeOther {
+		t.Fatalf("after the flood, login answered %d", resp.code)
 	}
 }
 
@@ -879,6 +993,22 @@ func (f *flakyStore) Delete(ctx context.Context, key session.Key) error {
 		return errStoreDown
 	}
 	return f.Memory.Delete(ctx, key)
+}
+
+// With the store full, a login says so, and starts nothing.
+func TestSessionsFull(t *testing.T) {
+	h := newHarness(t)
+	until := h.clock.Now().Add(time.Hour)
+	for i := range session.MaxMemorySessions {
+		if err := h.store.Memory.Create(t.Context(), session.Key{byte(i), byte(i >> 8), byte(i >> 16)}, session.Session{}, until); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := h.browser()
+	assertLoginError(t, b.login(alice, "/"), http.StatusServiceUnavailable, "too-many-sessions")
+	if b.cookie(session.CookieName) != "" {
+		t.Error("a session cookie was set")
+	}
 }
 
 // With the store down, nothing pretends: login does not claim success, the session

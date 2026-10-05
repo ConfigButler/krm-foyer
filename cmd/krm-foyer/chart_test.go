@@ -16,6 +16,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"sigs.k8s.io/yaml"
 )
@@ -26,6 +27,8 @@ const chartDir = "../../charts/krm-foyer"
 var chartValues = []string{
 	"publicURL=https://foyer.example.test", "oidc.issuer=https://dex.example.test",
 	"oidc.clientID=krm-foyer", "oidc.clientSecret.secretName=krm-foyer-oidc",
+	// Plain HTTP, the default, needs the ingress named.
+	"networkPolicy.from[0].namespaceSelector.matchLabels.role=ingress",
 }
 
 // helmTemplate renders the chart with the required values, then the values files and
@@ -66,6 +69,7 @@ type rendered struct {
 	clusterRoles    []rbacv1.ClusterRole
 	bindings        []rbacv1.ClusterRoleBinding
 	roleBindings    []rbacv1.RoleBinding
+	networkPolicies []networkingv1.NetworkPolicy
 }
 
 func render(t *testing.T, valueFiles []string, set ...string) rendered {
@@ -100,6 +104,8 @@ func render(t *testing.T, valueFiles []string, set ...string) rendered {
 			target = appendNew(&r.bindings)
 		case "RoleBinding":
 			target = appendNew(&r.roleBindings)
+		case "NetworkPolicy":
+			target = appendNew(&r.networkPolicies)
 		default:
 			t.Fatalf("the chart renders a %s this test does not know: check it, then add it here", meta.Kind)
 		}
@@ -253,6 +259,7 @@ func TestChartRefusesValues(t *testing.T) {
 		"a resource with a wildcard":    {[]string{"sharedWatches.resources={*}"}, "/sharedWatches/resources/0"},
 		"a resource with a subresource": {[]string{"sharedWatches.resources={pods/log}"}, "/sharedWatches/resources/0"},
 		"two replicas":                  {[]string{"replicaCount=2"}, "replicaCount"},
+		"plain HTTP open to anyone":     {[]string{"networkPolicy.from=null"}, "networkPolicy.from must name the ingress"},
 		"an account named by no one":    {[]string{"serviceAccount.create=false"}, "/serviceAccount"},
 		"the pod's account as the shared identity": {
 			[]string{"sharedWatches.resources={configmaps}", "sharedWatches.serviceAccount.name=krm-foyer"},
@@ -349,8 +356,8 @@ func TestChartGivesThePodsAccountNothing(t *testing.T) {
 // resources named, and asking the API server about users.
 func TestChartGrantsTheSharedIdentityOnlyWhatItNeeds(t *testing.T) {
 	r := render(t, nil, "sharedWatches.resources={notes.hello.krm-foyer.example,configmaps,deployments.apps}")
-	if len(r.clusterRoles) != 1 {
-		t.Fatalf("%d ClusterRoles, want 1", len(r.clusterRoles))
+	if len(r.clusterRoles) != 2 {
+		t.Fatalf("%d ClusterRoles, want 2", len(r.clusterRoles))
 	}
 	want := []rbacv1.PolicyRule{
 		{APIGroups: []string{"hello.krm-foyer.example"}, Resources: []string{"notes"}, Verbs: []string{"list", "watch"}},
@@ -358,6 +365,12 @@ func TestChartGrantsTheSharedIdentityOnlyWhatItNeeds(t *testing.T) {
 		{APIGroups: []string{"apps"}, Resources: []string{"deployments"}, Verbs: []string{"list", "watch"}},
 	}
 	got := r.clusterRoles[0].Rules
+	reviews := r.clusterRoles[1].Rules
+	if len(reviews) != 1 || !slices.Equal(reviews[0].APIGroups, []string{"authorization.k8s.io"}) ||
+		!slices.Equal(reviews[0].Resources, []string{"subjectaccessreviews"}) || !slices.Equal(reviews[0].Verbs, []string{"create"}) ||
+		len(reviews[0].ResourceNames) > 0 || len(reviews[0].NonResourceURLs) > 0 {
+		t.Fatalf("the reviews role is %+v", reviews)
+	}
 	if len(got) != len(want) {
 		t.Fatalf("rules %+v", got)
 	}
@@ -374,7 +387,57 @@ func TestChartGrantsTheSharedIdentityOnlyWhatItNeeds(t *testing.T) {
 		}
 		roles[b.RoleRef.Name] = true
 	}
-	if len(roles) != 2 || !roles[r.clusterRoles[0].Name] || !roles["system:auth-delegator"] {
+	if len(roles) != 2 || !roles[r.clusterRoles[0].Name] || !roles[r.clusterRoles[1].Name] {
 		t.Fatalf("the shared identity is bound to %v", roles)
+	}
+}
+
+// With plain HTTP, the hop from the ingress carries session cookies, so only the
+// ingress may reach the origin port (docs/ingress.md); the chart refuses to render
+// without it being named. With TLS the origin is open, and metrics are open unless
+// limited. No other port is admitted.
+func TestChartAdmitsOnlyTheIngress(t *testing.T) {
+	type rule struct {
+		port int32
+		from int
+	}
+	for name, tc := range map[string]struct {
+		set  []string
+		want []rule
+	}{
+		"plain HTTP":           {nil, []rule{{8080, 1}, {9090, 0}}},
+		"TLS":                  {[]string{"tls.secretName=tls", "networkPolicy.from=null"}, []rule{{8443, 0}, {9090, 0}}},
+		"metrics limited":      {[]string{"networkPolicy.metricsFrom[0].podSelector.matchLabels.app=prometheus"}, []rule{{8080, 1}, {9090, 1}}},
+		"metrics off":          {[]string{"metrics.enabled=false"}, []rule{{8080, 1}}},
+		"turned off with TLS":  {[]string{"tls.secretName=tls", "networkPolicy.enabled=false"}, nil},
+		"turned off, explicit": {[]string{"networkPolicy.from=null", "networkPolicy.enabled=false"}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := render(t, nil, tc.set...)
+			if tc.want == nil {
+				if len(r.networkPolicies) != 0 {
+					t.Fatalf("%d NetworkPolicies, want none", len(r.networkPolicies))
+				}
+				return
+			}
+			if len(r.networkPolicies) != 1 {
+				t.Fatalf("%d NetworkPolicies, want 1", len(r.networkPolicies))
+			}
+			p := r.networkPolicies[0].Spec
+			if !slices.Equal(p.PolicyTypes, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}) ||
+				p.PodSelector.MatchLabels["app.kubernetes.io/name"] != "krm-foyer" {
+				t.Fatalf("policy %+v", p)
+			}
+			var got []rule
+			for _, in := range p.Ingress {
+				if len(in.Ports) != 1 {
+					t.Fatalf("a rule with ports %+v", in.Ports)
+				}
+				got = append(got, rule{in.Ports[0].Port.IntVal, len(in.From)})
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("admits %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }

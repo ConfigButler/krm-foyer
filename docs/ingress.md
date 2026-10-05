@@ -26,9 +26,10 @@ hop is one of two things:
 - **Plain HTTP on a network where only the ingress can reach krm-foyer.** A
   NetworkPolicy admits the ingress's pods to krm-foyer's port and nothing else, and the
   cluster network is not observable by other tenants. Anything that can read that hop
-  can take a session. Operators choosing this accept that assumption explicitly; the
-  chart being developed separately must default to that policy. Until its deployment
-  contract is tested, supply and verify the policy in the deployment.
+  can take a session. Operators choosing this accept that assumption explicitly: the
+  chart renders that policy by default, and refuses to install plain HTTP until
+  `networkPolicy.from` names the ingress's pods. Whether the cluster's network plugin
+  enforces it is still the operator's to check.
 
 What both models do share is that **krm-foyer never works out its own public address
 from the request.** It is configured with its public URL. That URL is the

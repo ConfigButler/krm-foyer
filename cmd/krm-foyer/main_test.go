@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/pem"
 	"io"
 	"io/fs"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -302,5 +304,124 @@ func TestRunFailsWhenMetricsCannotListen(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("krm-foyer kept running without its metrics listener")
+	}
+}
+
+// shutdownFixture is a server as run starts it, on a local port, and what it logs.
+type shutdownFixture struct {
+	url         string
+	srv         *http.Server
+	endRequests context.CancelFunc
+	logger      *slog.Logger
+	logs        logBuffer
+}
+
+func serveForShutdown(t *testing.T, h http.Handler) *shutdownFixture {
+	t.Helper()
+	f := &shutdownFixture{}
+	f.logger = slog.New(slog.NewTextHandler(&f.logs, nil))
+	f.srv, f.endRequests = newServer("", h, f.logger)
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = f.srv.Serve(ln) }()
+	t.Cleanup(func() { _ = f.srv.Close() })
+	f.url = "http://" + ln.Addr().String()
+	return f
+}
+
+func (f *shutdownFixture) shutdown(drain, timeout time.Duration) {
+	shutdown(f.srv, f.endRequests, drain, timeout, f.logger)
+}
+
+// logBuffer is a strings.Builder that handlers on several goroutines may write to.
+type logBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+func get(url string) (*http.Response, error) {
+	// Not the test's context: the server, not the client, is what ends these requests.
+	r, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return http.DefaultClient.Do(r)
+}
+
+// A stream never finishes by itself, so shutting down must end it: a rollout with
+// a browser connected stops after the drain, cleanly, rather than waiting out the
+// whole timeout and cutting the connection.
+func TestShutdownEndsOpenStreams(t *testing.T) {
+	opened, ended := make(chan struct{}), make(chan struct{})
+	f := serveForShutdown(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(opened)
+		<-r.Context().Done()
+		close(ended)
+	}))
+	resp, err := get(f.url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	<-opened
+
+	start := time.Now()
+	f.shutdown(100*time.Millisecond, 5*time.Second)
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("shutdown took %v with a stream open", took)
+	}
+	select {
+	case <-ended:
+	default:
+		t.Error("the stream's request context was not ended")
+	}
+	if !strings.Contains(f.logs.String(), "shut down cleanly") {
+		t.Errorf("shutdown was not clean:\n%s", f.logs.String())
+	}
+}
+
+// A request in flight that finishes within the drain is not cut short: only what
+// is still open after it is ended.
+func TestShutdownLetsRequestsInFlightFinish(t *testing.T) {
+	started := make(chan struct{})
+	f := serveForShutdown(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-time.After(300 * time.Millisecond):
+			_, _ = io.WriteString(w, "done")
+		case <-r.Context().Done():
+		}
+	}))
+	got := make(chan string, 1)
+	go func() {
+		resp, err := get(f.url)
+		if err != nil {
+			got <- err.Error()
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		b, _ := io.ReadAll(resp.Body)
+		got <- string(b)
+	}()
+	<-started
+	f.shutdown(2*time.Second, 5*time.Second)
+	if body := <-got; body != "done" {
+		t.Errorf("the request in flight got %q, want it to finish", body)
 	}
 }

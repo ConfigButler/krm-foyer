@@ -1,8 +1,10 @@
 {{- if and .Values.sharedWatches.resources .Values.sharedWatches.serviceAccount.create }}
 {{- $name := include "krm-foyer.sharedAccountName" . }}
 # The shared-watch identity (docs/watches.md): it may list and watch the shared
-# resources, and ask the API server whether a user may (system:auth-delegator: create
-# subjectaccessreviews), and nothing else.
+# resources, and ask the API server whether a user may (create subjectaccessreviews),
+# and nothing else. Not system:auth-delegator, which would also let it review tokens.
+# Its binding has a new name: a binding's roleRef cannot change, so an upgrade from
+# the auth-delegator binding replaces it rather than editing it.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -52,15 +54,26 @@ subjects:
     namespace: {{ .Release.Namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-subject-access-reviews
+  labels:
+    {{- include "krm-foyer.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ $name }}-reviews
+  name: {{ $name }}-subject-access-reviews
   labels:
     {{- include "krm-foyer.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: system:auth-delegator
+  name: {{ $name }}-subject-access-reviews
 subjects:
   - kind: ServiceAccount
     name: {{ $name }}
