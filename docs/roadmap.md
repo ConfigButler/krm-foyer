@@ -85,7 +85,7 @@ These numbers identify earlier investigation notes, not the priority of future w
 
 | Milestone | What exists now |
 | --- | --- |
-| 1–2: proxy and login | OIDC with PKCE/state/nonce, sessions (in memory, since in sealed cookies), CSRF, interruption pages and differential/audit tests against Dex and Kubernetes |
+| 1–2: proxy and login | OIDC with PKCE/state/nonce, sessions (first in memory, now sealed in the browser's cookie), CSRF, interruption pages and differential/audit tests against Dex and Kubernetes |
 | 3: browser demo | `task demo`, the hello CRD editor, browser helper and Chromium journeys through Traefik |
 | 4: bounds | Request rate/concurrency, response duration/bytes, session cancellation and metrics |
 | 5: streams | krm-stream, live notes, conflict/draft recovery and a 200-identity rehearsal |
