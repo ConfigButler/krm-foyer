@@ -4,7 +4,7 @@
   "description": "Helm checks these on template, lint, install and upgrade. Objects the chart owns are closed (additionalProperties: false), so a misspelt key fails the install instead of doing nothing; Kubernetes pass-through objects (resources, affinity, ...) stay open, because their shape is Kubernetes', not this chart's.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["publicURL", "oidc"],
+  "required": ["publicURL", "oidc", "sessionKeys"],
   "$defs": {
     "duration": {
       "type": "string",
@@ -67,6 +67,17 @@
       }
     },
 
+    "sessionKeys": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["secretName", "key"],
+      "description": "The Secret holding the session keys, which the chart never creates. See docs/design.md, Sessions.",
+      "properties": {
+        "secretName": { "$ref": "#/$defs/name" },
+        "key": { "type": "string", "minLength": 1 }
+      }
+    },
+
     "kubernetes": {
       "type": "object",
       "additionalProperties": false,
@@ -98,7 +109,6 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "sessionIdleTimeout": { "$ref": "#/$defs/duration" },
         "sessionAbsoluteTimeout": { "$ref": "#/$defs/duration" },
         "sessionCheckInterval": { "$ref": "#/$defs/duration" },
         "maxResponseDuration": { "$ref": "#/$defs/duration" },

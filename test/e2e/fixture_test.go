@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -389,6 +390,44 @@ func (f *fixture) grant(ns, username, resource string, verbs ...string) (revoke 
 	f.kubectl("-n", ns, "create", "role", name, "--resource="+resource, "--verb="+strings.Join(verbs, ","))
 	f.kubectl("-n", ns, "create", "rolebinding", name, "--role="+name, "--user="+username)
 	return func() { f.kubectl("-n", ns, "delete", "rolebinding", name) }
+}
+
+// replaceFoyer replaces the main krm-foyer's pod by running kubectl with args in its
+// namespace (a rollout restart, or a forced delete), and returns once the new pod is
+// the only one and answers. Sessions are in their cookies, so they survive this.
+func (f *fixture) replaceFoyer(ctx context.Context, args ...string) {
+	GinkgoHelper()
+	pods := func() string {
+		return f.kubectl("-n", f.foyerNamespace, "get", "pods", "-l", "app.kubernetes.io/instance=krm-foyer",
+			"-o", `jsonpath={range .items[*]}{.metadata.name}={.status.phase}{" "}{end}`)
+	}
+	old := pods()
+	f.kubectl(append([]string{"-n", f.foyerNamespace}, args...)...)
+	f.kubectl("-n", f.foyerNamespace, "rollout", "status", "deployment/krm-foyer", "--timeout=120s")
+	// The old pod stops listening as soon as it is told to stop, and may still be
+	// routed to for a moment: wait until it is gone, and the new one answers.
+	eventually(ctx, func() error {
+		now := strings.Fields(pods())
+		if len(now) != 1 || !strings.HasSuffix(now[0], "=Running") || strings.Contains(old, now[0]) {
+			return fmt.Errorf("pods %q, before %q", now, old)
+		}
+		return nil
+	}).WithTimeout(2 * time.Minute).Should(Succeed())
+	eventually(ctx, func() error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.foyerURL+"/auth/session", nil)
+		if err != nil {
+			return err
+		}
+		resp, err := f.browser().client.Do(req)
+		if err != nil {
+			return err
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			return fmt.Errorf("/auth/session answered %d", resp.StatusCode)
+		}
+		return nil
+	}).Should(Succeed())
 }
 
 // kubectl runs as the fixture's admin, for setup only. Nothing a spec asserts on is

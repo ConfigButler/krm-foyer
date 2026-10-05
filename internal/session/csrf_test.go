@@ -125,7 +125,7 @@ func TestSecFetchSiteStandsInForOrigin(t *testing.T) {
 func TestOriginIsNormalized(t *testing.T) {
 	for _, configured := range []string{origin, origin + "/", "https://FOYER.example.test", origin + ":443"} {
 		t.Run(configured, func(t *testing.T) {
-			m, err := New(Config{Store: NewMemory(nil), Origin: configured, IdleTimeout: idle, AbsoluteTimeout: maxAge})
+			m, err := New(Config{Keys: testKeys(), Origin: configured, AbsoluteTimeout: maxAge})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -137,26 +137,11 @@ func TestOriginIsNormalized(t *testing.T) {
 	}
 }
 
-// A session without a CSRF token (a store bug, say) accepts no proof at all, not
+// A session without a CSRF token (a bug, say) accepts no proof at all, not
 // the empty one.
 func TestEmptySessionTokenAcceptsNothing(t *testing.T) {
 	h := newHarness(t)
 	assertRefused(t, h.m.CheckMutation(sameOrigin(request(http.MethodPost), ""), Session{}), ErrNoCSRFProof)
-}
-
-// A refused mutation leaves no trace on the session: it does not count as activity.
-func TestRefusedMutationDoesNotTouch(t *testing.T) {
-	h := newHarness(t)
-	c := h.start(t, h.user())
-	h.clock.Advance(idle - 1)
-	r := request(http.MethodPost, c)
-	r.Header.Set("Origin", "https://evil.example")
-	if _, err := h.m.Use(r); err == nil {
-		t.Fatal("refused nothing")
-	}
-	h.clock.Advance(1)
-	_, err := h.lookup(c)
-	assertNoSession(t, err)
 }
 
 // FuzzCheckMutation states the rule from the outside, without reading the code:
@@ -173,7 +158,7 @@ func FuzzCheckMutation(f *testing.F) {
 	f.Add("GET", "https://evil.example", "", "cross-site", "", "", "", uint8(0b0011))
 	f.Add("PATCH", "null", "", "same-origin", "", proof, "", uint8(0b1011))
 	f.Fuzz(func(t *testing.T, method, origin1, origin2, site1, site2, proof1, proof2 string, fields uint8) {
-		m, err := New(Config{Store: NewMemory(nil), Origin: origin, IdleTimeout: idle, AbsoluteTimeout: maxAge})
+		m, err := New(Config{Keys: testKeys(), Origin: origin, AbsoluteTimeout: maxAge})
 		if err != nil {
 			t.Fatal(err)
 		}

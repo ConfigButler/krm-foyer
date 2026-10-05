@@ -27,6 +27,7 @@ const chartDir = "../../charts/krm-foyer"
 var chartValues = []string{
 	"publicURL=https://foyer.example.test", "oidc.issuer=https://dex.example.test",
 	"oidc.clientID=krm-foyer", "oidc.clientSecret.secretName=krm-foyer-oidc",
+	"sessionKeys.secretName=krm-foyer-session-keys",
 	// Plain HTTP, the default, needs the ingress named.
 	"networkPolicy.from[0].namespaceSelector.matchLabels.role=ingress",
 }
@@ -146,6 +147,7 @@ func parseRendered(t *testing.T, r rendered) config {
 		for _, name := range []string{"tls.crt", "tls.key", "client-secret", "ca.crt", "token"} {
 			mounted[m.MountPath+"/"+name] = ca
 		}
+		mounted[m.MountPath+"/keys"] = "c2Vzc2lvbi1rZXktZm9yLWtybS1mb3llci10ZXN0cyE=\n"
 	}
 	cfg, err := parseConfig(r.container(t).Args, files(mounted), io.Discard)
 	if err != nil {
@@ -185,7 +187,7 @@ func TestChartRendersArgsTheBinaryAccepts(t *testing.T) {
 	t.Run("e2e brief fixture", func(t *testing.T) {
 		cfg := parseRendered(t, render(t, []string{e2e + "foyer-values.yaml", e2e + "foyer-brief-values.yaml"}))
 		g, s := cfg.login.gate, cfg.login.sessions
-		if s.IdleTimeout != 45*time.Second || g.SessionCheckInterval != time.Second || g.MaxSessionConcurrentRequests != 2 ||
+		if s.AbsoluteTimeout != 45*time.Second || g.SessionCheckInterval != time.Second || g.MaxSessionConcurrentRequests != 2 ||
 			g.SessionRequestRate != 1 || g.SessionRequestBurst != 10 || cfg.login.kubernetes.MaxResponseBytes != 131072 {
 			t.Fatalf("gate %+v, sessions %+v", g, s)
 		}
@@ -201,7 +203,6 @@ oidc: {scopes: [openid, email], caConfigMap: {name: issuer-ca}}
 tls: {secretName: krm-foyer-tls}
 metrics: {enabled: false}
 bounds:
-  sessionIdleTimeout: 2h
   sessionAbsoluteTimeout: 10h
   sessionCheckInterval: 3s
   maxResponseDuration: 1h
@@ -225,7 +226,7 @@ sharedWatches:
 		if cfg.metricsListen != "" || !slices.Equal(l.auth.Scopes, []string{"openid", "email"}) {
 			t.Fatalf("metrics %q, scopes %q", cfg.metricsListen, l.auth.Scopes)
 		}
-		if l.sessions.IdleTimeout != 2*time.Hour || l.sessions.AbsoluteTimeout != 10*time.Hour ||
+		if l.sessions.AbsoluteTimeout != 10*time.Hour ||
 			l.gate.SessionCheckInterval != 3*time.Second || l.gate.MaxResponseDuration != time.Hour ||
 			l.streamWrites != 15*time.Second || l.gate.MaxSessionConcurrentRequests != 7 ||
 			l.gate.MaxConcurrentRequests != 3000000 || l.gate.MaxSessionStreams != 9 || l.gate.MaxStreams != 4000 ||
@@ -252,9 +253,11 @@ func TestChartRefusesValues(t *testing.T) {
 		"a public URL with a path":      {[]string{"publicURL=https://foyer.example.test/app"}, "/publicURL"},
 		"an issuer over plain HTTP":     {[]string{"oidc.issuer=http://dex.example.test"}, "/oidc/issuer"},
 		"no client secret":              {[]string{"oidc.clientSecret.secretName="}, "/oidc/clientSecret/secretName"},
+		"no session keys":               {[]string{"sessionKeys.secretName="}, "/sessionKeys/secretName"},
+		"the idle timeout of 0.1":       {[]string{"bounds.sessionIdleTimeout=1h"}, "sessionIdleTimeout"},
 		"a misspelt key":                {[]string{"publicUrl=https://foyer.example.test"}, "publicUrl"},
 		"a misspelt bound":              {[]string{"bounds.maxStream=10"}, "maxStream"},
-		"a duration without a unit":     {[]string{"bounds.sessionIdleTimeout=45"}, "/bounds/sessionIdleTimeout"},
+		"a duration without a unit":     {[]string{"bounds.sessionAbsoluteTimeout=45"}, "/bounds/sessionAbsoluteTimeout"},
 		"a bound of zero":               {[]string{"bounds.maxStreams=0"}, "/bounds/maxStreams"},
 		"a resource with a wildcard":    {[]string{"sharedWatches.resources={*}"}, "/sharedWatches/resources/0"},
 		"a resource with a subresource": {[]string{"sharedWatches.resources={pods/log}"}, "/sharedWatches/resources/0"},

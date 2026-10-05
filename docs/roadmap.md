@@ -19,6 +19,19 @@ The next work should make the existing service usable and operable by someone ou
 this repository. Each change ends with `task verify` green; a checked box requires
 an implemented test, not just a design or a pending spec.
 
+For the audience release, two PRs are specified in the
+[encrypted cookie sessions and configurable login plan](investigations/audience-release-plan.md).
+The first is done: established sessions survive restarts in encrypted HttpOnly
+cookies sealed with stable keys, with no session database, and sliding idle expiry is
+gone. Logins in progress stay sealed with a key of the process's own. Logout clears the
+browser cookie and ends what is open in the process; copied cookies remain usable until
+their fixed expiry. The second adds configured login parameters, identity discovery and
+the fixed Kubernetes attribution mappings gitops-reverser consumes. QR generation and
+provider-specific handoff belong to the application/provider integration; coffee's
+backend work is separate. The broader backlog below remains subject to that decision;
+its shared-session store proposal is superseded, and distributed coordination needs a
+new design only when multiple replicas or stronger revocation guarantees are required.
+
 1. **Finish the deployment path.** The Helm chart is being developed separately.
    Review it against the contract and install it through e2e. Give the pod no API
    grants in per-user mode; for sharing, use an explicitly configured, narrowly granted
@@ -48,12 +61,13 @@ an implemented test, not just a design or a pending spec.
    refreshed credentials for leaks. Measure disablement for the chosen issuer
    configuration. This can be delivered and tested on one replica before adding a
    distributed store; it need not wait for high availability.
-5. **Shared storage, before multiple replicas.** Share the key that seals logins in
-   progress as well as sessions, so a callback may land on a different replica. Test cross-replica logout,
-   refresh coordination, store outages, restart and rolling updates. Measure store
-   read/write load before choosing its implementation: the current code touches sessions
-   per request and checks each open response periodically. Hashing session IDs does not
-   protect the raw cluster tokens a store holds; its access and encryption need a design.
+5. **Coordination, before multiple replicas.** The encrypted cookies remove the need
+   for a shared token store. Decide how callbacks reach a login in progress sealed with
+   another process's key, keys rotate consistently, per-session bounds work across
+   processes and responses are cancelled. Explicitly design any stronger logout
+   or refresh guarantees; cookie clearing alone does not revoke copied sessions.
+   Test those decisions before enabling rolling updates or claiming availability
+   across replicas. A database is not a prerequisite for the audience release.
 6. **Release and maintenance evidence.** Add vulnerability scanning to the CI image,
    exercise the published artifact as an adopter, and document upgrades, rollback and
    image/provenance verification. The release workflow already requests an SBOM and
@@ -71,7 +85,7 @@ These numbers identify earlier investigation notes, not the priority of future w
 
 | Milestone | What exists now |
 | --- | --- |
-| 1–2: proxy and login | OIDC with PKCE/state/nonce, in-memory sessions, CSRF, interruption pages and differential/audit tests against Dex and Kubernetes |
+| 1–2: proxy and login | OIDC with PKCE/state/nonce, sessions (in memory, since in sealed cookies), CSRF, interruption pages and differential/audit tests against Dex and Kubernetes |
 | 3: browser demo | `task demo`, the hello CRD editor, browser helper and Chromium journeys through Traefik |
 | 4: bounds | Request rate/concurrency, response duration/bytes, session cancellation and metrics |
 | 5: streams | krm-stream, live notes, conflict/draft recovery and a 200-identity rehearsal |
@@ -150,15 +164,9 @@ Security items need tests that try to get past the boundary.
       `X-Forwarded-*`, with targeted e2e specs through the Traefik fixture. See [ingress](ingress.md)
 - [x] Browser fixture behind Traefik with re-encryption and a BackendTLSPolicy for each
       backend; targeted spoofing and buffering checks remain above
-- [x] A NetworkPolicy in the chart that admits only krm-foyer's ports: the origin from
-      `networkPolicy.from`, which plain HTTP requires, and metrics from
-      `networkPolicy.metricsFrom`. Neither is exercised by the e2e fixture, which serves
-      TLS and scrapes as admin
+- [ ] A NetworkPolicy in the chart that admits only the ingress to krm-foyer's port, and
+      only the monitoring system to the metrics port
 - [ ] Helm chart values for both models
-- [x] Stopping ends open streams: requests in flight get five seconds to finish, then
-      every request still open, a stream above all, is ended, and what remains at
-      twenty seconds is closed. So a rollout with a browser connected takes seconds,
-      and exits cleanly
 - [ ] Rolling updates that refuse no connection: krm-foyer stops listening as soon as
       it is told to stop, while its Service may still route to it for a moment, so a
       rollout refuses connections briefly (seen by the rehearsal, which restarts it). A
@@ -195,7 +203,9 @@ Security items need tests that try to get past the boundary.
       the audit log names the user for every request with one
 - [x] A test scans responses and logs for tokens krm-foyer holds and client secrets;
       session IDs are allowed only in the session cookie's issuing `Set-Cookie` header
-- [ ] The same for tokens obtained by refresh, read from the session store
+- [x] The same scan opens nothing up for the session cookie: its value, as set and as
+      decoded, holds no token or secret (unit tests; e2e)
+- [ ] The same for tokens obtained by refresh
 - [x] Upstream bodies reach the browser decoded: the browser's `Accept-Encoding` is
       dropped, and a gzip answer from the API server arrives uncompressed without
       `Content-Encoding`
@@ -210,8 +220,16 @@ Security items need tests that try to get past the boundary.
 
 - [x] OIDC authorization code with PKCE, state and nonce, through a maintained library
       (unit tests against an issuer that misbehaves on request; e2e against Dex)
-- [x] Opaque server-side sessions: rotated at login, with idle and absolute expiry, and
-      ended with the ID token while there is no refresh (unit tests; e2e against Dex)
+- [x] Sessions sealed (AES-256-GCM) into the cookie with stable, rotatable keys: a new
+      session at every login, a fixed absolute expiry, ended with the ID token while
+      there is no refresh; every bit authenticated (unit tests; e2e against Dex)
+- [x] A session survives an orderly restart and a forced replacement of the pod, with
+      the same CSRF token and end; a login in progress does not, and a fresh one works
+      (unit tests; e2e)
+- [x] Logout clears the cookie and ends the session's open responses in the process; a
+      copied cookie stays a session until its expiry, recorded as the chosen limit
+      (unit tests; e2e)
+- [x] A token too large for the cookie is refused at login, with no cookie set
 - [ ] Refresh is serialized per session and bounded
 - [ ] A refused refresh ends the session at once: 401s, and its streams close
 - [ ] The disablement bound measured for Dex in the fixture (remove a user, time the

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
@@ -79,18 +80,15 @@ func TestThroughTheProxy(t *testing.T) {
 		method   string
 		signedIn bool
 		header   http.Header
-		down     bool
 		code     int
 		reason   string
 	}{
-		{"read without a session", http.MethodGet, false, nil, false, http.StatusUnauthorized, "Unauthorized"},
-		{"write without a session", http.MethodPost, false, proof, false, http.StatusUnauthorized, "Unauthorized"},
-		{"write without proof", http.MethodPost, true, http.Header{"Origin": {h.foyer.URL}}, false, http.StatusForbidden, "CSRFProofRequired"},
+		{"read without a session", http.MethodGet, false, nil, http.StatusUnauthorized, "Unauthorized"},
+		{"write without a session", http.MethodPost, false, proof, http.StatusUnauthorized, "Unauthorized"},
+		{"write without proof", http.MethodPost, true, http.Header{"Origin": {h.foyer.URL}}, http.StatusForbidden, "CSRFProofRequired"},
 		{"cross-site write", http.MethodPost, true, http.Header{"Origin": {"https://evil.example"}, csrfKey: {s.CSRFToken}},
-			false, http.StatusForbidden, "CrossOriginRequest"},
-		{"store down", http.MethodGet, true, nil, true, http.StatusServiceUnavailable, "ServiceUnavailable"},
+			http.StatusForbidden, "CrossOriginRequest"},
 	} {
-		h.store.down.Store(tc.down)
 		w := send(tc.method, tc.signedIn, tc.header)
 		if w.Code != tc.code || !hasReason(w.Body.String(), tc.reason) {
 			t.Errorf("%s: %d %s, want %d %s", tc.name, w.Code, w.Body, tc.code, tc.reason)
@@ -99,7 +97,6 @@ func TestThroughTheProxy(t *testing.T) {
 			t.Errorf("%s: %s = %q, want %q", tc.name, interruption.Header, got, tc.reason)
 		}
 	}
-	h.store.down.Store(false)
 	if n := len(reached()); n != 0 {
 		t.Fatalf("%d refused requests reached the API server", n)
 	}
@@ -121,10 +118,11 @@ func hasReason(body, reason string) bool {
 }
 
 // Every session error becomes one answer, however it is wrapped. A refusal is never
-// RBAC's Forbidden, and only a store failure is logged, without the session ID.
+// RBAC's Forbidden, and an error the session manager does not give is a 503, logged,
+// never a guess that the user is or is not signed in.
 func TestRefusal(t *testing.T) {
 	h := newHarness(t)
-	storeDown := errors.New("reading the session: store: connection refused")
+	unexpected := errors.New("something unexpected")
 	for name, tc := range map[string]struct {
 		err    error
 		status int
@@ -136,8 +134,8 @@ func TestRefusal(t *testing.T) {
 		"no CSRF proof":        {session.ErrNoCSRFProof, http.StatusForbidden, "CSRFProofRequired"},
 		"wrapped CSRF refusal": {fmt.Errorf("checking: %w", session.ErrNoCSRFProof), http.StatusForbidden, "CSRFProofRequired"},
 		"no session and proof": {errors.Join(session.ErrNoCSRFProof, session.ErrNoSession), http.StatusUnauthorized, "Unauthorized"},
-		"store down":           {storeDown, http.StatusServiceUnavailable, "ServiceUnavailable"},
-		"store errors joined":  {errors.Join(storeDown, errors.New("other")), http.StatusServiceUnavailable, "ServiceUnavailable"},
+		"unexpected":           {unexpected, http.StatusServiceUnavailable, "ServiceUnavailable"},
+		"unexpected, joined":   {errors.Join(unexpected, errors.New("other")), http.StatusServiceUnavailable, "ServiceUnavailable"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			i := h.auth.refusal(tc.err)
@@ -149,14 +147,15 @@ func TestRefusal(t *testing.T) {
 			}
 		})
 	}
-	if logs := h.logs.String(); !strings.Contains(logs, "connection refused") {
-		t.Errorf("a store failure was not logged:\n%s", logs)
+	if logs := h.logs.String(); !strings.Contains(logs, "something unexpected") {
+		t.Errorf("an unexpected error was not logged:\n%s", logs)
 	}
 }
 
 // Live follows the session the credential came from: true while it lasts, false
-// after logout, and false whenever it cannot be told, because the store failed or
-// the check ran out of time.
+// after logout in this process or once it expires, and false when the check ran out
+// of time. A credential a copy of the cookie gets after the logout is live again:
+// logout ends what is open, and revokes nothing.
 func TestLiveFollowsTheSession(t *testing.T) {
 	h := newHarness(t)
 	b := h.browser()
@@ -183,15 +182,7 @@ func TestLiveFollowsTheSession(t *testing.T) {
 		t.Errorf("Session %q (again %q, another session %q) is not an opaque name of its own", cred.Session, again.Session, theirs.Session)
 	}
 
-	h.store.down.Store(true)
-	if cred.Live(t.Context()) {
-		t.Error("live while the store is down")
-	}
-	h.store.down.Store(false)
-	if !strings.Contains(h.logs.String(), "session check") {
-		t.Errorf("a failed session check was not logged:\n%s", h.logs.String())
-	}
-
+	id := b.cookie(session.CookieName)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if cred.Live(ctx) {
@@ -203,5 +194,19 @@ func TestLiveFollowsTheSession(t *testing.T) {
 	}
 	if cred.Live(t.Context()) {
 		t.Error("live after logout")
+	}
+	if !theirs.Live(t.Context()) {
+		t.Error("another session's credential ended with this logout")
+	}
+
+	copied := h.browser()
+	copied.setSession(id)
+	later, refused := h.auth.Token(cookieRequest(copied))
+	if refused != nil || !later.Live(t.Context()) || later.Session != cred.Session {
+		t.Fatalf("a copy of the cookie after logout: %+v, %v; this test records that it is still the session", later, refused)
+	}
+	h.clock.Advance(time.Hour)
+	if later.Live(t.Context()) || theirs.Live(t.Context()) {
+		t.Error("live past the session's expiry")
 	}
 }

@@ -11,6 +11,9 @@ oidc:
     name: krm-foyer-issuer-ca
 tls:
   secretName: krm-foyer-tls
+# Created once by deploy-foyer.sh and kept, so sessions survive a redeploy.
+sessionKeys:
+  secretName: krm-foyer-session-keys
 # Notes share one watch per scope: the hello example's, and the rehearsal's.
 sharedWatches:
   resources: [notes.hello.krm-foyer.example]

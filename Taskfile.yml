@@ -36,11 +36,12 @@ tasks:
       # -race stays on: a proxy that fans streams out to many browsers is where a
       # data race turns into one user seeing another's data.
       - go test -race ./...
-      # Short runs of the path, response, CSRF and return-path properties on top of their seeds, which
+      # Short runs of the path, response, CSRF, forged-cookie and return-path properties on top of their seeds, which
       # the line above already runs. -fuzz takes one package and one target at a time.
       - go test -run '^$' -fuzz '^FuzzCheckPath$' -fuzztime 10s ./internal/proxy/
       - go test -run '^$' -fuzz '^FuzzCheckResponse$' -fuzztime 10s ./internal/proxy/
       - go test -run '^$' -fuzz '^FuzzCheckMutation$' -fuzztime 10s ./internal/session/
+      - go test -run '^$' -fuzz '^FuzzForgedCookie$' -fuzztime 10s ./internal/session/
       - go test -run '^$' -fuzz '^FuzzLocalPath$' -fuzztime 10s ./internal/auth/
       - go test -run '^$' -fuzz '^FuzzDecisionsAreTransparent$' -fuzztime 10s ./internal/stream/
       # The browser helper, /_foyer/foyer.js, with Node's own test runner: no npm, no build.

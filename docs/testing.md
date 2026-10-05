@@ -47,8 +47,8 @@ anything shaped like a JWT. The second covers the tokens krm-foyer holds and nev
 the suite: the ID tokens it got by redeeming codes, and its own service-account token.
 krm-foyer holds no refresh token yet, since it asks for no `offline_access`. When refresh
 arrives, the scan must also inspect stored credentials for opaque refresh tokens no
-pattern can find. Shared storage is a separate roadmap item, not a prerequisite for
-testing refresh on one replica.
+pattern can find. The session cookie holds the ID token sealed, so it is scanned as well,
+as set and as decoded: no Set-Cookie is exempt.
 
 A session ID has exactly one place it belongs: the `Set-Cookie` header that issues it,
 on the login callback and wherever the ID is rotated. The scan allows the ID there, and
@@ -93,13 +93,17 @@ bugs are here, where they are cheap to find:
   `fetch`, an iframe, another method, a capitalized or repeated `Sec-Fetch-Dest` and
   `Accept: text/html` alone all get JSON, and the API server's own 401, 403, 404, 409,
   422, 429, 500 and 503 reach a navigation unchanged.
-- **Sessions** ([internal/session](../internal/session)): rotation at login (a planted
-  ID is never adopted), idle, absolute and token expiry, logout winning over a request
-  that is recording activity, and a store failure never read as "no session". Expiry
-  runs against a store that never expires anything as well, so the session code decides
-  on its own. Every way of presenting other than exactly one well-formed cookie is no
-  session. Checking whether a session is still live, as an open response does, never
-  counts as use.
+- **Sessions** ([internal/session](../internal/session)): a new session at every login (a
+  planted cookie is never adopted), absolute and token expiry decided by krm-foyer's
+  clock, before and after a restart, and a lower timeout applying to cookies already
+  issued. Every bit of a cookie is flipped, and each is no session; so is every way of
+  presenting other than exactly one cookie that opens: another version, key, name or
+  spelling, a short or a long one, and a payload sealed with the right key that is not a
+  whole session. A restart with the same keys keeps the session, its CSRF token and its
+  end; rotation keeps it during the overlap and ends it when its key goes. Logout and a
+  new login end the open responses of that session, and of no other, while a copy of
+  the cookie stays a session: the tests record that limit rather than hide it. A session
+  too large for its cookie is refused before a cookie is set.
 - **Open responses end with their session** ([internal/proxy](../internal/proxy)), over
   every pair of HTTP/1.1 and HTTP/2 towards the browser and towards the API server: when
   the session ends, the browser's response is aborted, never ended cleanly, and the

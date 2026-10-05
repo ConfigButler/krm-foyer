@@ -93,7 +93,7 @@ func assertAuditedAs(ctx SpecContext, marker, username string, code int) {
 // another 403, which is silent.
 var _ = Describe("krm-foyer", Label("foyer"), func() {
 	Context("does not invent authentication", func() {
-		It("logs in through the configured issuer with PKCE, state and nonce, and sets only an opaque HttpOnly cookie", func(ctx SpecContext) {
+		It("logs in through the configured issuer with PKCE, state and nonce, and sets only a sealed HttpOnly cookie", func(ctx SpecContext) {
 			b := fx.browser()
 
 			By("sending the browser to Dex with PKCE, state and nonce")
@@ -112,7 +112,7 @@ var _ = Describe("krm-foyer", Label("foyer"), func() {
 			Expect(q.Get("scope")).NotTo(ContainSubstring("offline_access"), "no refresh token while there is no refresh")
 			Expect(cookiesSet(start)).To(ConsistOf(HaveField("Name", HavePrefix(loginCookiePrefix))))
 
-			By("coming back from Dex to the path it asked for, with only an opaque session cookie")
+			By("coming back from Dex to the path it asked for, with only a sealed session cookie")
 			back := b.get(ctx, b.atDex(ctx, authorize, alice))
 			Expect(back.Code).To(Equal(http.StatusSeeOther), "%s", back.Body)
 			Expect(back.Header.Get("Location")).To(Equal("/apps/check?view=list"))
@@ -128,8 +128,10 @@ var _ = Describe("krm-foyer", Label("foyer"), func() {
 					Expect(c.MaxAge).To(BeNumerically("<", 0), "the login cookie outlives the callback")
 					continue
 				}
-				// 32 random bytes, and nothing shaped like a token.
-				Expect(c.Value).To(MatchRegexp(`^[A-Za-z0-9_-]{43}$`))
+				// The session sealed, in unpadded base64url, within the cookie budget. That
+				// it holds no token in the clear, sealed or decoded, is the leak scan's.
+				Expect(c.Value).To(MatchRegexp(`^[A-Za-z0-9_-]+$`))
+				Expect(len(c.Value)).To(BeNumerically("<=", 3800))
 			}
 		})
 
@@ -442,7 +444,7 @@ var _ = Describe("krm-foyer", Label("foyer"), func() {
 			// AfterSuite scans again, once every spec has run.
 		})
 
-		It("destroys the session on logout, so a replayed cookie gets a 401", func(ctx SpecContext) {
+		It("clears the cookie on logout, and a copy of it stays the session until it expires", func(ctx SpecContext) {
 			alice := signIn(ctx, alice)
 			copied := alice.b.cookie(sessionCookie)
 			Expect(alice.viaFoyer(ctx, http.MethodGet, "/version", nil, nil).Code).To(Equal(http.StatusOK))
@@ -450,13 +452,60 @@ var _ = Describe("krm-foyer", Label("foyer"), func() {
 			out := alice.b.do(ctx, http.MethodPost, "/auth/logout", nil, alice.proof())
 			Expect(out.Code).To(Equal(http.StatusNoContent), "%s", out.Body)
 			Expect(alice.b.cookie(sessionCookie)).To(BeEmpty(), "the cookie was not cleared")
-
-			replay := fx.browser()
-			replay.setCookie(sessionCookie, copied)
-			a := replay.get(ctx, "/k8s/version")
+			a := alice.viaFoyer(ctx, http.MethodGet, "/version", nil, nil)
 			Expect(a.Code).To(Equal(http.StatusUnauthorized))
 			assertNeverAudited(ctx, a.Marker)
-			Expect(replay.get(ctx, "/auth/session").Code).To(Equal(http.StatusUnauthorized))
+
+			By("recording the chosen limit: logout revokes nothing, so a copied cookie still works")
+			replay := user{b: fx.browser(), name: alice.name, k8sName: alice.k8sName}
+			replay.b.setCookie(sessionCookie, copied)
+			a = replay.viaFoyer(ctx, http.MethodGet, "/version", nil, nil)
+			Expect(a.Code).To(Equal(http.StatusOK), "%s", a.Body)
+			assertAuditedAs(ctx, a.Marker, aliceK8sName, http.StatusOK)
+			Expect(replay.b.get(ctx, "/auth/session").Code).To(Equal(http.StatusOK))
+			// Its expiry, which nothing renews, is tested on the brief instance below.
+		})
+
+		It("keeps a session across an orderly restart and an abrupt replacement, and not a login in progress", func(ctx SpecContext) {
+			alice := signIn(ctx, alice)
+			before := alice.b.session(ctx)
+			pending := fx.browser()
+			authorize := pending.startLogin(ctx, "/after")
+
+			for _, replace := range []struct {
+				how  string
+				args []string
+			}{
+				{"rolling the deployment", []string{"rollout", "restart", "deployment/krm-foyer"}},
+				{"killing the pod", []string{"delete", "pod", "-l", "app.kubernetes.io/instance=krm-foyer", "--grace-period=0", "--force"}},
+			} {
+				By("replacing krm-foyer by " + replace.how)
+				fx.replaceFoyer(ctx, replace.args...)
+				after := alice.b.session(ctx)
+				Expect(after.Authenticated).To(BeTrue())
+				Expect(after.CSRFToken).To(Equal(before.CSRFToken))
+				Expect(after.ExpiresAt).To(Equal(before.ExpiresAt))
+				Expect(after.Subject).To(Equal(before.Subject))
+
+				By("acting with the same cookie and CSRF proof, as the same user to the API server")
+				a := alice.viaFoyer(ctx, http.MethodPost, "/apis/authentication.k8s.io/v1/selfsubjectreviews",
+					[]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`), nil)
+				Expect(a.Code).To(Equal(http.StatusCreated), "%s", a.Body)
+				assertAuditedAs(ctx, a.Marker, aliceK8sName, http.StatusCreated)
+			}
+
+			By("refusing the login that was in progress, then signing in afresh")
+			assertLoginRefused(pending.get(ctx, pending.atDex(ctx, authorize, alice.name)), http.StatusBadRequest, "login-not-in-progress")
+			Expect(pending.login(ctx, alice.name, "/").Code).To(Equal(http.StatusSeeOther))
+		})
+
+		It("refuses a session of another deployment's keys, and never asks the API server", func(ctx SpecContext) {
+			brief := signInBrief(ctx, alice)
+			b := fx.browser()
+			b.setCookie(sessionCookie, brief.b.cookie(sessionCookie))
+			a := user{b: b}.viaFoyer(ctx, http.MethodGet, "/version", nil, nil)
+			Expect(a.Code).To(Equal(http.StatusUnauthorized), "%s", a.Body)
+			assertNeverAudited(ctx, a.Marker)
 		})
 
 		PIt("ends the session when Dex refuses a refresh for a removed user, and records how long that took")

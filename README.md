@@ -3,24 +3,24 @@
 **The browser's way in to Kubernetes: login, API access and live krm-stream resources.**
 
 krm-foyer is a backend for frontend (BFF) for browser applications built on Kubernetes
-APIs. It owns OIDC login and server-side sessions, proxies Kubernetes API requests with
+APIs. It owns OIDC login and sessions, proxies Kubernetes API requests with
 the user's own credential, and hosts
 [krm-stream](https://github.com/ConfigButler/krm-stream) resource streams on the same
-origin as your frontend. krm-foyer keeps its login and upstream credentials on the
-server; the browser receives an opaque session cookie.
+origin as your frontend. The browser holds the session in a cookie sealed with keys only
+krm-foyer has: page scripts never see a token, and sessions survive a restart.
 
 KRM is the [Kubernetes Resource Model](https://github.com/kubernetes/design-proposals-archive/blob/main/architecture/resource-management.md):
 the idea that everything is a declarative resource with a spec and a status. krm-foyer is
 for applications whose domain is modelled that way.
 
 > **Status: a working prototype, not yet for a cluster that matters.** Sign-in through
-> OIDC, server-side sessions and the API proxy work, and e2e specs against a real API
+> OIDC, sessions and the API proxy work, and e2e specs against a real API
 > server and Dex try to get past each security boundary. `task demo` runs an example
 > application against them in your browser. Request and response bounds, live streams
-> and opt-in shared watches are implemented and tested. Sessions still live in memory:
-> run one replica, expect a new login after a restart or ID-token expiry, and do not
-> treat the e2e manifests as a production deployment. Certificate reload, token refresh,
-> and shared session storage remain to be built; a Helm chart is being developed separately.
+> and opt-in shared watches are implemented and tested, and a Helm chart installs it.
+> Sessions survive a restart, but last no longer than their ID token, and logout does not
+> revoke a copied cookie. Run one replica. Certificate reload, token refresh and more
+> replicas remain to be built.
 > The [roadmap](docs/roadmap.md) gives the next priorities and their required evidence.
 
 ## Try it
@@ -53,9 +53,9 @@ change in one appear in the other, and a conflict when both edit the same note.
   No impersonation, and no fallback to krm-foyer's service account. A
   [shared watch](docs/watches.md), where configured, is opened once with an identity of
   its own, and the API server is asked about every user who reads it.
-- **Login tokens stay on the server.** The browser holds an opaque session ID in a Secure,
-  HttpOnly cookie. Frontend code never receives those tokens. The session ID is itself a bearer
-  credential, and is guarded like one.
+- **Frontend code never receives a token.** The browser holds the session sealed
+  (AES-GCM) in a Secure, HttpOnly cookie that only krm-foyer's keys open. The cookie is
+  itself a bearer credential until it expires, logout or not, and is guarded like one.
 - **One domain is one trust boundary.** The application, krm-foyer and any domain backend
   share an origin, routed by path. Everything on that domain can act as the signed-in
   user, so host only what you would trust with that access.
@@ -101,19 +101,20 @@ proxy and streams come together, and need:
 | --- | --- |
 | `-public-url` | krm-foyer's origin as browsers reach it, such as `https://app.example.com` |
 | `-oidc-issuer`, `-oidc-client-id`, `-oidc-client-secret-file` | The issuer the API server trusts, and krm-foyer's client there |
+| `-session-keys-file` | The keys session cookies are sealed with: one to four lines, each `head -c 32 /dev/urandom \| base64`, the first sealing. Keep them across restarts ([sessions](docs/design.md#sessions)) |
 | `-kubernetes-server` | The API server, such as `https://kubernetes.default.svc` |
 
 Optional: `-oidc-ca-file` and `-kubernetes-ca-file` (CAs to trust), `-oidc-scopes`,
-`-session-idle-timeout` (1h), `-session-absolute-timeout` (8h), `-tls-cert-file` and
+`-session-absolute-timeout` (8h), `-tls-cert-file` and
 `-tls-key-file` to serve TLS, `-listen` (`:8080`) and `-metrics-listen` (`:9090`). The
 [bounds](docs/bounds.md) each have a flag and a documented default: the request rate and
 concurrent requests per session, concurrent requests per replica, how long a response
-may stay open, its size, and how often an open response checks its session. Sessions
-live in memory: run one replica. Shared watches are opt-in; see their
+may stay open, its size, and how often an open response checks its session. Run one
+replica: logins in progress and logout's reach are each process's own. Shared watches are opt-in; see their
 [configuration and identity requirements](docs/watches.md#setting-up-shared-watches).
 The OIDC redirect URI to register is `<public-url>/auth/callback`. The public URL,
-issuer and Kubernetes server must use HTTPS. Mounted TLS certificates, CA bundles and
-the OIDC client secret are read at startup; restart after changing them. The explicitly
+issuer and Kubernetes server must use HTTPS. Mounted TLS certificates, CA bundles,
+the session keys and the OIDC client secret are read at startup; restart after changing them. The explicitly
 configured shared-watch token file is reread by client-go for rotation.
 
 Or as a container:

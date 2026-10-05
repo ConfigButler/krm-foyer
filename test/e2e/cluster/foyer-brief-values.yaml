@@ -3,10 +3,10 @@
 # session may have two requests in flight and send ten at once, then one a second, and a
 # response has at most 128 KiB. The main instance keeps ordinary bounds, so no other
 # spec has to race them. Installed on top of foyer-values.yaml: the same image,
-# certificate, public URL and Dex client. The suite reaches it on its own NodePort, under
+# certificate, public URL and Dex client, with session keys of its own, so a session of
+# one is no session of the other. The suite reaches it on its own NodePort, under
 # the same name.
 bounds:
-  sessionIdleTimeout: 45s
   sessionAbsoluteTimeout: 45s
   sessionCheckInterval: 1s
   maxResponseDuration: 20s
@@ -28,5 +28,7 @@ sharedWatches:
 serviceAccount:
   create: false
   name: krm-foyer
+sessionKeys:
+  secretName: krm-foyer-brief-session-keys
 service:
   nodePort: 30444

@@ -150,9 +150,8 @@ Why these defaults:
   shortest time the API server itself keeps a watch open when the client names no
   `timeoutSeconds` (it picks between `--min-request-timeout`, 1800 seconds by default,
   and twice that). Clients that name a shorter `timeoutSeconds`, as client-go does
-  (five to ten minutes), never meet this bound. The limit must be below the session's
-  idle timeout, which krm-foyer checks at startup: a reconnect counts as use, so a tab
-  that only watches stays signed in.
+  (five to ten minutes), never meet this bound. A session's end is fixed at login, so
+  neither an open response nor a reconnect keeps it, or ends it sooner.
 - **32 MiB per response.** That fits an unpaginated list of a few thousand ordinary
   objects. gzip expands at most about a thousandfold, so a compressed bomb is stopped
   after some 32 KiB of what the API server sent.
@@ -197,7 +196,7 @@ A response can end in five ways:
 | The browser goes away | Nothing; nobody is left |
 | The response duration is reached | An aborted response |
 | The response-byte bound is reached | An aborted response |
-| Its session ends: logout, idle, absolute or token expiry, or a session store that cannot answer | An aborted response, within the [session check](#the-session-check) |
+| Its session ends: logout or a new login in this process, or absolute or token expiry | An aborted response, within the [session check](#the-session-check) |
 
 When krm-foyer cuts a response short, it does two things:
 
@@ -221,20 +220,21 @@ bound.
 
 ### The session check
 
-Every open response asks, once per interval, whether its session is still live. The
-question reads the session without counting as use: only requests renew the idle timeout,
-so a reconnecting watch does and an open one does not.
+Every open response asks, once per interval, whether its session is still live: not past
+its end, and not ended in this process since the response opened, by a logout or a new
+login in the same browser. The answer needs no storage: the end came with the cookie,
+and a logout marks the responses a small registry holds while they are open. A copy of
+the cookie that opens a response after the logout is not marked: logout revokes nothing
+([sessions](design.md#sessions)).
 
-The check is given at most one interval to answer. A store that does not answer in time,
-or answers with an error, counts as a session that has ended: fail closed, as the
-[session lifecycle](design.md#session-lifecycle) requires. So a response is cut short
-within one interval of its session ending, plus at most one more for a check that hangs:
-5 seconds normally, 10 at worst, with the defaults.
+The check is given at most one interval to answer, and one that does not counts as a
+session that has ended: fail closed, as the [session lifecycle](design.md#session-lifecycle)
+requires. So a response is cut short within one interval of its session ending, plus at
+most one more for a check that hangs: 5 seconds normally, 10 at worst, with the defaults.
 
-Each open response reads the store once per interval: nothing for the memory store, and
-up to about 800 reads a second when both the 2000-request and 2000-stream limits
-are occupied, once the store is shared
-([shared storage on the roadmap](roadmap.md#order-of-work)).
+The check reads nothing: it compares two times and a flag, in memory. More replicas
+would need logout to reach the others' registries, a design the
+[roadmap](roadmap.md#order-of-work) leaves for when they are needed.
 
 ### Response bytes
 
@@ -293,7 +293,7 @@ apart again:
   it again after a wait, so its retries are requests too, and meet the same bound.
 - **The response duration and the session check** hold a stream as they hold every
   response: it is cut short at 30 minutes, and krm-stream's client opens it again with a
-  fresh snapshot, which renews the session's idle timeout; and it is cut short within
+  fresh snapshot, with the same session; and it is cut short within
   the session-check interval of its session ending.
 - **The response-byte bound does not apply.** It bounds one answer, and a stream is not
   one: it is many snapshots and changes over half an hour. The size of a snapshot is
@@ -313,10 +313,11 @@ apart again:
   [shared](watches.md) stream: krm-stream delivers and rechecks one at a time, so a
   blocked write would also hold off the recheck that applies a revoked grant. A test
   stops reading, fills the buffers, revokes the grant and sees the stream end.
-- **Sessions are bounded** at 20,000 per replica, expired ones not counted. Each holds
-  an ID token, so this is tens of megabytes. Only someone the issuer signs in can start
-  one, but one such user can start many; past the bound, a login gets
-  `too-many-sessions` (503) and starts nothing.
+- **Sessions cost krm-foyer nothing to hold.** Each is in its own cookie, so there is
+  no count to bound; what a session can do here is bounded per session above, and its
+  cookie by size, at 3,800 bytes of value ([sessions](design.md#sessions)). Sealing one at
+  login and opening one per request cost microseconds (`BenchmarkSealAndOpen` in
+  `internal/session`); the rehearsal records the cookie's size with Dex's tokens.
 
 What is not bounded yet:
 
@@ -338,8 +339,9 @@ not guarantees established by the small-snapshot rehearsal.
 The rehearsal ([rehearsal_test.go](../test/e2e/rehearsal_test.go)) is part of the e2e
 suite and runs with every `task verify`. It restarts krm-foyer, signs in 200 identities
 through Dex's login form, opens nine streams for each, 1800 on one replica, near the
-2000 it allows by default, and changes one note they all watch. Then every identity
-signs out. It fails unless every stream had the change within 10 seconds, every stream
+2000 it allows by default, and changes one note they all watch. It restarts krm-foyer
+with every stream open, and every identity opens its streams again with the session
+cookie it had: no new login. Then every identity signs out. It fails unless every stream had the change within 10 seconds, every stream
 was aborted within the session-check interval of its logout, and the streams, the
 watches at the API server and the goroutines all went back to where they were. It
 prints what it measured with its report.
@@ -370,6 +372,23 @@ of its user's own, and streams of shared notes, all on one watch:
 | Watches at the API server | 1800 | 1 |
 | Access checks while opening | none | 200 asked the API server (two SubjectAccessReviews each), 1600 reused |
 | Access checks while held for 31 seconds | none | 200 asked, 12.9 reviews a second; 1600 reused |
+
+One run each on 2026-10-05, after sessions moved into sealed cookies (krm-stream 0.7.0,
+otherwise the same fixture):
+
+| Measured | Per-user (ConfigMaps) | Shared (notes) |
+| --- | --- | --- |
+| The session cookie, name and value, with Dex's ID token | 1,589 bytes, of the 4,096 browsers keep | 1,589 bytes |
+| Reopening all 1800 streams after a restart, with the cookies from before it | 0.7 seconds, no new login | 2.1 seconds, no new login |
+| Opening 1800 streams at once | 0.6 seconds | 2.0 seconds |
+| One change reaching all 1800, the slowest | 80 ms | 47 ms |
+| Logout to stream aborted, the slowest | 4.6 seconds | 3.3 seconds |
+| Resident memory with 200 sessions, before any stream | 40 MiB, 35 idle | 39 MiB, 35 idle |
+| Resident memory with 1800 streams | 288 MiB, about 141 KiB per stream | 226 MiB, about 106 KiB per stream |
+
+Opening a sealed cookie costs about 6 µs and 10 KB of allocation per request, and
+sealing one at login about 9 µs (`go test -bench SealAndOpen ./internal/session/`, on
+the same host), next to the milliseconds a request to the API server takes.
 
 With sharing, the API server holds one watch instead of 1800, and is asked about each
 identity once per recheck rather than about each stream: 12.9 reviews a second for 200
@@ -553,7 +572,7 @@ Rules of thumb for tuning:
 - **Lower a limit when the 99th percentile stays far below it** for weeks: the room
   above it serves only runaway pages.
 - **Expect `session_ended` at logout and at expiry**, one for each response the tab had
-  open. Ordinary reconnects renew idle time, but failed or refused reconnects need not;
-  idle, absolute and token expiry can all end a session. One session can own many
-  responses, so compare against open-response counts rather than expecting one cut
-  per logout. Store checks that fail or time out are another cause.
+  open. Absolute and token expiry, logout and a new login in the same browser can all
+  end a session's responses. One session can own many responses, so compare against
+  open-response counts rather than expecting one cut per logout. Checks that time out
+  are another cause.

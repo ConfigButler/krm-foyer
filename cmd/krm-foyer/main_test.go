@@ -31,8 +31,11 @@ func files(m map[string]string) func(string) ([]byte, error) {
 var loginArgs = []string{
 	"-public-url", "https://foyer.example.test", "-oidc-issuer", "https://dex.example.test",
 	"-oidc-client-id", "krm-foyer", "-oidc-client-secret-file", "/secret",
-	"-kubernetes-server", "https://kubernetes.default.svc",
+	"-session-keys-file", "/keys", "-kubernetes-server", "https://kubernetes.default.svc",
 }
+
+// testSessionKeys is a session keys file with one key.
+const testSessionKeys = "c2Vzc2lvbi1rZXktZm9yLWtybS1mb3llci10ZXN0cyE=\n" //nolint:gosec // a test key
 
 func TestParseConfigWithoutLogin(t *testing.T) {
 	cfg, err := parseConfig(nil, files(nil), io.Discard)
@@ -43,14 +46,14 @@ func TestParseConfigWithoutLogin(t *testing.T) {
 
 func TestParseConfigWithLogin(t *testing.T) {
 	cfg, err := parseConfig(append(loginArgs, "-oidc-scopes", "openid, email,groups"),
-		files(map[string]string{"/secret": "s3cret\n"}), io.Discard)
+		files(map[string]string{"/secret": "s3cret\n", "/keys": testSessionKeys}), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	l := cfg.login
 	if l == nil || l.auth.ClientSecret != "s3cret" || l.kubernetes.Server.Host != "kubernetes.default.svc" ||
 		strings.Join(l.auth.Scopes, " ") != "openid email groups" || l.sessions.Origin != "https://foyer.example.test" ||
-		l.sessions.IdleTimeout != time.Hour || l.sessions.AbsoluteTimeout != 8*time.Hour ||
+		l.sessions.Keys == nil || l.sessions.AbsoluteTimeout != 8*time.Hour ||
 		l.gate.SessionCheckInterval != 5*time.Second || l.gate.MaxResponseDuration != 30*time.Minute ||
 		l.gate.MaxSessionConcurrentRequests != 64 || l.gate.MaxConcurrentRequests != 2000 ||
 		l.gate.MaxSessionStreams != 32 || l.gate.MaxStreams != 2000 ||
@@ -63,7 +66,7 @@ func TestParseConfigWithLogin(t *testing.T) {
 // Shared watches are off unless asked for, and take the resources and the token
 // file they are given, with the recheck defaults.
 func TestParseConfigSharedWatches(t *testing.T) {
-	secret := files(map[string]string{"/secret": "s3cret"})
+	secret := files(map[string]string{"/secret": "s3cret", "/keys": testSessionKeys})
 	cfg, err := parseConfig(loginArgs, secret, io.Discard)
 	if err != nil || cfg.login.shared != nil {
 		t.Fatalf("without the flags: %+v, %v; want no shared watches", cfg.login.shared, err)
@@ -94,37 +97,42 @@ func TestParseConfigRefuses(t *testing.T) {
 		}
 		return out
 	}
-	secret := map[string]string{"/secret": "s3cret"}
+	secret := map[string]string{"/secret": "s3cret", "/keys": testSessionKeys}
 	for name, tc := range map[string]struct {
 		args  []string
 		files map[string]string
 		want  string
 	}{
-		"no public URL":          {without("-public-url"), secret, "-public-url"},
-		"no issuer":              {without("-oidc-issuer"), secret, "-oidc-issuer"},
-		"no client ID":           {without("-oidc-client-id"), secret, "-oidc-client-id"},
-		"no secret file":         {without("-oidc-client-secret-file"), secret, "-oidc-client-secret-file"},
-		"no API server":          {without("-kubernetes-server"), secret, "-kubernetes-server"},
-		"secret file missing":    {loginArgs, nil, "client secret"},
-		"secret file empty":      {loginArgs, map[string]string{"/secret": "\n"}, "empty"},
-		"only a cert":            {[]string{"-tls-cert-file", "/c"}, nil, "-tls-key-file"},
-		"only a key":             {[]string{"-tls-key-file", "/k"}, nil, "-tls-cert-file"},
-		"CA without login":       {[]string{"-kubernetes-ca-file", "/ca"}, nil, "sign-in flags"},
-		"CA not PEM":             {append(loginArgs, "-kubernetes-ca-file", "/ca"), map[string]string{"/secret": "s", "/ca": "nope"}, "no PEM"},
-		"stray argument":         {[]string{"serve"}, nil, "unexpected"},
-		"no session checks":      {append(loginArgs, "-session-check-interval", "0s"), secret, "-session-check-interval"},
-		"no response duration":   {append(loginArgs, "-max-response-duration", "0s"), secret, "-max-response-duration"},
-		"duration past idle":     {append(loginArgs, "-max-response-duration", "1h"), secret, "below -session-idle-timeout"},
-		"no concurrency":         {append(loginArgs, "-max-concurrent-requests", "0"), secret, "-max-concurrent-requests"},
-		"no session concurrency": {append(loginArgs, "-max-session-concurrent-requests", "-1"), secret, "-max-session-concurrent-requests"},
-		"no session streams":     {append(loginArgs, "-max-session-streams", "0"), secret, "-max-session-streams"},
-		"no streams":             {append(loginArgs, "-max-streams", "-1"), secret, "-max-streams"},
-		"no request rate":        {append(loginArgs, "-session-request-rate", "0"), secret, "-session-request-rate"},
-		"no request burst":       {append(loginArgs, "-session-request-burst", "0"), secret, "-session-request-burst"},
-		"shared without token":   {append(loginArgs, "-shared-watch-resources", "configmaps"), secret, "go together"},
-		"shared token alone":     {append(loginArgs, "-shared-watch-token-file", "/token"), secret, "go together"},
-		"shared resource bad":    {append(loginArgs, "-shared-watch-resources", "apps/deployments", "-shared-watch-token-file", "/token"), secret, "-shared-watch-resources"},
-		"shared names none":      {append(loginArgs, "-shared-watch-resources", ",", "-shared-watch-token-file", "/token"), secret, "names no resource"},
+		"no public URL":           {without("-public-url"), secret, "-public-url"},
+		"no issuer":               {without("-oidc-issuer"), secret, "-oidc-issuer"},
+		"no client ID":            {without("-oidc-client-id"), secret, "-oidc-client-id"},
+		"no secret file":          {without("-oidc-client-secret-file"), secret, "-oidc-client-secret-file"},
+		"no API server":           {without("-kubernetes-server"), secret, "-kubernetes-server"},
+		"no session keys file":    {without("-session-keys-file"), secret, "-session-keys-file"},
+		"session keys missing":    {loginArgs, map[string]string{"/secret": "s"}, "reading the session keys"},
+		"session keys empty":      {loginArgs, map[string]string{"/secret": "s", "/keys": "\n"}, "no session key"},
+		"a session key too short": {loginArgs, map[string]string{"/secret": "s", "/keys": "c2hvcnQ="}, "-session-keys-file: line 1"},
+		"the idle timeout of 0.1": {append(loginArgs, "-session-idle-timeout", "1h"), secret, "session-idle-timeout"},
+		"no session timeout":      {append(loginArgs, "-session-absolute-timeout", "0s"), secret, "-session-absolute-timeout"},
+		"secret file missing":     {loginArgs, nil, "client secret"},
+		"secret file empty":       {loginArgs, map[string]string{"/secret": "\n", "/keys": testSessionKeys}, "empty"},
+		"only a cert":             {[]string{"-tls-cert-file", "/c"}, nil, "-tls-key-file"},
+		"only a key":              {[]string{"-tls-key-file", "/k"}, nil, "-tls-cert-file"},
+		"CA without login":        {[]string{"-kubernetes-ca-file", "/ca"}, nil, "sign-in flags"},
+		"CA not PEM":              {append(loginArgs, "-kubernetes-ca-file", "/ca"), map[string]string{"/secret": "s", "/keys": testSessionKeys, "/ca": "nope"}, "no PEM"},
+		"stray argument":          {[]string{"serve"}, nil, "unexpected"},
+		"no session checks":       {append(loginArgs, "-session-check-interval", "0s"), secret, "-session-check-interval"},
+		"no response duration":    {append(loginArgs, "-max-response-duration", "0s"), secret, "-max-response-duration"},
+		"no concurrency":          {append(loginArgs, "-max-concurrent-requests", "0"), secret, "-max-concurrent-requests"},
+		"no session concurrency":  {append(loginArgs, "-max-session-concurrent-requests", "-1"), secret, "-max-session-concurrent-requests"},
+		"no session streams":      {append(loginArgs, "-max-session-streams", "0"), secret, "-max-session-streams"},
+		"no streams":              {append(loginArgs, "-max-streams", "-1"), secret, "-max-streams"},
+		"no request rate":         {append(loginArgs, "-session-request-rate", "0"), secret, "-session-request-rate"},
+		"no request burst":        {append(loginArgs, "-session-request-burst", "0"), secret, "-session-request-burst"},
+		"shared without token":    {append(loginArgs, "-shared-watch-resources", "configmaps"), secret, "go together"},
+		"shared token alone":      {append(loginArgs, "-shared-watch-token-file", "/token"), secret, "go together"},
+		"shared resource bad":     {append(loginArgs, "-shared-watch-resources", "apps/deployments", "-shared-watch-token-file", "/token"), secret, "-shared-watch-resources"},
+		"shared names none":       {append(loginArgs, "-shared-watch-resources", ",", "-shared-watch-token-file", "/token"), secret, "names no resource"},
 		"decisions outlive check": {append(loginArgs, "-shared-watch-resources", "configmaps", "-shared-watch-token-file", "/token",
 			"-shared-watch-decision-ttl", "1m"), secret, "-shared-watch-decision-ttl"},
 		"no stream write timeout": {append(loginArgs, "-stream-write-timeout", "0s"), secret, "-stream-write-timeout"},
@@ -168,7 +176,7 @@ func TestHandlerWithLoginNeedsASession(t *testing.T) {
 	args := append([]string{}, loginArgs...)
 	args[len(args)-1] = api.URL
 	args = append(args, "-kubernetes-ca-file", "/ca", "-oidc-issuer", "https://127.0.0.1:1")
-	cfg, err := parseConfig(args, files(map[string]string{"/secret": "s", "/ca": string(ca)}), io.Discard)
+	cfg, err := parseConfig(args, files(map[string]string{"/secret": "s", "/keys": testSessionKeys, "/ca": string(ca)}), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +221,7 @@ func TestHandlerWithLoginNeedsASession(t *testing.T) {
 // The 401 page's sign-in link is one login accepts: the proxy writes it, login
 // checks it, and the two must agree on what a return path is.
 func TestSignInLinkIsAcceptedByLogin(t *testing.T) {
-	cfg, err := parseConfig(loginArgs, files(map[string]string{"/secret": "s"}), io.Discard)
+	cfg, err := parseConfig(loginArgs, files(map[string]string{"/secret": "s", "/keys": testSessionKeys}), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +258,7 @@ func TestSignInLinkIsAcceptedByLogin(t *testing.T) {
 // Metrics are served on their own listener and nowhere on the origin, where any page
 // could read them, and an interruption in the wired binary is counted there.
 func TestMetricsAreServedApartAndCount(t *testing.T) {
-	cfg, err := parseConfig(loginArgs, files(map[string]string{"/secret": "s"}), io.Discard)
+	cfg, err := parseConfig(loginArgs, files(map[string]string{"/secret": "s", "/keys": testSessionKeys}), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}

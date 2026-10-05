@@ -63,8 +63,8 @@ type config struct {
 
 // loginConfig is sign-in and the API half. They come together, because the API
 // half's only credential is a session and a session only comes from login, but each
-// package keeps its own section. What handler wires (the session store, the
-// sessions, the credentials, the gate, the logger and the metrics) is left out here.
+// package keeps its own section. What handler wires (the sessions, the credentials,
+// the gate, the logger and the metrics) is left out here.
 type loginConfig struct {
 	auth       auth.Config
 	sessions   session.Config
@@ -83,8 +83,9 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		cfg                            config
 		publicURL, issuer, clientID    string
 		secretFile, issuerCAFile       string
+		sessionKeysFile                string
 		scopes, apiServer, apiServerCA string
-		idle, absolute, checkEvery     time.Duration
+		absolute, checkEvery           time.Duration
 		maxDuration                    time.Duration
 		perSession, inAll, burst       int
 		sessionStreams, allStreams     int
@@ -107,12 +108,15 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	fs.StringVar(&scopes, "oidc-scopes", strings.Join(auth.DefaultScopes, ","), "comma-separated scopes to ask for at login")
 	fs.StringVar(&apiServer, "kubernetes-server", "", "the API server's URL, such as https://kubernetes.default.svc")
 	fs.StringVar(&apiServerCA, "kubernetes-ca-file", "", "the CA certificates (PEM) that sign the API server's certificate")
-	fs.DurationVar(&idle, "session-idle-timeout", time.Hour, "end a session unused for this long")
-	fs.DurationVar(&absolute, "session-absolute-timeout", 8*time.Hour, "end any session this long after login")
+	fs.StringVar(&sessionKeysFile, "session-keys-file", "",
+		"a file of the keys session cookies are sealed with, one per line in standard base64, 32 bytes each: "+
+			"the first seals new cookies, every one opens them. See docs/design.md, \"Sessions\"")
+	fs.DurationVar(&absolute, "session-absolute-timeout", 8*time.Hour,
+		"end any session this long after login, however it is used; the token's expiry ends it sooner")
 	fs.DurationVar(&checkEvery, "session-check-interval", gate.DefaultSessionCheckInterval,
 		"how often an open response asks whether its session is still live; it is cut short when not")
 	fs.DurationVar(&maxDuration, "max-response-duration", gate.DefaultMaxResponseDuration,
-		"how long a response, a watch above all, may stay open; it is cut short then. Below -session-idle-timeout")
+		"how long a response, a watch above all, may stay open; it is cut short then")
 	fs.IntVar(&perSession, "max-session-concurrent-requests", gate.DefaultMaxSessionConcurrentRequests,
 		"how many requests, watches included, one session may have in flight; more get 429")
 	fs.IntVar(&inAll, "max-concurrent-requests", gate.DefaultMaxConcurrentRequests,
@@ -153,7 +157,8 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 
 	required := map[string]string{
 		"-public-url": publicURL, "-oidc-issuer": issuer, "-oidc-client-id": clientID,
-		"-oidc-client-secret-file": secretFile, "-kubernetes-server": apiServer,
+		"-oidc-client-secret-file": secretFile, "-session-keys-file": sessionKeysFile,
+		"-kubernetes-server": apiServer,
 	}
 	var missing []string
 	for name, v := range required {
@@ -170,7 +175,7 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	case len(missing) > 0:
 		slices.Sort(missing)
 		return config{}, fmt.Errorf("sign-in and the API proxy need all of %s; missing %s",
-			"-public-url, -oidc-issuer, -oidc-client-id, -oidc-client-secret-file and -kubernetes-server",
+			"-public-url, -oidc-issuer, -oidc-client-id, -oidc-client-secret-file, -session-keys-file and -kubernetes-server",
 			strings.Join(missing, ", "))
 	}
 
@@ -201,19 +206,28 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		}
 	}
 
-	// Sessions. A mutation must come from the public URL's origin.
-	login.sessions = session.Config{Origin: publicURL, IdleTimeout: idle, AbsoluteTimeout: absolute}
+	// Sessions. A mutation must come from the public URL's origin. Without its keys,
+	// krm-foyer does not start: a key of its own making would end every session at
+	// the next restart, and differ from any other replica's.
+	keys, err := readFile(sessionKeysFile)
+	if err != nil {
+		return config{}, fmt.Errorf("reading the session keys: %w", err)
+	}
+	login.sessions = session.Config{Origin: publicURL, AbsoluteTimeout: absolute}
+	if login.sessions.Keys, err = session.ParseKeys(keys); err != nil {
+		return config{}, fmt.Errorf("-session-keys-file: %w", err)
+	}
+	if absolute <= 0 {
+		return config{}, fmt.Errorf("-session-absolute-timeout must be positive, got %v", absolute)
+	}
 
 	// The bounds every request through the API half is held to.
 	if checkEvery <= 0 {
 		return config{}, fmt.Errorf("-session-check-interval must be positive, got %v", checkEvery)
 	}
 	login.gate.SessionCheckInterval = checkEvery
-	// A reconnect counts as use and an open response does not, so a tab that only
-	// watches stays signed in only if its watches end, and reconnect, within the
-	// idle timeout.
-	if maxDuration <= 0 || maxDuration >= idle {
-		return config{}, fmt.Errorf("-max-response-duration must be positive and below -session-idle-timeout (%v), got %v", idle, maxDuration)
+	if maxDuration <= 0 {
+		return config{}, fmt.Errorf("-max-response-duration must be positive, got %v", maxDuration)
 	}
 	login.gate.MaxResponseDuration = maxDuration
 	if perSession <= 0 || inAll <= 0 {
@@ -292,7 +306,6 @@ func handler(cfg config, logger *slog.Logger, m *metrics.Metrics) (http.Handler,
 		return server.New(server.Config{Version: version}), func(context.Context) {}, nil
 	}
 	l := *cfg.login
-	l.sessions.Store = session.NewMemory(nil)
 	sessions, err := session.New(l.sessions)
 	if err != nil {
 		return nil, nil, err
