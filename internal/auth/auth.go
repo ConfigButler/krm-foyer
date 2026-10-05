@@ -228,6 +228,7 @@ var (
 	errNonce         = loginError{http.StatusBadGateway, "nonce-mismatch", "The sign-in service issued a token for a different sign-in."}
 	errTooLarge      = loginError{http.StatusBadGateway, "session-too-large", "The sign-in service issued a token too large to keep in a session cookie."}
 	errParameter     = loginError{http.StatusBadRequest, "login-parameter-refused", "This sign-in link asks for an option this site does not offer."}
+	errLoginTooLarge = loginError{http.StatusBadRequest, "login-too-large", "This sign-in link is too long to keep while you sign in."}
 	errClaims        = loginError{http.StatusBadGateway, "session-claims-invalid", "The sign-in service issued a token whose claims krm-foyer cannot read."}
 )
 
@@ -351,7 +352,13 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, errNotReady, returnTo, given, "")
 		return
 	}
-	cookie, t := a.transactions.begin(returnTo, given)
+	cookie, t, err := a.transactions.begin(returnTo, given)
+	if err != nil {
+		// Within each bound, but too large together once sealed: refused here, not
+		// dropped by the browser and lost at the callback.
+		a.fail(w, errLoginTooLarge, "/", nil, "")
+		return
+	}
 	for _, name := range a.transactions.excess(r) {
 		http.SetCookie(w, transactionCookie(name, "", -1))
 	}

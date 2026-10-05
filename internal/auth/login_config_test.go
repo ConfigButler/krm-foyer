@@ -359,3 +359,48 @@ sessionClaims:
 		}
 	}
 }
+
+// A login cookie the browser would drop fails the login at its callback, so none is
+// ever set. Each bound alone can be met while the cookie, holding a long return path
+// and the values JSON-escaped (< becomes <, six bytes), sealed and in base64, is
+// too large together: such a login is refused before the issuer, and every login that
+// is let through sets a cookie a browser keeps.
+func TestLoginCookieFits(t *testing.T) {
+	h := newHarnessWith(t, LoginConfig{AuthorizationParameters: map[string]Parameter{
+		"a": {AllowFromRequest: true}, "b": {AllowFromRequest: true},
+	}})
+	longPath := "/" + strings.Repeat("p", 2047)
+	escaping := strings.Repeat("<", 500)
+	for name, tc := range map[string]struct {
+		query url.Values
+		fits  bool
+	}{
+		"a long path alone": {url.Values{"return_to": {longPath}}, true},
+		"parameters at their bound, plain": {url.Values{"oidc.a": {strings.Repeat("x", 500)},
+			"oidc.b": {strings.Repeat("y", 500)}}, true},
+		"parameters at their bound, escaping": {url.Values{"oidc.a": {escaping}, "oidc.b": {escaping}}, false},
+		"both, escaping":                      {url.Values{"return_to": {longPath}, "oidc.a": {escaping}, "oidc.b": {escaping}}, false},
+		"both, plain": {url.Values{"return_to": {longPath}, "oidc.a": {strings.Repeat("x", 500)},
+			"oidc.b": {strings.Repeat("y", 500)}}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := h.browser()
+			resp := b.loginWith(tc.query.Encode())
+			if !tc.fits {
+				assertLoginError(t, resp, http.StatusBadRequest, "login-too-large")
+				if len(b.loginCookies()) != 0 {
+					t.Error("a login cookie was set anyway")
+				}
+				return
+			}
+			if resp.code != http.StatusFound {
+				t.Fatalf("login answered %d", resp.code)
+			}
+			for _, c := range resp.header.Values("Set-Cookie") {
+				if nameValue, _, _ := strings.Cut(c, ";"); len(nameValue) > 4096 {
+					t.Errorf("a cookie of %d bytes, which browsers drop", len(nameValue))
+				}
+			}
+		})
+	}
+}

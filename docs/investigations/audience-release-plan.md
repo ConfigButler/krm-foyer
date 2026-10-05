@@ -148,7 +148,7 @@ records that migration while the project remains below 1.0.
 | Expiry, including during downtime | Expired cookies are rejected; open responses end within the expiry-check bound |
 | Modified, duplicate, oversized, wrong-key or unsupported-version cookie | Refused without an upstream request; oversized login emits no session cookie |
 | Stable keys and key rotation | Restart and planned overlap preserve sessions; removing the old key rejects its cookies |
-| Credential exposure | Tokens occur only inside authenticated ciphertext in the HttpOnly cookie; plaintext tokens, cookie values and keys do not leak through logs, URLs or script-readable responses |
+| Credential exposure | In the browser, tokens occur only inside authenticated ciphertext in the HttpOnly cookie; krm-foyer sends the plaintext token only to the configured API server, as the bearer credential. Plaintext tokens, cookie values and keys do not leak through logs, URLs or script-readable responses |
 | Existing audience rehearsal | Record cookie/header overhead, encryption cost and reconnect behavior with 200 identities and 1,800 streams |
 
 Run `task verify`, including real-cluster restart evidence, browser cookie/CSRF

@@ -409,7 +409,9 @@ krm-foyer recognizes no product and interprets no value; the names above are Dex
   and nothing sent to the issuer: an unknown `oidc.*` name, a value for a
   configuration-only parameter, a value not on the list, a repeated or empty value, a
   value over 512 bytes, more than 1,024 bytes of names and values in all, or a query Go
-  would only read in part. The error page never repeats the value, and no value is
+  would only read in part. A login whose cookie, holding the return path and the
+  values once escaped, sealed and encoded, would exceed 4,000 bytes gets a 400
+  `login-too-large` instead of a cookie the browser would drop. The error page never repeats the value, and no value is
   logged.
 - **krm-foyer's own parameters cannot be configured**, so no link can reach them:
   `client_id`, `redirect_uri`, `response_type`, `response_mode`, `scope`, `state`, `nonce`,

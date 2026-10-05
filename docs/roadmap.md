@@ -253,10 +253,11 @@ Security items need tests that try to get past the boundary.
 - [ ] `/_foyer/access`: the rules for a namespace from a SelfSubjectRulesReview, and a
       "can I?" form answered by a SelfSubjectAccessReview. See
       [what may I do](design.md#what-may-i-do)
-- [ ] Shared session storage, so more than one replica works
-- [ ] The [session lifecycle](design.md#session-lifecycle) bounds, each with a test:
-      logout seen by every replica at once, logout racing a refresh, and the session
-      store unavailable
+- [ ] More than one replica: logins in progress, per-session bounds and logout's reach
+      across processes ([order of work](#order-of-work), item 5). Sessions themselves
+      need no shared storage: they are in their cookies
+- [ ] The remaining [session lifecycle](design.md#session-lifecycle) bounds, each with
+      a test: logout racing a refresh, and a refused refresh
 - [x] A native watch open across logout and expiry is aborted and cancelled at the API
       server within the session-check interval (one replica; e2e against the real
       cluster)

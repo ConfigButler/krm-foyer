@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"slices"
 	"strings"
@@ -81,8 +82,18 @@ func transactionCookieName(state string) string {
 	return transactionCookiePrefix + base64.RawURLEncoding.EncodeToString(sum[:12])
 }
 
-// begin starts a transaction and returns the cookie that holds it.
-func (ts *transactions) begin(returnTo string, params map[string]string) (*http.Cookie, transaction) {
+// maxTransactionCookie bounds a login cookie's name and value together. Browsers keep
+// a cookie of at most 4,096 bytes there and drop a longer one silently, which would
+// fail the login at its callback; this leaves room for the attributes too.
+const maxTransactionCookie = 4000
+
+// errTransactionTooLarge means a login's cookie would be too large to keep.
+var errTransactionTooLarge = errors.New("the login does not fit in its cookie")
+
+// begin starts a transaction and returns the cookie that holds it, or
+// errTransactionTooLarge when that cookie, as the browser would hold it, is too large:
+// a long return path with long parameters, after JSON escaping, sealing and base64.
+func (ts *transactions) begin(returnTo string, params map[string]string) (*http.Cookie, transaction, error) {
 	t := transaction{
 		State: random(), Nonce: random(), Verifier: oauth2.GenerateVerifier(),
 		ReturnTo: returnTo, Expires: ts.now().Add(transactionLifetime), Params: params,
@@ -96,7 +107,11 @@ func (ts *transactions) begin(returnTo string, params map[string]string) (*http.
 	_, _ = rand.Read(nonce)
 	// The name is sealed in too: a cookie cannot be moved to another login's name.
 	sealed := ts.aead.Seal(nonce, nonce, plain, []byte(name))
-	return transactionCookie(name, base64.RawURLEncoding.EncodeToString(sealed), int(transactionLifetime/time.Second)), t
+	value := base64.RawURLEncoding.EncodeToString(sealed)
+	if len(name)+1+len(value) > maxTransactionCookie {
+		return nil, transaction{}, errTransactionTooLarge
+	}
+	return transactionCookie(name, value, int(transactionLifetime/time.Second)), t, nil
 }
 
 // open returns the live transaction the cookie called name holds, or false.
