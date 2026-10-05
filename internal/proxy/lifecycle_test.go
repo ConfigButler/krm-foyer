@@ -154,12 +154,14 @@ func TestALiveSessionsResponseIsNotCut(t *testing.T) {
 // reached Kubernetes, which it did.
 func TestSessionEndingBeforeTheAnswer(t *testing.T) {
 	cancelled := make(chan struct{})
+	s := &session{}
 	api := newAPIServer(t, func(_ http.ResponseWriter, r *http.Request) {
+		// End the session only once the request has reached the API server.
+		// Otherwise the guard can cancel connection setup before this handler runs.
+		s.ended.Store(true)
 		<-r.Context().Done()
 		close(cancelled)
 	})
-	s := &session{}
-	s.ended.Store(true)
 	f := newFoyerWith(t, api, s.credentials(), frontOptions{config: func(c *testConfig) { c.SessionCheckInterval = checkEvery }})
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, f.url+"/k8s/api/v1/configmaps?watch=1", nil)
 	if err != nil {
