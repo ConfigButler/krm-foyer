@@ -43,10 +43,11 @@ verifies krm-foyer's certificate. See [both TLS models](ingress.md#decision-2026
 Its public URL is configuration: the OIDC redirect URI, same-origin and CSRF checks and return
 paths use it, never `Host` or `X-Forwarded-*`. An ingress in front must be transparent: no
 buffering of streams, and no authentication or header rewriting of its own on krm-foyer's
-routes. The planned `/auth/check` lets an ingress's external-authentication feature
-(`auth_request`, ForwardAuth) act only as a login gate for the application's pages.
-Until it exists, the helper's `requireSession()` handles that navigation. A login gate
-never decides on `/k8s` or `/stream` traffic. The [ingress decision](ingress.md) explains why, and what would make
+routes. `/auth/check` lets an ingress's external-authentication feature
+(`auth_request`, ForwardAuth) act as a login gate for the application's pages, and tell a
+domain backend on the same origin who the user is, as the API server names them, never
+with the token. The helper's `requireSession()` handles the same navigation where no
+ingress gate is configured. The check never decides on `/k8s` or `/stream` traffic. The [ingress decision](ingress.md) explains why, and what would make
 more worth revisiting.
 
 krm-foyer has two halves. The **login half** (`/auth/...`) obtains the user's OIDC token
@@ -90,7 +91,7 @@ come from krm-stream, not from a reimplementation here.
 | `/auth/callback` | Validate the callback and establish a session, then `303` to the return path |
 | `/auth/session` | Return minimal identity/session state and CSRF information, never bearer tokens: `200` with `authenticated`, `issuer`, `subject`, `email`, `displayName`, `groups`, `connector` when configured, `expiresAt`, `csrfToken` and `csrfHeader`, or `401` with `{"authenticated":false}`. See [session claims](#session-claims) |
 | `/auth/logout` | CSRF-protected POST that clears the session cookie, ends the session's open responses in this process and answers `204`; it revokes no copy of the cookie ([sessions](#sessions)). The caller then goes where it likes, `/auth/logged-out` by default |
-| `/auth/check` **(planned)** | 204 or 401 (or 302 to login on request) for an ingress gating the application's pages; never a token or identity. See the [login gate](ingress.md#decision-2026-10-01-a-login-gate-for-the-applications-pages) |
+| `/auth/check` | For an ingress's forward-auth: `204` when the browser is signed in and may make the request the ingress forwards (`X-Forwarded-Method`, with the CSRF rules of `/k8s` for a write), the `401` or `403` `/k8s` would give otherwise, or with `?redirect=true` a `302` to the login for a page load. With `?identity=true` the `204` carries `Krm-Foyer-Identity`, the API server's `userInfo` with the session's `displayName` and `connector`, for a domain backend. Never a token. See [the check](ingress.md#the-check) |
 | `/k8s/api/...` | Proxy core Kubernetes APIs after stripping `/k8s` |
 | `/k8s/apis/...` | Proxy grouped APIs, including CRDs and aggregated APIs |
 | `/k8s/api`, `/k8s/apis`, `/k8s/version`, `/k8s/openapi/...` | Proxy discovery and schema endpoints |

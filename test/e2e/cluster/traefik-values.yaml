@@ -2,7 +2,8 @@
 # here as a Gateway API implementation only. install-traefik.sh installs it with Helm.
 #
 # The fixture's routing is Gateway API (gateway.yaml): a Gateway and HTTPRoutes, the
-# portable form docs/ingress.md recommends, rather than Traefik's own IngressRoute.
+# portable form docs/ingress.md recommends. traefik-routes.yaml adds the routes behind
+# /auth/check, in Traefik's own IngressRoute, as its recipe there.
 global:
   checkNewVersion: false
   sendAnonymousUsage: false
@@ -21,9 +22,12 @@ deployment:
 providers:
   kubernetesGateway:
     enabled: true
-  # Gateway API only: no Ingress or IngressRoute is read.
+  # Traefik's own IngressRoute and Middleware too, for the Traefik recipe of
+  # docs/ingress.md (traefik-routes.yaml): ForwardAuth to /auth/check. Only from the
+  # namespace a resource is in.
   kubernetesCRD:
-    enabled: false
+    enabled: true
+    allowCrossNamespace: false
   kubernetesIngress:
     enabled: false
 

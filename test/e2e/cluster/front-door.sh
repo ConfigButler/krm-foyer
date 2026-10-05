@@ -71,6 +71,13 @@ for route in fixture/hello krm-foyer/krm-foyer; do
   done
 done
 
+echo "== front door: Traefik's routes behind /auth/check"
+# ForwardAuth verifies krm-foyer by the fixture CA. Both keys, as Traefik reads either.
+kubectl -n fixture create secret generic foyer-check-ca \
+  --from-file=ca.crt="$E2E_DIR/ca.crt" --from-file=tls.ca="$E2E_DIR/ca.crt" \
+  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl apply -f "$here/traefik-routes.yaml" >/dev/null
+
 echo "== port-forwards"
 "$here/port-forward.sh"
 # Through the forward, as a browser: the example's page, and /auth/ reaching krm-foyer
@@ -79,4 +86,20 @@ front() { curl -sS --cacert "$E2E_DIR/ca.crt" --resolve "foyer.localhost:8443:12
 front -f https://foyer.localhost:8443/ | grep -q '<title>Hello, krm-foyer</title>'
 code="$(front -o /dev/null -w '%{http_code}' https://foyer.localhost:8443/auth/session)"
 [ "$code" = 401 ] || { echo "the front door does not reach krm-foyer (/auth/session: $code)" >&2; exit 1; }
+# Traefik's routes ask krm-foyer first: a signed-out fetch is its 401, a page load its
+# redirect to the login. Anything else is a route or a ForwardAuth that does not work.
+# Traefik takes a moment to load new routes, and until then the Gateway's catch-all
+# answers, so this waits up to 30 seconds for each.
+expect_code() {
+  local path="$1" want="$2" what="$3" code=""
+  for _ in $(seq 1 30); do
+    code="$(front -o /dev/null -w '%{http_code}' "https://foyer.localhost:8443$path")"
+    [ "$code" = "$want" ] && return 0
+    sleep 1
+  done
+  echo "$path is not $what (signed out: $code, want $want)" >&2
+  exit 1
+}
+expect_code /public/whoami 401 "behind /auth/check"
+expect_code /members/ 302 "behind the login gate"
 echo "the hello example is at $FOYER_URL"

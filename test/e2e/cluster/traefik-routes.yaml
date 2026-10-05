@@ -1,0 +1,104 @@
+# The Traefik recipe of docs/ingress.md, made real: the same origin as gateway.yaml,
+# with two routes Gateway API cannot express without an experimental filter, written as
+# Traefik's own IngressRoute and Middlewares, as a cluster that routes with Traefik
+# (Voter's does) would write them.
+#
+#   /public/  a domain backend, behind /auth/check?identity=true: Traefik asks krm-foyer
+#             who the user is, and passes the answer on in Krm-Foyer-Identity
+#   /members/ pages behind the login gate, /auth/check?redirect=true: a signed-out page
+#             load goes to the login, and comes back
+#
+# Both are served by hello-web's nginx (hello-web-nginx.conf), which stands in for a
+# backend: /public/whoami echoes the identity header it received. front-door.sh applies
+# this file after gateway.yaml.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: foyer-identity
+  namespace: fixture
+spec:
+  forwardAuth:
+    # krm-foyer's Service, by a name its certificate holds (deploy-foyer.sh), verified
+    # against the fixture CA. The check gets the browser's own request headers (Cookie,
+    # Origin, the CSRF proof) and Traefik's X-Forwarded-Method and X-Forwarded-Uri.
+    address: https://krm-foyer.krm-foyer.svc/auth/check?identity=true
+    tls:
+      caSecret: foyer-check-ca
+    # The check's answer is a Status or krm-foyer's sign-in page: small.
+    maxResponseBodySize: 65536
+    # Traefik removes the browser's copy of each header named here before it copies
+    # krm-foyer's, so a forged Krm-Foyer-Identity never reaches the backend. The suite
+    # sends one to make sure.
+    authResponseHeaders: [Krm-Foyer-Identity]
+    # X-Forwarded-* from the browser are not to be believed: Traefik sets its own.
+    trustForwardHeader: false
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: foyer-gate
+  namespace: fixture
+spec:
+  forwardAuth:
+    address: https://krm-foyer.krm-foyer.svc/auth/check?redirect=true
+    tls:
+      caSecret: foyer-check-ca
+    maxResponseBodySize: 65536
+    trustForwardHeader: false
+---
+# The backend has no use for the session cookie, so it never leaves Traefik on these
+# routes. An empty value removes the header. hello-web's tripwire refuses any request
+# with a cookie, so every spec through these routes checks this too.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: no-cookie
+  namespace: fixture
+spec:
+  headers:
+    customRequestHeaders:
+      Cookie: ""
+---
+# Traefik to hello-web is TLS, verified, as on the Gateway's route (BackendTLSPolicy).
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: hello-web
+  namespace: fixture
+spec:
+  serverName: hello-web.fixture.svc
+  rootCAs:
+    - configMap: hello-web-ca
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: hello-backend
+  namespace: fixture
+spec:
+  entryPoints: [websecure]
+  routes:
+    # The middlewares run in order: the check first, then the cookie goes. An explicit
+    # priority, so these win over the Gateway's catch-all route to hello-web.
+    - match: Host(`foyer.localhost`) && PathPrefix(`/public/`)
+      priority: 1000
+      middlewares:
+        - name: foyer-identity
+        - name: no-cookie
+      services:
+        - name: hello-web
+          port: 443
+          scheme: https
+          serversTransport: hello-web
+    - match: Host(`foyer.localhost`) && PathPrefix(`/members/`)
+      priority: 1000
+      middlewares:
+        - name: foyer-gate
+        - name: no-cookie
+      services:
+        - name: hello-web
+          port: 443
+          scheme: https
+          serversTransport: hello-web
+  tls:
+    secretName: front-door-tls

@@ -94,22 +94,75 @@ which someone has to keep in step with the application.
 
 ### A browser identity in Kubernetes
 
-The API server's `AuthenticationConfiguration` can map tokens for the `krm-foyer`
-audience to their own identity: a username such as `browser:alice@example.com`, or a
-group. RBAC then grants that identity only what the application needs. Kubernetes
-enforces the scope itself, and the audit log records it.
+**Documented and proved (2026-10-05).** This is the first step the decision names, and
+it needs no krm-foyer code. Voter's operator asked for it
+([implementer feedback](implementer-feedback.md), entry 4): they sign in as a
+cluster-admin, and through krm-foyer every script on Voter's origin would hold that.
 
-This is the purest form of "Kubernetes decides". Its costs:
+The API server's `AuthenticationConfiguration` can give one person two usernames, told
+apart by the OIDC client the issuer gave the token to: krm-foyer's tokens one name, the
+command line's another. RBAC then grants the browser's name only what the application
+needs, and keeps the broad grants on the other. Kubernetes enforces the scope itself,
+and the audit log records which name acted.
 
-- **RBAC twice.** Each grant is written for `alice` and for `browser:alice`, or through a
-  group for each.
-- **Domain logic that matches on identity breaks.** Admission rules and owner fields that
-  expect `alice` see `browser:alice`.
+The client is the token's **authorized party**: `azp` when the issuer sets it, which
+Dex does when a client asks for another audience with the cross-client scope
+`audience:server:client_id:<id>`, and the audience otherwise. So the same expression
+works for a cluster that accepts krm-foyer's own audience, as the e2e fixture does, and
+for one where krm-foyer asks for the cluster's audience, as Voter's does:
+
+```yaml
+apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+jwt:
+  - issuer:
+      url: https://dex.example.com
+      # Both clients' tokens are accepted. With the cross-client scope, both carry
+      # the audience kubernetes, and krm-foyer's carries azp: krm-foyer.
+      audiences: [kubernetes]
+    claimMappings:
+      username:
+        # The browser's name: foyer:<email>. The command line keeps github:<email>,
+        # and with it the cluster-admin binding.
+        expression: "((has(claims.azp) ? claims.azp : claims.aud) == 'krm-foyer' ? 'foyer:' : 'github:') + claims.email"
+      groups:
+        # The same split for groups, so that no group binding reaches both.
+        expression: "has(claims.groups) ? dyn(claims.groups).map(g, ((has(claims.azp) ? claims.azp : claims.aud) == 'krm-foyer' ? 'foyer:' : 'github:') + g) : []"
+    claimValidationRules:
+      # A username from email is only an identity if the issuer vouched for it.
+      - expression: "has(claims.email_verified) && type(claims.email_verified) == bool && claims.email_verified"
+        message: "email_verified must be the boolean true"
+```
+
+Then bind the browser's name narrowly: `foyer:simonkoudijs@gmail.com` gets a Role over
+the application's resources, and `github:simonkoudijs@gmail.com` keeps `cluster-admin`.
+
+Which side gets the new name is a choice. Give it to whichever has fewer grants to
+rewrite: in Voter's cluster that is the browser, since the existing bindings are for the
+command line. The e2e fixture does the reverse, so that its many specs keep their
+names: krm-foyer's tokens are `oidc:<email>` and the command line's are
+`kubectl:<email>` ([authentication-config.yaml](../test/e2e/cluster/authentication-config.yaml),
+with a `kubectl` client in [dex.yaml](../test/e2e/cluster/dex.yaml)). Its spec
+([foyer_scope_test.go](../test/e2e/foyer_scope_test.go)) signs alice in both ways,
+checks the API server's two names for her, grants the command-line name `list` on
+Secrets, and shows krm-foyer refused with the API server's 403 for `oidc:alice`.
+
+What to know before using it:
+
+- **An issuer that sends a list of audiences and no `azp` fails the expression,** and
+  the API server refuses the token. That fails closed. If your issuer does that, compare
+  with `in` instead.
+- **RBAC twice.** Each grant the person needs in both places is written for both names,
+  or through a group for each.
+- **Domain logic that matches on identity sees the browser's name.** Admission rules and
+  owner fields that expect `github:alice` see `foyer:alice`. Attribution through the
+  [extras](design.md#attribution) is unaffected, since those come from the same claims.
 - **It needs control of the API server's authentication configuration.** Managed
-  clusters often do not allow that, so it cannot be the only answer.
-
-The e2e fixture already configures that authenticator, so it can show this working
-without any krm-foyer code.
+  clusters often do not allow that, so it cannot be the only answer. That is what the
+  scope list above is for.
+- **It scopes by client, not by application.** Two applications behind one krm-foyer
+  client share the browser's name. Give each its own krm-foyer and client if their
+  grants should differ.
 
 ## How the rest of the design would change
 
@@ -130,5 +183,5 @@ With a scope layer, three things would come back:
   not fully trusted.
 - A security review asks what a cross-site-scripting bug in a frontend could reach.
 
-When that happens, document the browser identity first, since it needs no krm-foyer
-code, and build the scope list for clusters where that is not possible.
+The browser identity is now documented and proved, above. Build the scope list when an
+adopter's cluster cannot change its authentication configuration.

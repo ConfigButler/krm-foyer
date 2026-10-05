@@ -8,19 +8,28 @@ kind: AuthenticationConfiguration
 jwt:
   - issuer:
       url: https://dex.localhost:5556
-      # Only tokens minted for krm-foyer. A token Dex issued to any other client is
-      # rejected with 401, which the suite checks: an issuer the cluster trusts is not
-      # the same as every token from that issuer.
-      audiences: [krm-foyer]
+      # Only tokens minted for krm-foyer, or for the operator's command line. A token
+      # Dex issued to any other client is rejected with 401, which the suite checks: an
+      # issuer the cluster trusts is not the same as every token from that issuer.
+      audiences: [krm-foyer, kubectl]
+      audienceMatchPolicy: MatchAny
       certificateAuthority: |
 CA_PEM
     claimMappings: &claimMappings
+      # A browser identity (docs/application-scope.md): one person, two usernames,
+      # told apart by the client the issuer gave the token to, its authorized party.
+      # Through krm-foyer they are oidc:<email>; on the command line kubectl:<email>,
+      # which is where an operator's broad grants belong. Every script on an
+      # application's origin can use what krm-foyer's token may do, and with this it
+      # may do only what oidc:<email> is granted. The client is azp when the issuer
+      # sets it (a token asked for another audience, as with Dex's cross-client
+      # scope), and the audience otherwise. An issuer that sends a list of audiences
+      # and no azp fails the expression, and the token is refused: closed, not open.
       username:
-        claim: email
-        prefix: "oidc:"
+        expression: "((has(claims.azp) ? claims.azp : claims.aud) == 'krm-foyer' ? 'oidc:' : 'kubectl:') + claims.email"
+      # Groups follow the same split, so a group grant to one is never one to the other.
       groups:
-        claim: groups
-        prefix: "oidc:"
+        expression: "has(claims.groups) ? dyn(claims.groups).map(g, ((has(claims.azp) ? claims.azp : claims.aud) == 'krm-foyer' ? 'oidc:' : 'kubectl:') + g) : []"
       # The two keys gitops-reverser reads from user.extra, in audit events and
       # admission requests, for a commit's author (docs/design.md, "Attribution"):
       # from the signed token, here and nowhere else. A claim that is missing maps to

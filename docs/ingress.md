@@ -105,9 +105,8 @@ spec:
       backendRefs: [{ name: workspaces-frontend, port: 8443 }]
 ```
 
-During development, the frontend's dev server plays the ingress's role: Vite's
-`server.proxy`, for example, sends the four prefixes to a krm-foyer on a local cluster,
-so the browser still sees one origin. The e2e fixture runs this recipe for real:
+During development, the frontend's dev server plays the ingress's role (see the
+[Vite recipe](#during-development-a-dev-server-proxy)). The e2e fixture runs this recipe for real:
 [gateway.yaml](../test/e2e/cluster/gateway.yaml) is a Gateway, an `HTTPRoute` per
 namespace and a `BackendTLSPolicy` per backend that makes the gateway verify its
 certificate, implemented by Traefik.
@@ -122,6 +121,66 @@ Sending everything through krm-foyer would be wrong for several reasons:
   no catch-all proxy.
 
 Paths outside its prefixes get a 404 from krm-foyer, which a unit test pins.
+
+### During development: a dev-server proxy
+
+A frontend's development loop is its dev server, with hot reload. The dev server takes the
+ingress's place: it serves the application's files, and proxies krm-foyer's four prefixes
+to a krm-foyer on a local cluster, `task demo`'s for example. The browser still sees one
+origin, so cookies and CSRF work as they do in production, with nothing mocked.
+
+The one rule: **the browser's origin is krm-foyer's public URL.** The session cookie is
+`__Host-` and `Secure`, the login comes back to `<public URL>/auth/callback`, and a write
+needs an `Origin` equal to the public URL. A dev server on another origin breaks all
+three, and rewriting `Origin` in the proxy to make writes pass would hide exactly the
+bugs the loop should show. So the dev server takes the front door's address:
+`https://foyer.localhost:8443`, `task demo`'s public URL, with the fixture's certificate
+for that name (import `.e2e/ca.crt` into the browser, as for `task demo`).
+
+```ts
+// vite.config.ts: the application's files from Vite, krm-foyer's prefixes from the
+// task demo cluster, all on https://foyer.localhost:8443.
+import { readFileSync } from 'node:fs'
+import { Agent } from 'node:https'
+import { defineConfig } from 'vite'
+
+const e2e = '../krm-foyer/.e2e' // a krm-foyer checkout after `task demo`
+// FOYER_ADDR is krm-foyer's NodePort on the k3d node, reachable from where task demo
+// ran; the front door's Traefik is not used.
+const addr = /^FOYER_ADDR=(.*)$/m.exec(readFileSync(`${e2e}/foyer-env`, 'utf8'))![1]
+const foyer = {
+  target: `https://${addr}`,
+  // Verify krm-foyer by the name its certificate holds, against the fixture CA.
+  agent: new Agent({ ca: readFileSync(`${e2e}/ca.crt`), servername: 'foyer.localhost' }),
+  secure: true,
+  // The browser's own Host, Origin and Cookie go through unchanged.
+  changeOrigin: false,
+}
+
+export default defineConfig({
+  server: {
+    host: 'foyer.localhost',
+    port: 8443,
+    strictPort: true,
+    https: { cert: readFileSync(`${e2e}/foyer/tls.crt`), key: readFileSync(`${e2e}/foyer/tls.key`) },
+    proxy: { '/auth/': foyer, '/k8s/': foyer, '/stream/': foyer, '/_foyer/': foyer },
+  },
+})
+```
+
+Before starting Vite, stop the port-forward that puts Traefik on that port:
+`pkill -f 'kubectl port-forward .*svc/traefik '` (`test/e2e/cluster/port-forward.sh`
+brings it back). Dex stays on its own forward at `https://dex.localhost:5556`.
+
+What this leaves the application to decide is whether its own backend mock goes. Under
+krm-foyer, `/k8s` and `/stream` are the real API server, so a mock of Kubernetes is no
+longer needed for the loop. What remains to mock is the application's domain backend, if
+it has one, and it sees the same `Krm-Foyer-Identity` only when something asks
+`/auth/check` for it, which a dev server does not. Proxy it with a fixed identity
+header in development, or run it behind the fixture's Traefik.
+
+This recipe is written from the fixture's facts (its public URL, certificate and
+NodePort), but the e2e suite does not run Vite.
 
 ### Why routing by path is safe when forward-auth is not
 
@@ -201,48 +260,229 @@ Choose in this order:
    accepts the token once the backend's client ID is added to the issuer's audiences.
    Nobody shares or forwards credentials. The cost is two sessions, so logout has to end
    both.
-3. **Later: krm-foyer answers an identity check** for the backend (option C below),
-   identity only. This avoids the second session, but the backend gets no token.
+3. **krm-foyer answers an identity check** for the backend: [`/auth/check?identity=true`](#identity-for-a-domain-backend)
+   (option C below), identity only. This avoids the second session, but the backend gets
+   no token.
 
 krm-foyer never hands its tokens to another service. That would spread custody of the
 credential to code that krm-foyer does not test.
 
 ## Decision (2026-10-01): a login gate for the application's pages
 
-**Planned, not implemented.** `/auth/check` currently returns 404. The behavior below
-is the proposed contract; use the implemented `requireSession()` helper today.
+**Built (2026-10-05), with identity for a domain backend** (option C below), because Voter
+asked for both ([implementer feedback](implementer-feedback.md), entry 1).
 
-The ingress can ask krm-foyer one question before serving the application's pages: *is
-this browser signed in?* If it is not, the browser goes to the login, and comes back to
-the page it asked for. Every frontend needs this, and it is wasteful to write it in each
-one. It is a narrow use of forward-auth, and it is not the design rejected below.
+The ingress can ask krm-foyer one question before serving a request: *is this browser
+signed in, and may it make this request?* For a page, if it is not, the browser goes to
+the login and comes back to the page it asked for. Every frontend needs this, and it is
+wasteful to write it in each one. For a domain backend, the ingress can ask a second
+question too: *who is it?* Both are narrow uses of forward-auth, and neither is the
+design rejected below: the ingress never sends anything to the API server.
+
+### The check
 
 **`GET /auth/check`** answers:
 
-- `204` when the session is valid;
-- `401` when it is not;
-- `302` to `/auth/login?return_to=<page>` when it is not, if the request asks for it with
-  `?redirect=true`.
+| Situation | Answer |
+| --- | --- |
+| Signed in, and the request may be made | `204`, with `Cache-Control: no-store` |
+| With `?identity=true` | `204` and a `Krm-Foyer-Identity` header: see [identity](#identity-for-a-domain-backend) |
+| No session | `401`, the interruption `/k8s` gives: a `Status` for code, a page with a **Sign in** link for a person |
+| No session, `?redirect=true`, and a page load | `302` to `/auth/login?return_to=<page>` |
+| A write without the session's CSRF proof, or from another origin | `403`, `CSRFProofRequired` or `CrossOriginRequest`, as for `/k8s` |
+| The API server cannot say who the user is (identity only) | Its own refusal, or `503`; never an identity guessed from the token |
+| An option other than `redirect=true` and `identity=true`, or a bad `X-Forwarded-Method` | `400`, so that a typo such as `identity=1` fails loudly |
 
-It never returns a token or identity headers. The page the user wanted arrives in the
-ingress's original-URI header (`X-Original-URI` in nginx, `X-Forwarded-Uri` in Traefik).
-It is validated as a local path exactly like `return_to`, and anything else becomes `/`.
+The check is of **the request the ingress forwards**, not of the check's own request.
+krm-foyer reads three things from it, all of which the browser could equally send to
+krm-foyer itself, so none is trusted for more than that:
 
-Ingresses differ in what they do with a refusal, which is why there are two refusals:
+- **The method,** from `X-Forwarded-Method`. A method other than `GET` or `HEAD` is a
+  write, and needs what a write to `/k8s` needs: the session's CSRF token in
+  `X-CSRF-Token`, and `Origin` (or `Sec-Fetch-Site: same-origin`) naming krm-foyer's
+  origin. Without the header the check is of a `GET`. Methods are case-sensitive, so
+  `get` is a write. **The ingress must set this header itself** (Traefik always does;
+  the nginx recipe below sets it), or a browser's own copy decides how a write is checked.
+- **The page,** from `X-Forwarded-Uri` (Traefik) or `X-Original-URI` (nginx). It is
+  validated as a local path exactly like `return_to`, and anything else becomes `/`. It
+  only decides where the login returns to.
+- **The browser's own headers:** `Cookie`, `Origin`, `X-CSRF-Token`, and the
+  `Sec-Fetch-*` headers that decide between a page and a `Status`, and between a
+  redirect and a `401`. Only a page load (no `Sec-Fetch-Mode`, or `navigate`, on a `GET`)
+  is redirected; a script gets the `401` it can act on.
 
-- **nginx `auth_request`** accepts only 2xx, 401 and 403 from the check. It turns the 401
-  into the redirect itself, with `error_page 401 = @login`.
-- **Traefik ForwardAuth and Envoy's external authorization** pass the check's response to
-  the browser, so they use `?redirect=true`.
+### Identity for a domain backend
 
-Gateway API introduced an experimental `externalAuth` filter in
-[v1.4](https://kubernetes.io/blog/2025/11/06/gateway-api-v1-4/); support depends on the
-installed CRDs and gateway implementation. This fixture does not configure it.
-Without a usable page gate, the browser helper's
-`requireSession()` does the same at page load, in a few lines of JavaScript. The gate is
-an improvement for whoever has it, not a requirement.
+With `?identity=true`, a `204` carries one header, `Krm-Foyer-Identity`: the unpadded
+base64url encoding of this JSON.
 
-How to deploy it:
+```json
+{
+  "userInfo": {
+    "username": "oidc:alice@example.com",
+    "uid": "...",
+    "groups": ["oidc:voters", "system:authenticated"],
+    "extra": { "configbutler.ai/claims/display-name": ["Alice"] }
+  },
+  "displayName": "Alice",
+  "connector": "room-pass",
+  "issuer": "https://dex.example.com",
+  "expiresAt": "2026-10-05T20:00:00Z"
+}
+```
+
+- `userInfo` is **the API server's answer** to a SelfSubjectReview sent with the user's own
+  token, exactly as [`/auth/whoami`](design.md#whoami) shows it: the name RBAC and the audit
+  log use, with the groups and extras the cluster's authentication configuration
+  maps. A backend that records who did something records the same name Kubernetes does.
+- `displayName` and `connector` are the session's, as `/auth/session` shows them
+  ([session claims](design.md#session-claims)). `connector` is present only when one is
+  configured. A backend can, for example, accept votes only from `room-pass` logins.
+- **Never a token.** The backend learns who the user is; it cannot act as them in
+  Kubernetes. A backend that needs that is a separate design question.
+
+One header, not one per field. An ingress copies it whole, a backend parses one value,
+and group names may hold commas, which a list in a header cannot carry safely.
+
+A check with identity goes through the same [bounds](bounds.md) as a request to `/k8s`:
+it counts against the session's request rate. The API server's answer is reused for 30
+seconds per token (never past the session's end), so a backend checked on every request
+costs one SelfSubjectReview per user per 30 seconds. The answer depends only on the
+token and the cluster's authentication configuration, so 30 seconds is how long a change
+to that configuration can take to reach a backend. **Access decisions are not reused or
+made here:** what the user may do in Kubernetes is still the API server's decision on
+every `/k8s` request, and what the user may do in the backend is the backend's.
+
+What the deployment must get right, because krm-foyer cannot check it:
+
+- **The ingress removes the browser's copy of `Krm-Foyer-Identity`** before it adds
+  krm-foyer's. Traefik's ForwardAuth does this for every header in
+  `authResponseHeaders`; the nginx recipe below overwrites it. The e2e suite sends a
+  forged one through Traefik and checks the backend never sees it.
+- **Only the ingress reaches the backend,** on a route that always asks the check, so
+  that nothing can send it a header the check did not write. A NetworkPolicy admitting only
+  the ingress to the backend's port is the way to enforce that. Room Pass contained its
+  own header trust the same way.
+- **The backend's route asks with `identity=true`.** A page-gate route (no identity)
+  does not remove the header, so a backend behind it would believe whatever the browser
+  sent.
+
+### Recipes
+
+The e2e fixture runs the Traefik recipe for real
+([traefik-routes.yaml](../test/e2e/cluster/traefik-routes.yaml)), beside its Gateway API
+routes on the same origin: `/public/` is a domain backend behind the identity check, and
+`/members/` pages behind the login gate. Its specs try a forged identity header, writes
+without CSRF proof and from another origin, a signed-out page load and a signed-out script,
+all through the real Traefik.
+
+**Traefik, `IngressRoute` and ForwardAuth.** For a cluster that routes with Traefik's own
+resources, as Voter's does. krm-foyer's own prefixes stay on a plain route (or the
+`HTTPRoute` above); only the application's routes get a middleware.
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: { name: foyer-identity }
+spec:
+  forwardAuth:
+    # krm-foyer's Service, by a name its certificate holds, verified against its CA.
+    address: https://krm-foyer.krm-foyer.svc/auth/check?identity=true
+    tls: { caSecret: krm-foyer-ca }
+    # Removes the browser's copy, then copies krm-foyer's.
+    authResponseHeaders: [Krm-Foyer-Identity]
+    trustForwardHeader: false
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: { name: foyer-gate }
+spec:
+  forwardAuth:
+    address: https://krm-foyer.krm-foyer.svc/auth/check?redirect=true
+    tls: { caSecret: krm-foyer-ca }
+    trustForwardHeader: false
+---
+# The backend and the file server have no use for the session cookie.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: { name: no-cookie }
+spec:
+  headers:
+    customRequestHeaders: { Cookie: "" }
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata: { name: voter }
+spec:
+  entryPoints: [websecure]
+  routes:
+    # krm-foyer's prefixes, whole segments: Traefik's PathPrefix is a plain string
+    # prefix, so /stream would also catch /streams. A Service in another namespace
+    # needs the CRD provider's allowCrossNamespace; or keep this route beside krm-foyer.
+    - match: Host(`voter.example.com`) && (PathPrefix(`/auth/`) || PathPrefix(`/k8s/`) || PathPrefix(`/stream/`) || PathPrefix(`/_foyer/`))
+      services: [{ name: krm-foyer, port: 443, scheme: https, serversTransport: krm-foyer }]
+    - match: Host(`voter.example.com`) && PathPrefix(`/public/`)
+      middlewares: [{ name: foyer-identity }, { name: no-cookie }]
+      services: [{ name: voter-backend, port: 8080 }]
+    # Pages behind the login gate. Files the pages load (scripts, images) stay public.
+    - match: Host(`voter.example.com`) && PathPrefix(`/admin/`)
+      middlewares: [{ name: foyer-gate }, { name: no-cookie }]
+      services: [{ name: voter-web, port: 8080 }]
+    - match: Host(`voter.example.com`)
+      middlewares: [{ name: no-cookie }]
+      services: [{ name: voter-web, port: 8080 }]
+  tls: { secretName: voter-tls }
+```
+
+Traefik sends the check a `GET` with the browser's headers and its own `X-Forwarded-Method`
+and `X-Forwarded-Uri`, and passes a non-2xx answer to the browser as it is: the `401`
+`Status` to a script, the sign-in page or the `302` to a page load. Its `rule`s are
+matched by length unless `priority` says otherwise; give the gated routes a priority when
+they share an entry point with Gateway API routes, as the fixture does.
+
+**nginx, `auth_request`.** nginx accepts only 2xx, 401 and 403 from the check, and turns
+the 401 into the login itself, so it does not use `redirect=true`.
+
+```nginx
+location = /_check {
+    internal;
+    proxy_pass https://krm-foyer.krm-foyer.svc/auth/check?identity=true;
+    proxy_ssl_verify on;
+    proxy_ssl_trusted_certificate /etc/nginx/krm-foyer-ca.crt;
+    proxy_ssl_name krm-foyer.krm-foyer.svc;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    # Set here, so the browser's own copies count for nothing.
+    proxy_set_header X-Forwarded-Method $request_method;
+    proxy_set_header X-Original-URI $request_uri;
+}
+
+location /public/ {
+    auth_request /_check;
+    auth_request_set $foyer_identity $upstream_http_krm_foyer_identity;
+    # Overwrites the browser's copy, with krm-foyer's or with nothing.
+    proxy_set_header Krm-Foyer-Identity $foyer_identity;
+    proxy_set_header Cookie "";
+    proxy_pass http://voter-backend:8080;
+}
+
+location /admin/ {
+    auth_request /_check;
+    error_page 401 = @login;
+    proxy_set_header Cookie "";
+    proxy_pass http://voter-web:8080;
+}
+
+location @login {
+    return 302 /auth/login?return_to=$request_uri;
+}
+```
+
+`$request_uri` is the raw request target; krm-foyer's login checks it as a local path and
+refuses anything else, so it cannot send the browser off-site. Unlike the Traefik recipe,
+this one is not run by the e2e suite.
+
+### How to deploy it
 
 - **Gate page routes only.** JavaScript bundles and images are public by nature; gating
   them only turns an expired session into broken asset loads.
@@ -359,7 +599,8 @@ handler, with no change to `/k8s`. It still creates a contract of its own:
 - If the token were included, every such backend would hold Kubernetes credentials.
   krm-foyer would then share custody of the credential with services it does not test.
 
-**Later, and identity only.** Build it when a hybrid application asks, on top of
+**Built, identity only (2026-10-05),** when Voter, a hybrid application, asked:
+[identity for a domain backend](#identity-for-a-domain-backend), on top of
 `/auth/check`, and without the token.
 A domain backend that needs to act on Kubernetes as the user is a separate design
 question.
@@ -374,5 +615,5 @@ auth proxy would make krm-foyer less opinionated, much larger, and impossible to
 across all of those combinations.
 
 The flexibility people need is in the network, not in who decides. Both TLS models are
-supported, a transparent ingress is fine, the planned login gate can cover page loads, and
+supported, a transparent ingress is fine, the login gate can cover page loads, and
 the seam for external login exists if it is ever needed.

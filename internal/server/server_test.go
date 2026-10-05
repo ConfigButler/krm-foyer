@@ -182,6 +182,28 @@ func TestWhoAmIRoute(t *testing.T) {
 	}
 }
 
+// GET /auth/check, with its query, reaches the check; any other method goes to Auth,
+// which has no such route.
+func TestCheckRoute(t *testing.T) {
+	var reached []string
+	record := func(who string) http.Handler {
+		return http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			reached = append(reached, who+" "+r.Method+" "+r.URL.RequestURI())
+		})
+	}
+	h := New(Config{Version: "test", Auth: record("auth"), WhoAmI: record("whoami"), Check: record("check")})
+	for _, r := range []struct{ method, target string }{
+		{http.MethodGet, "/auth/check?identity=true"}, {http.MethodHead, "/auth/check"},
+		{http.MethodPost, "/auth/check"}, {http.MethodGet, "/auth/check/x"},
+	} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), r.method, r.target, nil))
+	}
+	want := "check GET /auth/check?identity=true, check HEAD /auth/check, auth POST /auth/check, auth GET /auth/check/x"
+	if got := strings.Join(reached, ", "); got != want {
+		t.Errorf("reached %s, want %s", got, want)
+	}
+}
+
 // /stream/v1 reaches the stream with any method, so that it answers the ones it
 // refuses itself; no other path under /stream does.
 func TestStreamRoute(t *testing.T) {

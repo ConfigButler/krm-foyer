@@ -74,12 +74,13 @@ change in one appear in the other, and a conflict when both edit the same note.
 | --- | --- |
 | [docs/vision.md](docs/vision.md) | Why krm-foyer exists, who it helps, what it expects from your domain, and what it will not become |
 | [docs/design.md](docs/design.md) | The contract: routes, access, sessions, upstream responses, streams and release criteria |
-| [docs/application-scope.md](docs/application-scope.md) | Why a browser application might be limited beyond RBAC, what that would block, and why krm-foyer starts without it |
+| [docs/application-scope.md](docs/application-scope.md) | Why a browser application might be limited beyond RBAC, what that would block, and how to give the browser its own narrow identity in the cluster |
 | [docs/roadmap.md](docs/roadmap.md) | What exists, what is next, and in what order |
 | [docs/bounds.md](docs/bounds.md) | Limits, defaults, metrics and the scope of the capacity measurements |
 | [docs/watches.md](docs/watches.md) | Choosing per-user streams, shared streams or native watches, and configuring sharing |
 | [docs/bff-choice.md](docs/bff-choice.md) | Whether your application should use a universal BFF like this one, a domain backend, or both |
-| [docs/ingress.md](docs/ingress.md) | Terminating TLS itself or behind an ingress, sharing one domain with other services, and the login gate for an ingress |
+| [docs/ingress.md](docs/ingress.md) | Terminating TLS itself or behind an ingress, sharing one domain with other services, `/auth/check` for a login gate and a domain backend, and recipes for Gateway API, Traefik, nginx and Vite |
+| [docs/room-pass.md](docs/room-pass.md) | Signing an audience in with Room Pass's QR join through krm-foyer |
 | [docs/frontend.md](docs/frontend.md) | Which pages krm-foyer serves itself, and why it ships no single-page application |
 | [docs/testing.md](docs/testing.md) | How the tests prove krm-foyer invents neither authentication nor authorization, and how to run the e2e fixture |
 | [docs/alternatives.md](docs/alternatives.md) | Nearby tools and the goals each meets: other ways to reach the Kubernetes API, and JavaScript clients in place of the browser helper |

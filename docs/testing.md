@@ -401,7 +401,13 @@ an `HTTPRoute` sending `/` to the file server without the `Cookie` header, one s
 `/auth`, `/k8s`, `/stream` and `/_foyer` to krm-foyer, and a `BackendTLSPolicy` for each
 backend under which Traefik verifies its certificate (with a wrong hostname in it, every
 request fails). The file server answers 400 to any request that still carries a cookie,
-so every signed-in browser spec fails if the route stops removing it. Then
+so every signed-in browser spec fails if the route stops removing it. It also applies
+[traefik-routes.yaml](../test/e2e/cluster/traefik-routes.yaml), the Traefik recipe of
+[the check](ingress.md#the-check): an `IngressRoute` on the same host with ForwardAuth
+middlewares to `/auth/check`, which Traefik reaches at krm-foyer's Service name (its
+certificate holds both names). `/public/whoami` stands in for a domain backend and
+echoes the `Krm-Foyer-Identity` it received, and `/members/` is a page behind the login
+gate. Specs reach them with `fx.frontDoorBrowser()`, through Traefik. Then
 [port-forward.sh](../test/e2e/cluster/port-forward.sh) forwards Traefik to
 `127.0.0.1:8443` and Dex to `127.0.0.1:5556` in this container, detached, and checks both
 by their public names. Browsers resolve `foyer.localhost` and `dex.localhost` to loopback,
@@ -416,8 +422,11 @@ issues. Use it for claims; use Dex for anything a real login would do.
 
 Dex has two demo users, `alice@example.com` and `bob@example.com` (password
 `password`), which Kubernetes sees as `oidc:alice@example.com` and
-`oidc:bob@example.com`, plus 200 generated rehearsal users. There are two clients: `krm-foyer`, whose tokens the cluster
-accepts, and `other-app`, whose tokens it must reject.
+`oidc:bob@example.com`, plus 200 generated rehearsal users. There are three clients:
+`krm-foyer`, whose tokens the cluster accepts; `kubectl`, the operator's command line,
+whose tokens it accepts under another name, `kubectl:alice@example.com`, as a
+[browser identity](application-scope.md#a-browser-identity-in-kubernetes) needs; and
+`other-app`, whose tokens it must reject.
 
 ```bash
 task e2e-up     # start or reuse the fixture, with Traefik (about a minute the first time)

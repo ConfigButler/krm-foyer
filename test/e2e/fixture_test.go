@@ -58,6 +58,9 @@ type fixture struct {
 	// briefTransport reaches the brief krm-foyer, whose sessions end within a minute,
 	// instead of the main one.
 	briefTransport http.RoundTripper
+	// frontDoorTransport reaches krm-foyer's name through Traefik, the front door, as
+	// a browser does: krm-foyer's routes and the application's, on one origin.
+	frontDoorTransport http.RoundTripper
 	// rehearsalUsers is how many rehearsal users Dex has: rehearsal-001@example.com
 	// and on, with alice's password (start-cluster.sh).
 	rehearsalUsers int
@@ -81,8 +84,12 @@ func (f *fixture) remember(tokens ...string) {
 }
 
 const (
-	password     = "password"
-	foyerClient  = "krm-foyer"
+	password    = "password"
+	foyerClient = "krm-foyer"
+	// The operator's command line: a client whose tokens the API server maps to
+	// kubectl:<email>, not oidc:<email> (authentication-config.yaml).
+	cliClient    = "kubectl"
+	cliSecret    = "kubectl-e2e-secret"
 	foyerSecret  = "krm-foyer-e2e-secret"
 	otherClient  = "other-app"
 	otherSecret  = "other-app-e2e-secret"
@@ -165,7 +172,11 @@ func loadFixture() *fixture {
 		foyerAccount:    env["FOYER_SERVICE_ACCOUNT"],
 		sharedAccount:   env["FOYER_SHARED_ACCOUNT"],
 		briefTransport:  transportTo(env["FOYER_BRIEF_ADDR"]),
-		rehearsalUsers:  rehearsalUsers,
+		// The front door: Traefik, through the port-forward on this container's
+		// loopback (port-forward.sh), under the same name as krm-foyer, as a browser
+		// reaches it.
+		frontDoorTransport: transportTo(net.JoinHostPort("127.0.0.1", foyer.Port())),
+		rehearsalUsers:     rehearsalUsers,
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   30 * time.Second,
