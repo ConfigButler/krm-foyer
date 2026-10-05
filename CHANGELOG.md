@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.0](https://github.com/ConfigButler/krm-foyer/compare/v0.1.0...v0.2.0) (2026-10-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* -session-keys-file (chart: sessionKeys.secretName) is required, and -session-idle-timeout (bounds.sessionIdleTimeout) is removed. Everyone signs in again after the first upgrade; logout no longer revokes a copied session cookie.
+
+### Features
+
+* configure login parameters and expose Kubernetes identity ([#37](https://github.com/ConfigButler/krm-foyer/issues/37)) ([f98a49e](https://github.com/ConfigButler/krm-foyer/commit/f98a49ea6e7e53c2c1cee44e59dad73d8a1f8535))
+* keep sessions in encrypted cookies across restarts ([#36](https://github.com/ConfigButler/krm-foyer/issues/36)) ([9a0731f](https://github.com/ConfigButler/krm-foyer/commit/9a0731f8877993d31b7ed0715ad9580dc597ca42))
+
+
+### Bug Fixes
+
+* sign and publish releases the way gitops-reverser does ([#39](https://github.com/ConfigButler/krm-foyer/issues/39)) ([56f24bd](https://github.com/ConfigButler/krm-foyer/commit/56f24bd7646f14e0716cfb48dee45d0ba969376e))
+
 ## 0.1.0 (2026-10-05)
 
 
