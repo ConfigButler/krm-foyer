@@ -137,10 +137,12 @@ Security items need tests that try to get past the boundary.
       return paths, with a short fuzz run of each in `task verify`
 - [x] Helm chart with `values.schema.json`, `helm lint`, `helm template` tests, and e2e
       that installs through the chart
-- [x] Publish the chart with each release: an OCI artifact beside the image, with build
-      provenance
+- [x] Publish the chart with each release: an OCI artifact beside the image, signed with
+      cosign and described to Artifact Hub
 - [x] Release workflow configured to generate an SBOM and attest build provenance
-- [ ] Signed multi-arch image (cosign keyless), with documented artifact verification
+- [x] Image and chart signed with cosign (keyless); the release notes show how to verify
+      them, and the SBOM is attached to the release with its signature and provenance
+- [ ] Multi-arch image
 - [ ] Dependency/image vulnerability scanning inside the CI image
 - [ ] Docs lint: markdownlint and link checking
 - [ ] Parse the whole squash message the way release-please does, once a dropped

@@ -56,6 +56,8 @@ RUN apt-get update \
 # HELM_VERSION / HELM_SHA256 -> https://github.com/helm/helm/releases; the checksum is
 #   get.helm.sh/helm-<version>-linux-amd64.tar.gz.sha256sum. The e2e fixture installs
 #   Traefik with it.
+# COSIGN_VERSION        -> https://github.com/sigstore/cosign/releases; release.yml's image
+#   job installs the same version with cosign-installer, so keep the two in step.
 # ORAS_VERSION          -> https://github.com/oras-project/oras/releases
 ENV PATH="/go/bin:/usr/local/go/bin:${PATH}" \
     GOLANGCI_LINT_VERSION=v2.13.2 \
@@ -66,6 +68,7 @@ ENV PATH="/go/bin:/usr/local/go/bin:${PATH}" \
     HADOLINT_VERSION=2.15.1 \
     HELM_VERSION=v4.3.0 \
     HELM_SHA256=86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb \
+    COSIGN_VERSION=v3.1.3 \
     ORAS_VERSION=1.3.4
 
 RUN test "$(dpkg --print-architecture)" = "amd64" \
@@ -93,6 +96,18 @@ RUN curl -fsSL -o /tmp/helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-lin
     && chmod +x /usr/local/bin/helm \
     && rm /tmp/helm.tar.gz \
     && helm version --short
+
+# cosign signs the published Helm chart (release.yml), and verifies what a release
+# published from here.
+RUN asset="cosign-linux-amd64" \
+    && base="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}" \
+    && curl -fsSL -o /tmp/cosign "${base}/${asset}" \
+    && curl -fsSL -o /tmp/cosign-checksums.txt "${base}/cosign_checksums.txt" \
+    && awk -v a="${asset}" '$2 == a { print $1 "  /tmp/cosign" }' /tmp/cosign-checksums.txt \
+       | sha256sum -c - \
+    && install -m 0755 /tmp/cosign /usr/local/bin/cosign \
+    && rm /tmp/cosign /tmp/cosign-checksums.txt \
+    && cosign version
 
 # oras pushes charts/artifacthub-repo.yml beside the chart under the `artifacthub.io` tag
 # (release.yml), a plain OCI artifact that `helm push` cannot produce. The checksum file
