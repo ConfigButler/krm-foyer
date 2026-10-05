@@ -2,6 +2,8 @@ package gate
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -139,4 +141,19 @@ func TestStreamsShareTheRequestRate(t *testing.T) {
 	}
 	a, w := admitAs(t, g, "a", true)
 	assertRefused(t, a, w, "RequestRateExceeded", "session_request_burst")
+}
+
+// A Credential handed to a logger or to fmt shows its user, never its token or its
+// session.
+func TestCredentialIsNotPrinted(t *testing.T) {
+	c := Credential{Token: "token-7c1e", User: "alice@example.test", Session: "session-9d2f"}
+	var out strings.Builder
+	slog.New(slog.NewJSONHandler(&out, nil)).Info("x", "credential", c)
+	slog.New(slog.NewTextHandler(&out, nil)).Info("x", "credential", c)
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+		out.WriteString(fmt.Sprintf(verb, c) + "\n")
+	}
+	if s := out.String(); strings.Contains(s, "token-7c1e") || strings.Contains(s, "session-9d2f") || !strings.Contains(s, "alice@example.test") {
+		t.Errorf("a credential printed as:\n%s", s)
+	}
 }

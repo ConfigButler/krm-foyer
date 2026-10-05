@@ -1039,3 +1039,38 @@ func TestRefusesUpgradeInAnyField(t *testing.T) {
 		t.Errorf("%d requests reached the API server", n)
 	}
 }
+
+// What ReverseProxy logs itself, a body that broke off partway here, goes to
+// krm-foyer's structured log, not to the standard logger on stderr.
+func TestReverseProxyLogsAreStructured(t *testing.T) {
+	api := newAPIServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "100")
+		_, _ = io.WriteString(w, `{"kind":`)
+		_ = http.NewResponseController(w).Flush()
+		panic(http.ErrAbortHandler) // drops the connection mid-body
+	})
+	f := newFoyer(t, api, credentials{token: userToken})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, f.url+"/k8s/api/v1/configmaps", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err == nil {
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(logLines(t, f.logs.String(), map[string]any{"level": "WARN"})) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	found := false
+	for _, l := range logLines(t, f.logs.String(), map[string]any{"level": "WARN"}) {
+		if msg, _ := l["msg"].(string); strings.Contains(msg, "ReverseProxy") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ReverseProxy's own error is not in the structured log:\n%s", f.logs.String())
+	}
+}

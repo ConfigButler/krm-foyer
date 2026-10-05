@@ -49,6 +49,8 @@ type sharedAPI struct {
 	reviews []authorizationv1.SubjectAccessReviewSpec
 	watches map[http.ResponseWriter]openWatch
 	rv      int
+	// ssr answers a SelfSubjectReview instead, when set.
+	ssr http.HandlerFunc
 	// sar answers a SubjectAccessReview instead, when set.
 	sar http.HandlerFunc
 	// watch answers a watch instead, when set.
@@ -85,6 +87,13 @@ func (a *sharedAPI) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/apis/authentication.k8s.io/v1/selfsubjectreviews":
+		a.mu.Lock()
+		ssr := a.ssr
+		a.mu.Unlock()
+		if ssr != nil {
+			ssr(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"apiVersion": "authentication.k8s.io/v1", "kind": "SelfSubjectReview",
@@ -529,8 +538,9 @@ func TestTokensDoNotMix(t *testing.T) {
 
 // What the shared watch needs that goes wrong ends the stream without serving it:
 // a token the API server does not take, the API server unable to say who the user
-// is or whether they may, and the shared identity itself refused. None is an allow,
-// and the last is krm-foyer's configuration, not the user's permissions.
+// is or whether they may, and the shared identity itself refused. None is an allow.
+// Only the first is UNAUTHENTICATED, which sends the browser to sign in again: for
+// the others, signing in again would not help, and would loop.
 func TestASharedStreamFailsClosed(t *testing.T) {
 	for name, tc := range map[string]struct {
 		token  string
@@ -540,6 +550,18 @@ func TestASharedStreamFailsClosed(t *testing.T) {
 		terminal bool
 	}{
 		"a token the API server does not take": {token: "unknown-token", code: "UNAUTHENTICATED", terminal: true},
+		"SelfSubjectReviews failing": {token: userToken, code: "UPSTREAM_UNAVAILABLE", adjust: func(a *sharedAPI) {
+			a.ssr = status(http.StatusServiceUnavailable, "ServiceUnavailable", "etcd is down")
+		}},
+		"SelfSubjectReviews refused": {token: userToken, code: "INTERNAL", terminal: true, adjust: func(a *sharedAPI) {
+			a.ssr = status(http.StatusForbidden, "Forbidden", "cannot create selfsubjectreviews")
+		}},
+		"SelfSubjectReviews naming no user": {token: userToken, code: "INTERNAL", terminal: true, adjust: func(a *sharedAPI) {
+			a.ssr = func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview","status":{}}`))
+			}
+		}},
 		"SubjectAccessReviews failing": {token: userToken, code: "UPSTREAM_UNAVAILABLE", adjust: func(a *sharedAPI) {
 			a.sar = status(http.StatusServiceUnavailable, "ServiceUnavailable", "etcd is down")
 		}},

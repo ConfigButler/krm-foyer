@@ -313,6 +313,10 @@ apart again:
   [shared](watches.md) stream: krm-stream delivers and rechecks one at a time, so a
   blocked write would also hold off the recheck that applies a revoked grant. A test
   stops reading, fills the buffers, revokes the grant and sees the stream end.
+- **Sessions are bounded** at 20,000 per replica, expired ones not counted. Each holds
+  an ID token, so this is tens of megabytes. Only someone the issuer signs in can start
+  one, but one such user can start many; past the bound, a login gets
+  `too-many-sessions` (503) and starts nothing.
 
 What is not bounded yet:
 
@@ -321,9 +325,10 @@ What is not bounded yet:
 - Snapshot size, per-stream object bookkeeping and shared-cache bytes have no foyer
   limit. `-max-response-bytes` applies only to `/k8s`; it does not protect `/stream`.
   A few large scopes can therefore exhaust memory below the stream-count limit.
-- Active sessions have no count limit. The 10,000 pending-login cap bounds login
-  transaction storage, but is not a rate limit on anonymous login/callback traffic.
-  The API gate's per-session rate applies to `/k8s` and `/stream`, not `/auth`.
+- There is no rate limit on anonymous login/callback traffic. A login in progress is
+  held by the browser, so starting many costs krm-foyer no memory and locks no one out,
+  but each callback with a valid login costs a token request to the issuer. The API
+  gate's per-session rate applies to `/k8s` and `/stream`, not `/auth`.
 
 These are capacity/admission questions for the [next work](roadmap.md#order-of-work),
 not guarantees established by the small-snapshot rehearsal.
@@ -421,9 +426,9 @@ with the Prometheus Go client and serves them on a listener of its own
 (`-metrics-listen`, `:9090` by default, `/metrics` only). The metrics are never served on
 the origin, where any page could read them. **Keeping the port to the monitoring system
 is the deployment's job:** a NetworkPolicy that admits only the monitoring system to
-it. The Helm chart will ship one ([roadmap](roadmap.md#deployment)); until then, a
-deployment adds its own. The e2e fixture has none, and reaches the port as admin
-through the API server.
+it. The Helm chart ships one, which limits the port to `networkPolicy.metricsFrom` once
+that names the monitoring system; left empty, anyone in the cluster may scrape. The e2e
+fixture leaves it empty, and reaches the port as admin through the API server.
 
 The other candidate was the OpenTelemetry metrics API, exported through OpenTelemetry's
 Prometheus exporter, as gitops-reverser does. It instruments the same way and scrapes the

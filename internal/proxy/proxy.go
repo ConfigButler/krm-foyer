@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"mime"
 	"net"
@@ -47,6 +48,7 @@ type Proxy struct {
 	transport http.RoundTripper
 	gate      *gate.Gate
 	logger    *slog.Logger
+	errorLog  *log.Logger
 	metrics   *metrics.Metrics
 	maxBytes  int64
 }
@@ -84,6 +86,7 @@ func New(cfg Config) (*Proxy, error) {
 		},
 		gate:     cfg.Gate,
 		logger:   cfg.Gate.Logger(),
+		errorLog: slog.NewLogLogger(cfg.Gate.Logger().Handler(), slog.LevelWarn),
 		metrics:  cfg.Gate.Metrics(),
 		maxBytes: maxBytes,
 	}, nil
@@ -159,6 +162,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			pr.Out.Header = h
 		},
 		Transport: p.transport,
+		// What ReverseProxy logs itself (a body copy that failed partway, say) goes
+		// to the structured log, not the standard logger.
+		ErrorLog: p.errorLog,
 		// Watches and logs stream: write every chunk as it arrives.
 		FlushInterval: -1,
 		ModifyResponse: func(resp *http.Response) error {

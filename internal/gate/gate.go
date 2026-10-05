@@ -47,6 +47,18 @@ type Credential struct {
 	Live func(ctx context.Context) bool
 }
 
+// LogValue keeps the token and the session out of a log line that is handed a
+// Credential: only the user is shown.
+func (c Credential) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("user", c.User))
+}
+
+// String keeps them out of anything formatted with fmt, for the same reason.
+func (c Credential) String() string { return "credential for " + c.User }
+
+// GoString does the same for %#v.
+func (c Credential) GoString() string { return c.String() }
+
 // Config is the gate's credential source and its bounds.
 type Config struct {
 	// Credentials is where the user's token comes from.

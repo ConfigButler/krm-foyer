@@ -221,6 +221,15 @@ func subjectOf(p gateway.Principal) (kube.Subject, error) {
 	return sub.subject, nil
 }
 
+// unknownSubject is the answer when the API server took the user's token but could
+// not say who it belongs to. Not UNAUTHENTICATED: signing in again would not help,
+// and a page that signs in again on it would loop. Terminal, since retrying would
+// not help either; the error itself is not passed on.
+func unknownSubject(err error) error {
+	return &gateway.StreamError{Code: gateway.CodeInternal, Message: "the API server could not say who you are",
+		Terminal: true, Cause: err}
+}
+
 // principal finds who the user behind cred is to Kubernetes, with a
 // SelfSubjectReview sent with the user's own token: the username, groups, UID and
 // extras the API server makes of it, which the SubjectAccessReviews then ask about.
@@ -233,11 +242,11 @@ func (u *upstream) principal(ctx context.Context, cred gate.Credential) (gateway
 	cfg := u.userConfig(cred)
 	httpClient, err := kube.HTTPClientFor(cfg)
 	if err != nil {
-		return nil, err
+		return nil, unknownSubject(err)
 	}
 	client, err := kubernetes.NewForConfigAndClient(cfg, httpClient)
 	if err != nil {
-		return nil, err
+		return nil, unknownSubject(err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, subjectTimeout)
 	defer cancel()
@@ -247,7 +256,7 @@ func (u *upstream) principal(ctx context.Context, cred gate.Credential) (gateway
 	case err == nil:
 		m.SubjectReview(metrics.SubjectError)
 		u.streams.logger.Warn("the API server named no user for a shared stream's caller")
-		return nil, errors.New("no username")
+		return nil, unknownSubject(errors.New("no username"))
 	case apierrors.IsUnauthorized(err):
 		m.SubjectReview(metrics.SubjectRefused)
 		return nil, gateway.Unauthenticated("the API server does not accept this session's token")
@@ -259,7 +268,7 @@ func (u *upstream) principal(ctx context.Context, cred gate.Credential) (gateway
 			return nil, gateway.UpstreamUnavailable("the API server could not say who you are; retry later",
 				time.Duration(delay)*time.Second)
 		}
-		return nil, err // UNAUTHENTICATED, without its text
+		return nil, unknownSubject(err)
 	}
 	m.SubjectReview(metrics.SubjectResolved)
 	info := review.Status.UserInfo

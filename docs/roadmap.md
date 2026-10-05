@@ -48,8 +48,8 @@ an implemented test, not just a design or a pending spec.
    refreshed credentials for leaks. Measure disablement for the chosen issuer
    configuration. This can be delivered and tested on one replica before adding a
    distributed store; it need not wait for high availability.
-5. **Shared storage, before multiple replicas.** Share login transactions as well as
-   sessions, so a callback may land on a different replica. Test cross-replica logout,
+5. **Shared storage, before multiple replicas.** Share the key that seals logins in
+   progress as well as sessions, so a callback may land on a different replica. Test cross-replica logout,
    refresh coordination, store outages, restart and rolling updates. Measure store
    read/write load before choosing its implementation: the current code touches sessions
    per request and checks each open response periodically. Hashing session IDs does not
@@ -150,9 +150,15 @@ Security items need tests that try to get past the boundary.
       `X-Forwarded-*`, with targeted e2e specs through the Traefik fixture. See [ingress](ingress.md)
 - [x] Browser fixture behind Traefik with re-encryption and a BackendTLSPolicy for each
       backend; targeted spoofing and buffering checks remain above
-- [ ] A NetworkPolicy in the chart that admits only the ingress to krm-foyer's port, and
-      only the monitoring system to the metrics port
+- [x] A NetworkPolicy in the chart that admits only krm-foyer's ports: the origin from
+      `networkPolicy.from`, which plain HTTP requires, and metrics from
+      `networkPolicy.metricsFrom`. Neither is exercised by the e2e fixture, which serves
+      TLS and scrapes as admin
 - [ ] Helm chart values for both models
+- [x] Stopping ends open streams: requests in flight get five seconds to finish, then
+      every request still open, a stream above all, is ended, and what remains at
+      twenty seconds is closed. So a rollout with a browser connected takes seconds,
+      and exits cleanly
 - [ ] Rolling updates that refuse no connection: krm-foyer stops listening as soon as
       it is told to stop, while its Service may still route to it for a moment, so a
       rollout refuses connections briefly (seen by the rehearsal, which restarts it). A

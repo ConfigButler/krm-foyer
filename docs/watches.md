@@ -141,9 +141,9 @@ The token file holds a service account's token. That account needs:
 - `create` on `subjectaccessreviews` in `authorization.k8s.io`;
 - nothing else.
 
-The fixture binds `system:auth-delegator` for the reviews. That built-in role also
-grants `create` on `tokenreviews`, which krm-foyer does not need. A deployment can use
-a narrower ClusterRole containing only the SubjectAccessReview grant.
+The chart grants the reviews with a ClusterRole of their own, holding only that rule.
+Not `system:auth-delegator`: that built-in role also grants `create` on `tokenreviews`,
+which krm-foyer does not need.
 
 krm-foyer reads the file again as it changes, so a rotating token works. It never uses
 the pod's own service account by itself: if you want that account to be the
@@ -209,6 +209,7 @@ learn new issuer group membership; the RBAC bound is not an issuer-disablement b
 | RBAC does not allow the user `list` and `watch` | `FORBIDDEN`, terminal, with the API server's reason |
 | The API server does not take the user's token | `UNAUTHENTICATED`, terminal |
 | The API server could not answer a review | `UPSTREAM_UNAVAILABLE`, not terminal, with its hint: the client retries |
+| The API server takes the user's token but cannot say who it is (its SelfSubjectReview refused or empty) | `INTERNAL`, terminal: not `UNAUTHENTICATED`, since signing in again would not help, and a page that signs in again on it would loop |
 | The API server refuses the shared-watch identity itself | `INTERNAL`, terminal, without the API server's message, which would name the identity. This is a configuration error: the log says `status_403` |
 
 ### Load on the API server

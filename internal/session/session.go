@@ -48,6 +48,9 @@ type Key [32]byte
 // ErrNotFound is what a Store answers for a key it does not hold.
 var ErrNotFound = errors.New("session not found")
 
+// ErrFull is what a Store answers when it holds as many sessions as it may.
+var ErrFull = errors.New("too many sessions")
+
 // Store keeps sessions. Expiry is the Manager's decision; a store may forget a
 // session after the time it was given, and must not return one past it.
 type Store interface {

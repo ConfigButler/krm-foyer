@@ -340,12 +340,21 @@ keys sessions by a hash of the ID, so reading the store does not yield usable ID
   `openid email profile`; `openid` is required, and `offline_access` is refused, because
   krm-foyer holds no refresh token until it can refresh. The redirect URI is the
   configured public URL plus `/auth/callback`.
-- **A login in progress** is kept on the server: state, nonce, PKCE verifier and return
-  path. The browser holds only an opaque ID for it, in `__Host-krm-foyer-login` (Secure,
-  HttpOnly, Lax, ten minutes). A callback uses it up whether it succeeds or not, so a
-  replayed callback, a guessed state or a second tab's answer finds nothing. A callback
-  must carry exactly one login cookie, `state` and `code`. At most 10,000 logins may be in
-  progress; past that, `/auth/login` answers 503 until some expire.
+- **A login in progress** is kept in the browser that started it: state, nonce, PKCE
+  verifier, return path and expiry, sealed (AES-GCM) with a key that lives only in the
+  process, in a cookie of its own named after a hash of its state,
+  `__Host-krm-foyer-login-<hash>` (Secure, HttpOnly, Lax, ten minutes). The browser can
+  neither read nor change it, and krm-foyer holds nothing per login, so anyone starting
+  logins crowds out no one else's. The callback's `state` names the cookie: it must carry
+  exactly one of that name, sealed for that name and unexpired, and the `state` it seals,
+  before anything else the callback says, an issuer's `error` included, is acted on. The
+  callback clears that cookie whether it succeeds or not, so a callback of another browser
+  or a guessed state finds nothing, and other logins in progress in the same browser, as
+  two tabs start after a restart, each finish their own. A callback replayed with its
+  cookie put back, which takes the browser itself, carries a code the issuer has already
+  redeemed and refuses: authorization codes are single use. A browser keeps at most three
+  logins in progress; starting a fourth ends the oldest. A restart ends every login in
+  progress, as it ends every session.
 - **The ID token** must come from the configured issuer, for krm-foyer's client ID,
   unexpired, signed by a key the issuer publishes and carrying this login's nonce. Its
   `email` is shown; the API server decides who it belongs to.
@@ -387,7 +396,7 @@ keys sessions by a hash of the ID, so reading the store does not yield usable ID
   proof or another origin, does not count as use; one a [bound](bounds.md) refuses does,
   since the session had let it through.
 - **The store is in memory**, so this release runs one replica, and a restart signs
-  everyone out. Shared storage, and refresh with it, are a later step on the
+  everyone out. It holds at most 20,000 sessions ([bounds](bounds.md)). Shared storage, and refresh with it, are a later step on the
   [roadmap](roadmap.md#order-of-work).
 
 An encrypted HttpOnly cookie can also keep tokens unreadable by JavaScript; the reason
