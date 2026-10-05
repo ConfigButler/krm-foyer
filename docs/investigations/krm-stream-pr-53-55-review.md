@@ -17,6 +17,11 @@ Asks 1–4 are fixes to the open PRs. Asks 5–7 are documentation and a follow-
 experiment, prompted by the question in
 [sse-and-native-watches.md](sse-and-native-watches.md).
 
+**2026-10-05 follow-up:** the [native connector request](krm-stream-native-connector-request.md)
+expands ask 7 with recovery acceptance and a projection comparison example. Keep the
+reference gateway in krm-stream and keep its SSE encoding. The findings and reviewed
+heads above remain the historical review, not a fresh assessment of the PRs.
+
 ## 1. A late `adoptSaved` re-inserts a deleted object (#55)
 
 The ghost fix in `9b092d6` covers the snapshot case: a response adopted after `reset`
@@ -92,7 +97,7 @@ bearer header. Since #53 the reference client does not use `EventSource`, so the
 argument no longer supports the design; a reader who knows `fetch` streams will
 discount the rest.
 
-Rewrite the page around what only a server can do:
+Rewrite the page around the gateway's concrete benefits:
 
 - **Projection:** trimming `managedFields` and redacting Secrets before the browser.
 - **Shared watches:** one upstream watch per scope, with timed reauthorization bounding
@@ -101,6 +106,11 @@ Rewrite the page around what only a server can do:
   then watches, and still frames a snapshot.
 - **One error vocabulary** with terminal/retryable classification, the raw detail kept
   in `Diagnostics`.
+
+Projection before delivery and shared upstream watches need server-side work.
+List/watch fallback and error classification can also be provided by a native client.
+Include existing `krm-spec/v1` suppression: per-user streams also save browser work
+when status changes but the selected view does not.
 
 And state plainly what does *not* need a gateway: credentials can stay on a host proxy
 that attaches the user's token to a native watch, and the browser-side work (reader,
@@ -129,14 +139,14 @@ so a connector can translate a native Kubernetes watch into it:
 | `DELETED` | `deleted` (identity from the last object) |
 | `BOOKMARK` with `k8s.io/initial-events-end: "true"` | `synced` |
 | 410 Gone, at opening or as an `ERROR` event | new connection with `reset` |
-| end of response | resume from the last `resourceVersion`, no `reset` |
+| end of response after a complete snapshot | resume from the last applied event or bookmark's `resourceVersion`, no `reset` |
+| end before the initial snapshot completes | restart initialization; never resume from a partial snapshot |
 
-A sketch is in [sse-and-native-watches.md](sse-and-native-watches.md#what-a-page-must-do-with-a-native-watch).
-Suggested route: a proposal (0011) or an example first, with the same connector
-lifecycle (`state`, `subscribe`, `closed`, bounded retry, terminal on 401/403), tested
-against the e2e cluster and with list-then-watch for aggregated APIs. It would make the
-gateway optional for hosts that need neither projection nor sharing, and give an
-honest measured comparison.
+The earlier sketch was removed after finding incomplete-snapshot and error-recovery
+bugs. Use the [expanded request](krm-stream-native-connector-request.md) for acceptance:
+a proposal (number assigned upstream) and executable example first, with the same
+connector lifecycle, tested recovery and an explicit raw-view editing contract.
+The gateway remains the choice for projection, suppression and sharing.
 
 ## Process
 

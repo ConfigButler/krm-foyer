@@ -1,30 +1,95 @@
 # Does a browser need SSE to watch Kubernetes?
 
-**Investigation, 2026-10-04.** Written while reviewing krm-stream PRs #53–#55, which
-made `connectResourceStream` (fetch) the only browser connector and removed
-`connectWithEventSource`. It asks what the SSE format still contributes, and what
-krm-stream contributes once SSE is set aside.
+**Investigation, 2026-10-04; direction clarified 2026-10-05.** Written while reviewing
+krm-stream PRs #53–#55, which propose `connectResourceStream` (fetch) as the sole stream
+connector and remove `connectWithEventSource`. Those PRs are still open as of this
+update; krm-foyer pins 0.7.0. References below to the new connector describe that PR
+design, not the released integration.
 
 ## The short answer
 
-**No.** A browser can read a Kubernetes watch with `fetch` as easily as it reads an SSE
-stream. krm-stream itself now reads its SSE stream with `fetch`, not `EventSource`, so
-the format is only framing: `data: {json}` and a blank line instead of `{json}` and a
-newline.
+**No.** A browser can read either format with `fetch`. The hard part is keeping a
+complete, usable resource view across interruptions and concurrent edits. Changing
+SSE framing does not solve that work.
 
 krm-stream is still useful, but not because of SSE. Its value is in two places that
 have nothing to do with the wire format:
 
 - **In the browser:** a store that stays correct across reconnects and missed deletes,
   plus the editor (drafts, three-way merge, conflicts, guarded saves).
-- **On the server:** projection, shared watches with a revocation bound, and a fallback
-  for aggregated APIs that cannot stream their initial list.
+- **On the server:** named projections, Secret redaction with change revisions,
+  suppression of updates outside the selected view, shared watches with a revocation
+  bound, and recovery for APIs that cannot stream their initial list.
 
-None of this is new information. krm-foyer already serves native watches through `/k8s`
+## Direction: keep the gateway and add a native option
+
+**krm-foyer brings browser access together; krm-stream supplies reusable live-resource
+behavior.** Keep the reference Go gateway, protocol and browser library in krm-stream.
+foyer integrates them with login, sessions, the native proxy and operational bounds.
+
+Keep SSE on the gateway route. It is a small, conventional framing layer with an
+existing implementation and conformance corpus. It remains useful to consumers that
+already parse SSE; those consumers still need the resource-stream semantics. There
+is no demonstrated benefit to a breaking replacement with newline-delimited JSON.
+
+Support the simpler option by requesting a **native Kubernetes watch connector in
+krm-stream**, feeding its browser store/editor through `/k8s` without gateway
+projection or sharing. Native watches already work in foyer; this convenient browser
+connector does not yet exist. Choosing it must be explicit: never silently fall back
+from a redacted stream to native objects. The [upstream request](krm-stream-native-connector-request.md)
+sets out the lifecycle and tests needed.
+
+For a frontender, the intended choice is the view their page needs. A configuration
+editor may ignore status churn; a progress screen needs status; a native resource
+tool may want the original object. All need clear synchronization state, drafts that
+survive updates, and understandable save conflicts.
+
+The [Pinia and TanStack DB investigation](frontend-integrations-pinia-tanstack-db.md)
+explores how to expose that behavior through familiar frontend stores and live
+queries, while keeping framework dependencies optional and editing ownership clear.
+
+## What "only the things I care about" already means
+
+**Yes, there is a projection for ignoring status: `krm-spec/v1`.** This is implemented
+in the pinned 0.7.0 gateway, independently of the pending connector changes.
+
+| Choice | Existing behavior | Limit |
+| --- | --- | --- |
+| Scope | Select resource, namespace, name and optional label selector | Filters objects, not fields; no general field selectors in gateway v1 |
+| `krm-full/v1` (default) | Keep status; omit Secret values and report their paths and change revisions | Does not recognize arbitrary sensitive fields in CRDs |
+| `krm-spec/v1` | As full, but omit status and suppress status-only updates | No arbitrary list of field interests; use full if the page displays status |
+| `krm-raw/v1` | Keep status and Secret values | Still strips `managedFields` and last-applied configuration; not native passthrough |
+| Change suppression | Emit an object update only when its projected content excluding RV, or its redaction records, changes | Still emits all objects in each complete snapshot; does not reduce upstream watch traffic |
+
+For example, a status-blind editor can request:
+
+```http
+GET /stream/v1?group=apps&version=v1&resource=deployments&namespace=app&projection=krm-spec%2Fv1
+```
+
+Redaction and ignoring have different meanings. An ignored status change produces no
+object event. A hidden Secret value changing advances a `redacted[].rev`, so the UI
+can show that it changed without receiving its contents. Those revisions belong to
+one connection, not a durable history. All built-in projections trim `managedFields`
+and the last-applied-configuration annotation.
+
+This is useful even for one user: less payload, fewer browser updates, and no Secret
+values in the default stream. In foyer it is not a confidentiality boundary against
+the user, who may request the raw projection or `/k8s` if Kubernetes permits it.
+Suppression can also leave a delivered RV stale, so guarded saves need reconciliation.
+krm-stream already explains this in its saving guide and explicitly defers
+version-only notifications and automatic conflict-free retries. The
+[save-progress follow-up](krm-stream-native-connector-request.md#follow-up-3-reduce-save-interruptions-from-suppressed-updates)
+records those sources and asks for an evaluation of bounded save recovery and
+coalesced version delivery for this adopter use case.
+See the [watch guide](../watches.md#choosing-a-projection) and krm-stream's
+[implemented projection design](https://github.com/ConfigButler/krm-stream/blob/a8281c58ac6adcb0b59a4f66ac87bc21828d1e08/docs/proposals/0004-views-and-bytes.md).
+
+krm-foyer already serves native watches through `/k8s`
 ([bounds](../bounds.md#native-watches)) and compares the paths in
 [watches](../watches.md); krm-stream's gateway has opened its own upstream watches with
 Kubernetes' streaming list from the start. What changed is that the one argument that
-was about SSE itself, `EventSource`, is gone.
+was about SSE itself, `EventSource`, is removed by the proposed connector change.
 
 ## How SSE got here
 
@@ -44,7 +109,7 @@ So the reasons, and what became of each:
 |---|---|
 | **One upstream watch for many tabs**: the main one, from voter, where a whole audience's phones watch the same quiz round | Still valid, and it is the gateway's job, not SSE's. It became opt-in: krm-foyer streams per-user by default and shares only configured resources. |
 | **The backend owns watch mechanics** (informers, bookmarks, 410, resume) | Still valid for the server side. The browser side of the same work now lives in krm-stream's connector and store. |
-| **The browser stays simple with `EventSource`** and its free reconnect | Gone. Gap recovery and the server's retry hints needed a managed connector anyway, and #53 removed `EventSource` from the client. |
+| **The browser stays simple with `EventSource`** and its free reconnect | Removed in PR #53's design. Gap recovery and the server's retry hints needed a managed connector anyway. |
 | **Normalized events, not raw watch frames** | Still valid: this is projection, plus the `reset`/`synced` vocabulary. Any framing would carry it. |
 | **Cookies, because `EventSource` cannot send headers** | A consequence of choosing `EventSource`, never a limit of the browser: a same-origin `fetch` sends the session cookie by default, and krm-foyer's `/k8s` is cookie-authenticated too. |
 
@@ -96,17 +161,17 @@ They are almost a translation of each other:
 | Kubernetes watch | krm-stream | Difference |
 |---|---|---|
 | (request with `sendInitialEvents=true`) | `reset` | krm-stream says it explicitly |
-| `ADDED` / `MODIFIED` | `added` / `modified` | the object is projected (no `managedFields`, Secrets redacted) |
+| `ADDED` / `MODIFIED` | `added` / `modified` | the object is projected; updates with an unchanged visible view may be suppressed |
 | `DELETED` | `deleted` | an identity instead of the last object |
 | `BOOKMARK` with `k8s.io/initial-events-end` | `synced` | same meaning |
-| other `BOOKMARK`s | heartbeat comments | both keep the connection busy |
+| other `BOOKMARK`s | no equivalent checkpoint on the wire | bookmarks advance upstream progress; SSE comments independently keep the downstream connection active |
 | `ERROR` with a `Status` (410 Gone …) | `error` with a small code vocabulary | krm-stream classifies terminal or retryable |
 | (none) | `seq` | lets the client detect a gap in the gateway's own output |
 
 The SSE features that would make SSE more than framing are deliberately unused:
 krm-stream's [spec](https://github.com/ConfigButler/krm-stream/blob/main/spec/v1.md)
-forbids `id:` lines and `Last-Event-ID` resume, and no event names are used. Since
-krm-stream PR #53, `EventSource`'s automatic reconnect is not used either.
+forbids `id:` lines and `Last-Event-ID` resume, and no event names are used. In
+krm-stream PR #53's design, `EventSource`'s automatic reconnect is not used either.
 
 ## Why it felt as if SSE were needed
 
@@ -114,17 +179,18 @@ Each reason was true for some design; none holds for krm-foyer as built.
 
 | The reason | What actually holds |
 |---|---|
-| "`EventSource` cannot read a Kubernetes watch." | True, and irrelevant: `fetch` reads any streamed body, and krm-stream's own client uses `fetch` now. |
+| "`EventSource` cannot read a Kubernetes watch." | `fetch` reads either streamed body; PR #53 makes it the sole stream connector. |
 | "`EventSource` cannot send a bearer token." | True, and irrelevant behind a backend: krm-foyer's session cookie goes with every same-origin `fetch`, and `/k8s` attaches the user's token on the server. The token never reaches the browser on either path. |
-| "The API server does not allow cross-origin browser requests." | True, and the same for both: the browser talks to krm-foyer, never to the API server. |
-| "The browser handles SSE reconnects for you." | Only with `EventSource`, which krm-stream stopped using because its reconnect timing ignores the server's retry hints. |
+| "The API server does not allow cross-origin browser requests." | No API-server CORS configuration is needed for either path: the browser talks to same-origin krm-foyer. |
+| "The browser handles SSE reconnects for you." | Only with `EventSource`; the connector proposed in #53 manages recovery and retry hints itself. |
 | "Proxies and the 6-connections-per-host limit treat SSE better." | The connection limit applies to every long response alike; HTTP/2 lifts it for both. The `text/event-stream` type does help a little: some proxies and compression middleware recognise it and do not buffer. |
-| "Idle connections get cut." | Both have a keep-alive: SSE comments every 20 s, Kubernetes bookmarks about once a minute (not guaranteed). Both clients reconnect anyway. |
+| "Idle connections get cut." | The gateway sends SSE heartbeat comments. Ordinary Kubernetes bookmarks have no guaranteed interval or delivery and are not a reliable heartbeat. Both clients need recovery. |
 
 ## Three ways a page can get live state through krm-foyer
 
-All three exist today ([watches](../watches.md)). The only difference between the
-first two is who opens the watch at the API server.
+All three server paths exist today ([watches](../watches.md)). Shared streams also
+add per-user access reviews and a revocation bound; native browser integration still
+requires a client implementing the watch lifecycle.
 
 ```mermaid
 flowchart LR
@@ -161,7 +227,7 @@ sequenceDiagram
   K-->>P: MODIFIED / DELETED … (remember each resourceVersion)
   K--xP: connection ends (timeout, network, 30-min bound)
   P->>K: watch, resourceVersion=<last seen>
-  Note over P: resumed: no snapshot, no lost or repeated change
+  Note over P: resume after a complete snapshot, while history is retained
   K-->>P: 410 Gone (history compacted)
   P->>K: watch, sendInitialEvents=true
   Note over P: fresh snapshot, pruned only when it completes
@@ -172,91 +238,32 @@ The rules a correct reader follows:
 1. Split the body into lines, keeping a partial line until the next chunk.
 2. Key objects by `metadata.uid`, never by name, so a recreated object does not inherit
    an old one's state.
-3. Remember the `resourceVersion` of every event, bookmarks included.
-4. When the response ends, reconnect from that `resourceVersion`, with backoff.
+3. Track snapshot completion separately from `resourceVersion`. Initial synthetic
+   `ADDED` events do not establish a complete collection or a safe resume checkpoint.
+4. After a complete snapshot, remember the last applied event or bookmark's
+   `resourceVersion`. Resume from it with bounded backoff when the response ends.
+   If the snapshot ends early, restart the snapshot instead.
 5. On 410 Gone, at opening or as an `ERROR` event, start a fresh snapshot. Keep the old
    objects until it completes, then remove every object it did not send. That is how a
    delete missed during the gap disappears.
-6. Stop on 401 and 403; retrying cannot help.
+6. Report 401 and 403 as terminal for this connection, both as opening HTTP statuses
+   and in-stream `ERROR` events. A later login can start a new connection.
 7. Aggregated APIs may refuse `sendInitialEvents` (krm-stream's observation F6). For
    them, list first, then watch from the list's `resourceVersion`.
 
-That is about a hundred lines. Because krm-stream PR #53 made the store's input a plain
-event (`ResourceStateEvent`), such a reader can feed krm-stream's store and editor
-directly, with no gateway in between. **An untested sketch:**
+The original untested JavaScript sketch has been removed: it resumed after an
+incomplete initial snapshot and retried in-stream 403 errors. It also lost checkpoint
+progress when a body read threw. A short parser is not evidence of a complete connector.
+PR #53's proposed plain `ResourceStateEvent` input makes reuse of the browser store
+plausible; the [connector request](krm-stream-native-connector-request.md) requires
+tests for the full lifecycle and the raw-object editing contract.
 
-```js
-import { LiveResourceStore, applyStreamEvent } from './krm-stream.js';
-
-const store = new LiveResourceStore();
-const consume = (event) => render(applyStreamEvent(store, event));
-
-// Follow one collection, e.g. '/k8s/api/v1/namespaces/app/configmaps'.
-async function followNative(path, signal) {
-  let rv = ''; // empty: the next connection starts with a snapshot
-  let failures = 0;
-  while (!signal.aborted) {
-    const q = new URLSearchParams({ watch: '1', allowWatchBookmarks: 'true' });
-    if (rv) {
-      q.set('resourceVersion', rv);
-    } else {
-      q.set('sendInitialEvents', 'true');
-      q.set('resourceVersionMatch', 'NotOlderThan');
-      consume({ type: 'reset' }); // nothing is dropped until `synced`
-    }
-    try {
-      const res = await fetch(`${path}?${q}`, { signal });
-      if (res.status === 401 || res.status === 403) throw new Error('refused'); // rule 6
-      if (res.status === 410) { rv = ''; continue; }                            // rule 5
-      if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { retry: true });
-      rv = await readEvents(res.body, rv, consume);
-      failures = 0;
-    } catch (err) {
-      if (!err.retry && err.name !== 'TypeError') throw err; // TypeError: network failure
-      failures++;
-    }
-    await sleep(Math.min(30_000, 500 * 2 ** failures) * (0.5 + Math.random() / 2)); // rule 4
-  }
-}
-
-// Returns the resourceVersion to resume from, or '' when a fresh snapshot is needed.
-async function readEvents(body, rv, consume) {
-  const reader = body.pipeThrough(new TextDecoderStream()).getReader();
-  let buffer = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) return rv;                                   // ended: resume from rv
-    buffer += value;
-    let newline;
-    while ((newline = buffer.indexOf('\n')) >= 0) {        // rule 1
-      const line = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
-      if (!line) continue;
-      const { type, object } = JSON.parse(line);
-      if (type === 'ERROR') {
-        await reader.cancel();
-        return object.code === 410 ? '' : rv;              // rule 5
-      }
-      rv = object.metadata.resourceVersion;                // rule 3
-      const m = object.metadata;
-      if (type === 'ADDED') consume({ type: 'added', object });
-      else if (type === 'MODIFIED') consume({ type: 'modified', object });
-      else if (type === 'DELETED') consume({ type: 'deleted', identity: {
-        uid: m.uid, name: m.name, namespace: m.namespace,
-        apiVersion: object.apiVersion, kind: object.kind } });
-      else if (type === 'BOOKMARK' && m.annotations?.['k8s.io/initial-events-end'] === 'true')
-        consume({ type: 'synced' });                       // snapshot complete: prune
-    }
-  }
-}
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-```
-
-Note one thing the native path does *better*: a reconnect resumes from the last
-`resourceVersion` and costs nothing, while every krm-stream reconnect transfers a full
-snapshot ([spec](https://github.com/ConfigButler/krm-stream/blob/main/spec/v1.md): no
-`Last-Event-ID` resume).
+Native resume can avoid a full snapshot while the checkpoint is retained. Reopening
+and replay still cost work, and a 410 requires resynchronization. A browser reconnect
+to the current gateway always receives a new snapshot. The upstream continuation
+design in [PR #59](https://github.com/ConfigButler/krm-stream/pull/59) addresses a
+different boundary: reopening the gateway's Kubernetes watch while the browser stays
+connected. Neither is a reason to change SSE framing.
 
 ## What krm-stream adds, layer by layer
 
@@ -267,9 +274,9 @@ flowchart TB
     ST["Store: uid keying, snapshot pruning,<br/>redaction metadata"]
     C["Connector: reconnect, backoff,<br/>terminal vs retryable"]
   end
-  subgraph server["On the server: needs the gateway"]
-    PR["Projection: trim managedFields,<br/>redact Secrets"]
-    SW["Shared watch: N users → 1 watch,<br/>rechecked every minute"]
+  subgraph server["In the reference gateway"]
+    PR["Projection and suppression:<br/>trim machinery, redact Secrets,<br/>ignore status when requested"]
+    SW["Shared watch: N users → 1 watch,<br/>bounded per-user reauthorization"]
     AG["Aggregated-API fallback:<br/>list, then watch"]
     EV["One small error vocabulary,<br/>details kept off the wire"]
   end
@@ -281,22 +288,25 @@ flowchart TB
 |---|---|---|---|
 | Access decided by | API server | API server | API server, via SubjectAccessReview |
 | RBAC revocation reaches an open watch | when it ends (≤ 30 min in krm-foyer) | when it ends | within about a minute |
-| Watches at the API server for N users | N | N | 1 |
-| Reconnect cost | none (resume) | full snapshot | full snapshot |
+| Watches at the API server for N users of one scope | N | N | 1 per replica |
+| Browser reconnect cost | reopen and replay; snapshot if history expired | full snapshot | full snapshot |
 | `managedFields` and other noise | sent | removed | removed |
 | Secrets | as RBAC allows | redacted by default | redacted by default |
 | Aggregated API without streaming list | the reader must list, then watch | handled | handled |
-| Store, editor, conflicts | krm-stream store, fed by the reader | krm-stream store | krm-stream store |
+| Status-only update suppression | none on the wire | `krm-spec/v1` | `krm-spec/v1` |
+| Store, editor, conflicts | requested connector; raw-view contract needs validation | krm-stream store | krm-stream store |
 | Extra server component | none | gateway | gateway + shared identity |
 
-In krm-foyer the redaction row matters less than it seems: a user who may read a Secret
-can read it raw through `/k8s` anyway ([design](../design.md#streams-and-editing)). The
-projection is a convenience and a bandwidth saving there, not a boundary.
+The gateway's projection happens before bytes reach the browser, and sharing needs
+a server. List/watch fallback and error classification can also be implemented in a
+native client; their existing implementation is a convenience of the gateway.
+Redaction remains useful for limiting what a page receives even though foyer permits
+authorized raw reads ([design](../design.md#streams-and-editing)).
 
 ## Is `EventSource` a nice interface for frontenders?
 
-For a demo, yes; for an application, not for long. And it sits one level below what a
-frontender actually wants.
+It is useful when its request and recovery behavior fit the application. It sits one
+level below the live-resource interface considered here.
 
 ### Why it appeals
 
@@ -333,7 +343,8 @@ has the exact rules quoted below.
     closed) gets reconnected to, over and over, from every open tab. That is the warning
     that headed krm-stream's old `sse.ts`, and why its connector closes the
     `EventSource` itself on a terminal error.
-  - A server can stop reconnects only with `204 No Content`.
+  - `204 No Content` is the explicit stop-reconnecting response; the other failure
+    statuses above also fail the connection.
 - **The request is fixed:** `GET` only, no headers, no body. A bearer token cannot be
   sent ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/EventSource)).
 - **The connection limit:** over HTTP/1.1 a browser opens at most six connections per
@@ -370,11 +381,11 @@ Firestore's [`onSnapshot`](https://firebase.google.com/docs/firestore/query-data
 is the best-known shape:
 
 ```js
-const stop = onSnapshot(query(collection(db, 'notes'), where('team', '==', 'a')), (snap) => {
+const stop = onSnapshot(query(collection(db, 'notes'), where('team', '==', 'a')), { includeMetadataChanges: true }, (snap) => {
   render(snap.docs);                    // the whole current result, every time
   for (const change of snap.docChanges()) animate(change.type, change.doc); // added | modified | removed
   showSaving(snap.metadata.hasPendingWrites); // local edits not yet confirmed
-  showOffline(snap.metadata.fromCache);       // not yet confirmed by the server
+  showCached(snap.metadata.fromCache);        // cache-sourced, not proof of being offline
 });
 ```
 
@@ -385,29 +396,32 @@ What makes it pleasant is not the transport (Firestore uses its own), but four p
 3. **It says whether the data is confirmed:** `fromCache` and `hasPendingWrites`.
 4. **Unsubscribing is one function call.**
 
-krm-stream covers the same ground, with one deliberate difference:
+krm-stream addresses related UI needs, but these are comparisons, not equivalent APIs:
 
 | `onSnapshot` | krm-stream |
 |---|---|
 | `snap.docs` | `store.ids()` + `store.server(uid)` |
 | `docChanges()` | the `StreamChange` returned per event: `uid`, `added`, `flashed`, `structural` |
-| `metadata.fromCache` | connection `state.status` (`syncing` until a snapshot completes) |
-| `metadata.hasPendingWrites` | the draft: `store.changes(uid)`, conflicts per field |
-| local writes appear at once ("latency compensation") | **not done**: the draft is kept beside the server's object, and a save is confirmed by the watch echo |
+| `metadata.fromCache` | synchronization/connection state helps describe freshness; it is not a persistent offline-cache contract |
+| `metadata.hasPendingWrites` | a dirty draft is unsaved intent, not an in-flight write; save lifecycle needs separate state |
+| local writes appear at once ("latency compensation") | local draft and authoritative resource remain separate; reconcile write receipts and watch observations with guards |
 | `unsubscribe()` | `connection.close()` and the store's unsubscribe |
 
-The difference is on purpose. A Kubernetes object is changed by controllers and other
-people while the page edits it, and admission may reject or rewrite the write; showing
-the user's value as if it were already the server's would hide exactly the conflicts
-the editor exists to show.
+The separation helps when controllers and other people change an object while the
+page edits it, and admission may reject or rewrite a save. Optimistic UI can also be
+honest about pending writes, as Firestore's metadata shows. The desired frontend
+contract distinguishes dirty drafts, submitting, accepted writes, observed state and
+domain completion. A watch echo alone is not a general proof of a particular save:
+another update may already have superseded it, and suppression may omit a no-op.
 
 Others in the same family:
 
 - **Supabase Realtime**
   ([Postgres changes](https://supabase.com/docs/guides/realtime/postgres-changes))
-  sends change events only. The page loads the rows first and subscribes second, and must
-  close the gap between the two itself: the problem `reset … synced` and Kubernetes'
-  streaming list solve.
+  supplies change notifications, not a complete synchronized query result. Combining
+  a query with subscriptions needs a reconciliation strategy; simply loading rows
+  then subscribing leaves a gap. Kubernetes streaming lists provide an explicit
+  snapshot boundary in the change stream.
 - **ElectricSQL** ([HTTP API](https://electric-sql.com/docs/api/http)) syncs a "shape"
   as an initial snapshot plus a log, resumed from an offset: very close to Kubernetes'
   list plus watch from a `resourceVersion`.
@@ -432,8 +446,8 @@ sync contract. Of the openly documented ones, Kubernetes'
 is one of the most precise: versioned changes, bookmarks, a defined "too old, start
 again" (410 Gone), and since
 [streaming lists](https://kubernetes.io/docs/reference/using-api/api-concepts/#streaming-lists)
-a snapshot boundary in the same stream. krm-stream's `reset … synced` is that contract,
-renamed and projected. Not inventing a new one is an argument in its favour.
+a snapshot boundary in the same stream. krm-stream builds on that model and adds its
+own declared view, suppression, redaction and recovery contract.
 
 For krm-stream this points to a clear target: its store, wrapped in a framework hook,
 should feel like `onSnapshot`. The Vue example's `useLiveResource` is already shaped
@@ -441,21 +455,16 @@ that way. If TC39 Signals land, the store is a natural thing to expose as one.
 
 ## What this means
 
-- **`EventSource` is a demo interface, and the store is the product.** Frontenders want
-  `onSnapshot`, not `onmessage`.
-- **SSE is a fine, conventional format, not a requirement.** If krm-stream started today,
-  newline-delimited JSON, or even the Kubernetes watch format itself, would serve as well.
-  Changing it now gains nothing; it just should not be the argument.
-- **The per-user stream is mainly a client-library argument.** krm-foyer's
-  [bounds](../bounds.md#native-watches) already say it: a native watch reader in the
-  browser would be "a second, lesser krm-stream". That is true only while the reader is
-  missing. After #53, a reader that feeds krm-stream's store would be equal on the client
-  side and better on reconnect cost.
-- **The gateway earns its place with sharing, projection and aggregated APIs.** That is
-  the honest pitch: the API server stays the authority, behind a thin proxy, with a
-  tested client library; add the gateway when many users watch the same thing or when
-  objects need trimming.
-- **For a talk**, the side-by-side wires above and the three-paths diagram make the point
-  in two slides. The experiment worth running before the talk is the sketch above,
-  made real and tested against the e2e cluster, so the comparison table rests on
-  measurements instead of reasoning.
+- **Keep the reference gateway in krm-stream and integrate it in krm-foyer.** It makes
+  the resource-stream contract usable by foyer and other hosts.
+- **Keep SSE as the gateway encoding.** Reconsider only with evidence of a problem
+  that changing framing solves. A native connector is a separate access option.
+- **Make projections and suppression part of the pitch.** They help even a single
+  user, and are already implemented. Explain precisely which objects, fields and
+  updates a page can select.
+- **Request the native connector in krm-stream.** Reuse browser primitives, keep raw
+  semantics explicit, and test recovery and guarded editing before promising parity.
+- **Demonstrate a frontend outcome.** Show controller progress, a status-blind editor,
+  a hidden Secret rotation and recovery from a missed delete. Compare native and
+  projected paths under the same workload, including bytes, browser updates and save
+  conflicts. The [request](krm-stream-native-connector-request.md) defines that work.

@@ -71,7 +71,7 @@ reads the configuration, one section per package, and wires them together.
 | Component or team | Responsibility |
 | --- | --- |
 | krm-foyer | OIDC client, sessions, CSRF protection, fixed upstream routing, API proxy and stream host configuration |
-| [krm-stream](https://github.com/ConfigButler/krm-stream) | Resource-stream protocol, recovery, projections, optional watch sharing and browser draft/reconciliation primitives |
+| [krm-stream](https://github.com/ConfigButler/krm-stream) | Resource-stream protocol and reference Go gateway, recovery, projections and change suppression, optional watch sharing and browser draft/reconciliation primitives |
 | Kubernetes | Discovery, persistence, RBAC, admission execution, API validation and write concurrency |
 | Domain team | Resource contracts, admission rules, controller processing, trusted status and domain guarantees |
 | Frontend team | Forms, resource queries, save intent, navigation and presentation of domain outcomes |
@@ -482,8 +482,9 @@ credential in the query, a malformed name, or a target other than the one cluste
 A stream passes the same [gate](#architecture-and-ownership) as `/k8s`: no session is
 the 401 interruption, and the [bounds](bounds.md) and the session check hold it like any
 other response. Once the stream has started, krm-foyer's own refusals and Kubernetes'
-answers arrive as krm-stream's events, because a browser's `EventSource` cannot read the
-body of an error status:
+answers arrive as krm-stream's events under its v1 protocol. Once a response has
+started, its HTTP status cannot change; the event carries the terminal/retryable
+classification independently of which browser connector reads it:
 
 | The API server answers the watch, at opening or on the open watch, with | The browser receives |
 | --- | --- |
@@ -506,8 +507,31 @@ requested: none hides anything from a user who can read the whole object through
 (see below).
 
 Native watches through `/k8s` stay available beside streams, bounded like every other
-request; krm-stream is the path for live views ([which to use](watches.md),
-[why both](bounds.md#native-watches)).
+request. The gateway's SSE format stays in place; its projections, recovery and
+sharing are separate from that framing choice. The current browser integration uses
+krm-stream's gateway connector. A native-watch connector feeding the same browser
+primitives is [requested work](investigations/krm-stream-native-connector-request.md),
+not part of this release ([which to use](watches.md), [why both](bounds.md#native-watches)).
+
+### Selecting a live view
+
+Scope selects objects by resource, namespace, name and optional label selector.
+Projection selects their view: `krm-full/v1` is the default and omits Secret values;
+`krm-spec/v1` additionally omits `status` and suppresses status-only changes;
+`krm-raw/v1` retains Secret values. All three omit `managedFields` and the
+last-applied-configuration annotation. Even `krm-raw/v1` is a transformed stream;
+use `/k8s` for native watch semantics.
+
+The gateway suppresses updates whose projected content, excluding `resourceVersion`,
+and redaction records have not changed. A hidden Secret value changing advances its
+redaction revision and remains observable without sending the value. These revisions
+belong to one connection. Suppression can leave the delivered `resourceVersion`
+older than the API server's current version; guarded saves must handle that conflict.
+
+The [watch guide](watches.md#choosing-a-projection) gives request examples and the
+limits: these are named views, not arbitrary browser-defined field subscriptions.
+Raw access remains available as authorized by Kubernetes, so projection is not an
+additional confidentiality boundary in krm-foyer.
 
 ### Shared watches
 

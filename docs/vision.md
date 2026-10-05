@@ -9,19 +9,21 @@ What krm-foyer is for, who it helps, and what it will not become. The
 the schema, RBAC does the authorization, admission enforces the rules, the audit log is
 the history, and a refusal the user sees is a real answer from the API server.
 
-What stands in the way is plumbing. Before a browser can make its first API call, someone
-has to write an OIDC client, a session store, a proxy that keeps tokens off the browser,
-and a gateway for live resource streams. Every application built this way writes those
-four things again, and they are where the security bugs live.
+What stands in the way is plumbing: login, sessions, credential custody, browser API
+access and reliable live state. Repeating that integration for each application adds
+work and places where security bugs can live.
 
-krm-foyer is those four things, built once, kept small, and tested hard enough that
-other people can put it in front of a cluster.
+**krm-foyer is where those pieces come together.** It hosts login, sessions, a proxy
+that keeps tokens on the server, and krm-stream's gateway. Applications can use native
+Kubernetes requests or choose projected resource streams, with the same session and
+the API server deciding access on both paths.
 
 ## Who it helps
 
 - **A frontend developer** reads resources, submits changes and follows their progress
   live, using Kubernetes objects and [krm-stream](https://github.com/ConfigButler/krm-stream),
-  with no backend code of their own.
+  without an additional backend for that frontend, when the domain's permissions and
+  invariants are already enforced.
 - **A domain team** puts its rules in CRDs, admission and controllers, and gets one
   contract that browsers, `kubectl` and automation all use.
 - **A platform team** exposes approved APIs through one service it can audit, instead of
@@ -92,17 +94,30 @@ The project stays useful by staying small, so these stay out:
 
 A feature that needs any of these belongs in the application or in krm-stream.
 
-## Revisit when
+## How the projects fit together
 
-- **krm-foyer is the only host of krm-stream's Go gateway.** Today voter embeds it too.
-  If voter moves onto krm-foyer and nobody else embeds the gateway, split the two
-  projects by side instead of by feature: the gateway moves into krm-foyer, and
-  krm-stream keeps the browser library (connectors, store, editor), the protocol spec and
-  the conformance corpus that both sides test against. The lasting value of krm-stream is
-  in the browser; SSE was never the point
-  ([investigation](investigations/sse-and-native-watches.md)). Not before: a
-  policy-free gateway library is what a team with its own Go backend would use instead of
-  krm-foyer.
+**Keep the reference Go gateway in krm-stream.** Alongside its browser library,
+protocol and conformance tests, it gives hosts an implementation of projections,
+redaction, change suppression, recovery and optional shared watches. Teams with their
+own backend can embed it. krm-foyer integrates it with identity, sessions, the native
+API proxy and operational bounds; it does not take ownership of the gateway library.
+
+The frontend value is a live resource view with understandable freshness, drafts and
+conflicts. The gateway adds useful choices: omit Secret values while reporting their
+changes, ignore status churn with `krm-spec/v1`, or share an upstream watch. These are
+features of the resource-stream contract, independent of SSE framing.
+
+**Keep SSE for the gateway's existing protocol.** Replacing its small framing layer
+has no demonstrated benefit. The simpler path is already the native watch through
+`/k8s`; making that path convenient should mean adding a native-watch connector to
+krm-stream, feeding its browser primitives without a gateway transformation. That
+connector is requested work, not a shipped feature. No automatic switch may turn a
+projected stream into a raw one.
+
+The [watch guide](watches.md) describes the available choices, the
+[investigation](investigations/sse-and-native-watches.md) explains the decision, and
+the [upstream request](investigations/krm-stream-native-connector-request.md) defines
+the missing connector and the evidence needed before recommending it.
 
 ## How we will know it works
 

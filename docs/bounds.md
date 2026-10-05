@@ -12,8 +12,8 @@ A *bound* is something krm-foyer limits, such as how long a response may stay op
 
 - **Native watches stay open, and are not a special case.** Every bound applies to every
   request through `/k8s`, so krm-foyer never has to tell a watch from any other request.
-  Live views in applications belong to krm-stream ([watches](watches.md));
-  the native watch stays available underneath it. See [native watches](#native-watches).
+  Live-view recovery belongs in a client library ([watches](watches.md)); the gateway
+  connector ships today and a native connector is requested. See [native watches](#native-watches).
 - **Five bounds**, each configurable with a documented default: the request rate per
   session, concurrent requests per session and per replica, how long a response may
   stay open, and the bytes of a response, counted decoded. On top of them, every open
@@ -67,13 +67,13 @@ number of responses in flight is what the concurrency bound caps.
 
 A native watch is a `GET` that the API server answers with a stream of events. A browser
 can read one: `fetch` exposes a response body as a stream, so page code can read events
-as they arrive. The code must then do what every Kubernetes client does: split the
-stream into events, reconnect when it ends, and resume from the last `resourceVersion`
-without losing or repeating a change.
+as they arrive. The code must then do what every Kubernetes client does: parse events,
+complete initialization before resuming from a checkpoint, reconnect when the stream
+ends, and start a fresh snapshot when history expires.
 
-krm-stream does that work once, for every application. It is the path krm-foyer
-recommends for live views ([watches](watches.md)), and the hello example
-uses it. So the question was whether native watches through `/k8s` should stay at
+krm-stream's gateway and browser library handle live-view recovery for applications.
+They are the current browser recommendation ([watches](watches.md)), and the hello
+example uses them. So the question was whether native watches through `/k8s` should stay at
 all. **They stay**, for three reasons:
 
 - **Refusing them would be an access rule.** RBAC already says who may watch what.
@@ -84,8 +84,10 @@ all. **They stay**, for three reasons:
   cancellation at the API server, every long response needs too: a followed log, or a
   slow list open at logout. krm-stream's per-user streams use the same gate.
 
-What is not offered: a watch client in the [browser helper](frontend.md), or an example
-that reads native watches. That would be a second, lesser krm-stream.
+There is no watch client in the [browser helper](frontend.md), or an example that reads
+native watches. The [requested native connector](investigations/krm-stream-native-connector-request.md)
+belongs in krm-stream and should reuse its browser primitives. It would make native
+access convenient without duplicating recovery in foyer or individual pages.
 
 **krm-foyer does not tell watches apart.** It was going to, and two measurements against
 the real API server (k3s in the e2e fixture, 2026-10-02) showed why it should not:

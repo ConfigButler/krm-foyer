@@ -2,8 +2,10 @@
 
 A page that shows live Kubernetes state can get it three ways through krm-foyer. This
 page helps you choose one, then explains how to set up the one that needs setting up:
-shared watches. **Use a stream for anything live in a page, share it when
-many users watch the same thing, and treat native watches as a fallback.**
+shared watches. **Use the gateway for projected views and shared watches; use native
+watches when native semantics are sufficient and the client handles their lifecycle.**
+The gateway connector is the browser integration shipped today. A native connector
+for the same krm-stream browser primitives is [requested, not yet shipped](investigations/krm-stream-native-connector-request.md).
 
 ## The three kinds
 
@@ -22,13 +24,17 @@ All three end when their session ends, and count against the [bounds](bounds.md)
 
 ## Choosing
 
-**1. Is it a live view in a page?** Use a stream. krm-stream does the work every
-Kubernetes client has to do (split events, resume from the last `resourceVersion`,
-start again after a gap), and it does it once, tested, for every page. A native watch
-leaves that work to page code. Use a native watch only for what already speaks the
-Kubernetes watch protocol (a client library, an API explorer in a tab), or for a quick
-look while debugging. krm-foyer keeps native watches working and bounded
-([why](bounds.md#native-watches)), but optimizes nothing for them and offers no helper.
+**1. What view does the page need?** Use a stream for projections, Secret redaction,
+suppression of irrelevant updates or shared watches. It is also the current default
+for new pages: krm-stream's existing integration handles recovery and drafts. Its
+gateway handles upstream list/watch recovery, while a browser reconnect currently
+receives a fresh snapshot.
+
+Use a native watch when the client already handles Kubernetes list/watch semantics
+and needs the original objects. It goes through the same session gate and API-server
+authorization. A tested native connector belongs in krm-stream so each page need not
+implement recovery; until that exists, the browser helper offers none. See
+[native watches](bounds.md#native-watches) and the [connector request](investigations/krm-stream-native-connector-request.md).
 
 **2. Per-user or shared?** Share a resource when all of these hold:
 
@@ -57,6 +63,62 @@ either way later: only krm-foyer's flags change, never the page.
 | Secrets, or anything sensitive cluster-wide | Per-user stream |
 | One user with many tabs on the same list | Either; shared saves the extra watches |
 | A tool that speaks the Kubernetes watch protocol | Native watch |
+
+## Choosing a projection
+
+These views are implemented in the pinned krm-stream **0.7.0** gateway, and krm-foyer
+accepts all three. Pass `projection` on `/stream/v1`; omitting it selects `krm-full/v1`.
+
+| Projection | Status | Secret values | Use when |
+| --- | --- | --- | --- |
+| `krm-full/v1` | Included | Omitted; paths and change revisions reported | The page edits resources and follows controller progress |
+| `krm-spec/v1` | Omitted; status-only updates suppressed | Omitted; paths and change revisions reported | The page does not display status and should not receive its churn |
+| `krm-raw/v1` | Included | Included | The page needs Secret values and the user may read them |
+
+All three remove `metadata.managedFields` and the
+`kubectl.kubernetes.io/last-applied-configuration` annotation. `krm-raw/v1` therefore
+does **not** mean an unmodified native watch.
+
+For example, watch a team's deployments without receiving status-only updates:
+
+```http
+GET /stream/v1?group=apps&version=v1&resource=deployments&namespace=app&labelSelector=team%3Da&projection=krm-spec%2Fv1
+```
+
+The existing browser URL helper accepts the same choice:
+
+```js
+const url = resourceStreamURL('/stream/v1', {
+  group: 'apps', version: 'v1', resource: 'deployments', namespace: 'app',
+  labelSelector: 'team=a', projection: 'krm-spec/v1',
+});
+```
+
+Import `resourceStreamURL` from the krm-stream browser library, as the
+[hello example](../examples/hello/web/app.js) does, and pass this URL to the connector.
+
+There are three separate choices behind "only what this page is interested in":
+
+- **Scope selects objects:** resource, namespace, optional name and label selector.
+  The v1 gateway does not support general field selectors.
+- **Projection selects content:** the three named views above. There is no arbitrary
+  field list or status-only projection in the built-in set, and no automatic detection
+  of sensitive fields inside custom resources.
+- **Suppression selects updates:** the gateway compares projected content excluding
+  `metadata.resourceVersion`, together with redaction records. An unchanged view
+  produces no object event. A hidden Secret value rotation changes its redaction
+  revision, so the page can learn that it changed without receiving the value. These
+  revisions start again on a new connection; they are not a durable change history.
+
+Every completed snapshot still includes every in-scope object. Suppression may leave
+the page with an older `resourceVersion`; a guarded save can conflict and needs
+reconciliation. Never replace that guard with a fresh version on an old patch, or
+round-trip a projected object as a full replacement.
+
+Projection reduces data exposure in this stream and avoids unnecessary browser work.
+It does not restrict the user's other access: krm-foyer also permits `krm-raw/v1` and
+native `/k8s` reads when Kubernetes allows them. Selectors likewise filter results;
+they do not grant or restrict permissions. See the [design](design.md#streams-and-editing).
 
 ## Setting up shared watches
 
@@ -280,6 +342,7 @@ in an application's own deployment, that can well be on by default.
 
 They work, they are bounded like any request, and they end with their session
 ([bounds](bounds.md#native-watches)). krm-foyer does not tell them apart from other
-requests, measures nothing about them separately, and does not plan to: a page that
-wants live state should use a stream. If one day a real application depends on native
-watches at scale, measure them then.
+requests and measures nothing about them separately. The requested native connector
+would add a browser-library option without a new foyer route or watch protocol.
+Compare both paths under the same workload before changing the browser recommendation;
+retain the gateway for the views and sharing that require it.
