@@ -142,6 +142,8 @@ helm install krm-foyer oci://ghcr.io/configbutler/charts/krm-foyer --version <re
   --set oidc.clientSecret.secretName=krm-foyer-oidc,tls.secretName=krm-foyer-tls
 ```
 
+<div class="artifacthub-widget" data-url="https://artifacthub.io/packages/helm/krm-foyer/krm-foyer" data-theme="light" data-header="true" data-stars="true" data-responsive="false"><blockquote><p lang="en" dir="ltr"><b>krm-foyer</b>: Browser login, Kubernetes API access and live resources on one origin, with every access decision left to the API server</p>&mdash; Open in <a href="https://artifacthub.io/packages/helm/krm-foyer/krm-foyer">Artifact Hub</a></blockquote></div><script async src="https://artifacthub.io/artifacthub-widget.js"></script>
+
 The repository comes with a devcontainer that has Go, Task, the linters CI runs, and
 k3d/kubectl for testing against a real API server. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
