@@ -248,14 +248,20 @@ func (noLive) Token(*http.Request) (gate.Credential, *interruption.Interruption)
 }
 
 // A credential that cannot say whether its session is live counts as one that has
-// ended: fail closed.
+// ended: fail closed. The first check may cut the response short before its head
+// arrives, or before the request reaches the API server at all, on a loaded runner;
+// either way the response is aborted, and a request that did reach the API server is
+// cancelled there.
 func TestACredentialWithoutLiveIsCutShort(t *testing.T) {
 	api, sent, cancelled := streamingAPIServer(t, false)
 	f := newFoyerWith(t, api, noLive{}, frontOptions{config: func(c *testConfig) { c.SessionCheckInterval = checkEvery }})
-	body := f.open(t, "/k8s/api/v1/configmaps?watch=1")
-	<-sent
-	readsAborted(t, body)
-	closedWithin(t, cancelled, "the request to the API server was not cancelled")
+	f.endsAborted(t, "a", "/k8s/api/v1/configmaps?watch=1")
+	select {
+	case <-sent:
+		closedWithin(t, cancelled, "the request to the API server was not cancelled")
+	case <-time.After(within):
+		// Cut short before the request left krm-foyer: there is nothing to cancel.
+	}
 }
 
 // When krm-foyer cut the request short before the API server answered, the answer

@@ -232,6 +232,15 @@ func sharedFoyer(t *testing.T, api *sharedAPI, creds gate.Credentials, m *metric
 	adjust ...func(*Config),
 ) foyer {
 	t.Helper()
+	return sharedFoyerChecking(t, api, creds, m, recheck, 0, adjust...)
+}
+
+// sharedFoyerChecking is sharedFoyer with a session-check interval, for a test that
+// ends a session; zero keeps the gate's default.
+func sharedFoyerChecking(t *testing.T, api *sharedAPI, creds gate.Credentials, m *metrics.Metrics, recheck, checks time.Duration,
+	adjust ...func(*Config),
+) foyer {
+	t.Helper()
 	file := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(file, []byte(sharedToken+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -242,6 +251,7 @@ func sharedFoyer(t *testing.T, api *sharedAPI, creds gate.Credentials, m *metric
 	}
 	return newFoyer(t, api.apiServer, creds, func(c *Config, g *gate.Config) {
 		g.Metrics = m
+		g.SessionCheckInterval = checks
 		c.Shared = &SharedConfig{TokenFile: file, Resources: resources, RecheckInterval: recheck, DecisionTTL: recheck / 2}
 		for _, a := range adjust {
 			a(c)
@@ -621,7 +631,7 @@ func TestASessionEndingLeavesTheSharedWatchToOthers(t *testing.T) {
 		}
 		return byHeader{}.Token(r)
 	})
-	f := sharedFoyer(t, api, creds, nil, time.Minute)
+	f := sharedFoyerChecking(t, api, creds, nil, time.Minute, checkEvery)
 	alice := f.open(t.Context(), t, notes, as(userToken))
 	alice.until(t, "synced")
 	bob := f.open(t.Context(), t, notes, as(otherToken))
