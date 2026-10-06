@@ -28,7 +28,7 @@ import (
 )
 
 // Room Pass's QR login through krm-foyer (docs/room-pass.md), in a real browser, against
-// Room Pass 2.0.0 and the Dex behind it (test/e2e/cluster/room-pass.sh): a participant
+// Room Pass 2.1.0 and the Dex behind it (test/e2e/cluster/room-pass.sh): a participant
 // scans the code on the presenter's screen, types a display name, and is signed in to
 // the application through krm-foyer, with Kubernetes naming them as Room Pass's rules
 // say. Three programs share the application's host, room.localhost: krm-foyer-room,
