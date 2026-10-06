@@ -3,7 +3,10 @@
 package e2e
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -37,6 +40,17 @@ var _ = Describe("A browser identity", Label("foyer"), func() {
 		Expect(a.Code).To(Equal(http.StatusForbidden), "%s", a.Body)
 		Expect(a.status().Message).To(ContainSubstring(`User "` + aliceK8sName + `"`))
 		Expect(fx.direct(ctx, u.token, http.MethodGet, secrets, nil).Code).To(Equal(http.StatusForbidden))
+
+		By("keeping krm-foyer's name when krm-foyer asks Dex for the command line's audience too")
+		// Dex's cross-client scope, as krm-foyer asks for the cluster's audience in a
+		// deployment like Voter's: Dex adds the asking client to the audiences and makes
+		// it azp.
+		cross := fx.loginScopes(ctx, alice, foyerClient, foyerSecret, "openid email profile audience:server:client_id:"+cliClient)
+		Expect(tokenClaims(cross)).To(And(HaveKeyWithValue("aud", ConsistOf(cliClient, foyerClient)), HaveKeyWithValue("azp", foyerClient)))
+		code, name = fx.selfSubjectReview(ctx, cross)
+		Expect(code).To(Equal(http.StatusCreated))
+		Expect(name).To(Equal(aliceK8sName))
+		Expect(fx.direct(ctx, cross, http.MethodGet, secrets, nil).Code).To(Equal(http.StatusForbidden))
 
 		By("still refusing a client the cluster does not accept")
 		code, _ = fx.selfSubjectReview(ctx, fx.login(ctx, alice, otherClient, otherSecret))
@@ -119,6 +133,18 @@ var _ = Describe("A browser identity", Label("foyer"), func() {
 		)
 	})
 })
+
+// tokenClaims decodes a token's claims, unverified, to see what an issuer put in it.
+func tokenClaims(token string) map[string]any {
+	GinkgoHelper()
+	parts := strings.Split(token, ".")
+	Expect(parts).To(HaveLen(3))
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	Expect(err).NotTo(HaveOccurred())
+	var claims map[string]any
+	Expect(json.Unmarshal(raw, &claims)).To(Succeed())
+	return claims
+}
 
 // mintFor mints a verified token for carol in the group admins, with claims on top.
 func mintFor(claims map[string]any) string {

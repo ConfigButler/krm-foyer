@@ -206,11 +206,16 @@ func readEnv(file, missing string) map[string]string {
 // login returns a Dex ID token for user, issued to clientID. It uses the password
 // grant so the suite can hold a user's own credential and ask the API server directly.
 func (f *fixture) login(ctx context.Context, user, clientID, secret string) string {
+	return f.loginScopes(ctx, user, clientID, secret, "openid email profile")
+}
+
+// loginScopes is login, asking Dex for scope.
+func (f *fixture) loginScopes(ctx context.Context, user, clientID, secret, scope string) string {
 	form := url.Values{
 		"grant_type": {"password"},
 		"username":   {user},
 		"password":   {password},
-		"scope":      {"openid email profile"},
+		"scope":      {scope},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.dexIssuer+"/token", strings.NewReader(form.Encode()))
 	Expect(err).NotTo(HaveOccurred())
