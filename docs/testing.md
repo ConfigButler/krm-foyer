@@ -459,6 +459,13 @@ task test-e2e   # run the suite; brings the fixture up and deploys krm-foyer fir
 task e2e-down   # remove the cluster, Dex, the network and the certificates
 ```
 
+After the suite replaces krm-foyer's pod, it removes the node's connection tracking that
+still leads to the gone pod (`fixture.forgetGonePods`). Otherwise the suite, one client
+making thousands of connections a minute, reuses client ports whose stale entries send
+its SYNs to an address nobody answers, and the rehearsal's 1,800 connections at once
+time out. [rollout-connections.md](investigations/rollout-connections.md) has the
+measurements.
+
 When something fails, the API server's view is usually the answer:
 `docker logs k3d-krm-foyer-e2e-server-0` shows authenticator errors, and
 `docker exec k3d-krm-foyer-e2e-server-0 cat /etc/krm-foyer-e2e/audit.log` shows who it

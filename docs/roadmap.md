@@ -177,8 +177,10 @@ Security items need tests that try to get past the boundary.
 - [ ] Helm chart values for both models
 - [ ] Rolling updates that refuse no connection: krm-foyer stops listening as soon as
       it is told to stop, while its Service may still route to it for a moment, so a
-      rollout refuses connections briefly (seen by the rehearsal, which restarts it). A
-      wait before shutdown, or readiness turned off first, with a test
+      rollout refuses connections briefly, and now and then leaves one unanswered.
+      Parked (2026-10-06), not needed for the demo: the measurements, what was tried and
+      a pending spec are in
+      [rollout-connections.md](investigations/rollout-connections.md)
 - [x] Routing recipes for one shared domain: a Gateway API `HTTPRoute`, a Traefik
       `IngressRoute` and an nginx server block (all run by the e2e fixture, nginx's
       copied from the document), and a Vite dev-server proxy (written, not run). See

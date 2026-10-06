@@ -50,8 +50,9 @@ type fixture struct {
 	client *http.Client
 
 	// foyerURL is krm-foyer's public URL, deployed by deploy-foyer.sh, and
-	// foyerAccount the service account it runs as: cluster-admin, as bait.
-	foyerURL, foyerNamespace, foyerAccount string
+	// foyerAccount the service account it runs as: cluster-admin, as bait. foyerAddr
+	// is the node's address and NodePort the suite reaches it on.
+	foyerURL, foyerAddr, foyerNamespace, foyerAccount string
 	// sharedAccount is the identity shared watches are opened with: narrow, and not
 	// the bait.
 	sharedAccount string
@@ -172,6 +173,7 @@ func loadFixture() *fixture {
 		testIssuer:      env["TEST_ISSUER"],
 		signingKey:      key.(*rsa.PrivateKey),
 		foyerURL:        env["FOYER_URL"],
+		foyerAddr:       env["FOYER_ADDR"],
 		foyerNamespace:  env["FOYER_NAMESPACE"],
 		foyerAccount:    env["FOYER_SERVICE_ACCOUNT"],
 		sharedAccount:   env["FOYER_SHARED_ACCOUNT"],
@@ -464,6 +466,44 @@ func (f *fixture) replaceFoyer(ctx context.Context, args ...string) {
 		}
 		return nil
 	}).Should(Succeed())
+	f.forgetGonePods()
+}
+
+// forgetGonePods removes the node's connection tracking for krm-foyer's NodePort that
+// still leads to a pod that is gone. A connection is tracked with the pod it was sent
+// to, and kube-proxy forgets TCP entries only when they time out (up to two minutes).
+// Until then a new connection from the same client port can follow the old entry to
+// an address nobody answers: a dial timeout. One client making thousands of connections
+// a minute, as this suite does, reuses ports that soon after a pod is replaced. So
+// whatever replaces a pod forgets it, as kube-proxy does for UDP.
+func (f *fixture) forgetGonePods() {
+	GinkgoHelper()
+	live := map[string]bool{}
+	for _, ip := range strings.Fields(f.kubectl("-n", f.foyerNamespace, "get", "pods",
+		"-o", "jsonpath={.items[*].status.podIP}")) {
+		live[ip] = true
+	}
+	_, port, err := net.SplitHostPort(f.foyerAddr)
+	Expect(err).NotTo(HaveOccurred())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "exec", f.serverContainer,
+		"conntrack", "-L", "-p", "tcp", "--orig-port-dst", port).Output()
+	Expect(err).NotTo(HaveOccurred())
+	gone := map[string]bool{}
+	for line := range strings.Lines(string(out)) {
+		// The reply's source is the pod the connection was sent to.
+		for _, field := range strings.Fields(line) {
+			if ip, ok := strings.CutPrefix(field, "src="); ok && strings.HasPrefix(ip, "10.42.") && !live[ip] {
+				gone[ip] = true
+			}
+		}
+	}
+	for ip := range gone {
+		// Exit status 1 when there was nothing left to delete.
+		_ = exec.CommandContext(ctx, "docker", "exec", f.serverContainer,
+			"conntrack", "-D", "-p", "tcp", "--orig-port-dst", port, "--reply-src", ip).Run()
+	}
 }
 
 // kubectl runs as the fixture's admin, for setup only. Nothing a spec asserts on is
