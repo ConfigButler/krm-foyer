@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/ConfigButler/krm-foyer/compare/v0.2.0...v0.3.0) (2026-10-06)
+
+
+### Features
+
+* answer an ingress's check, with identity for a domain backend ([#42](https://github.com/ConfigButler/krm-foyer/issues/42)) ([fae70b6](https://github.com/ConfigButler/krm-foyer/commit/fae70b68b0bb369ab9b74001788114181299119e))
+
+
+### Bug Fixes
+
+* **deps:** update krm-stream to 0.10.0 ([#45](https://github.com/ConfigButler/krm-foyer/issues/45)) ([3d4b8f0](https://github.com/ConfigButler/krm-foyer/commit/3d4b8f0c473a578a5a40bb50449c16ba07be7d89))
+
+
+### Documentation
+
+* list the chart on Artifact Hub with its repository ID and widget ([#41](https://github.com/ConfigButler/krm-foyer/issues/41)) ([6f4efff](https://github.com/ConfigButler/krm-foyer/commit/6f4efff9681b7a6870f69a5d8980ab7bf4bbff43))
+
 ## [0.2.0](https://github.com/ConfigButler/krm-foyer/compare/v0.1.0...v0.2.0) (2026-10-05)
 
 
