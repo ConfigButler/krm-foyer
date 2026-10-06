@@ -31,12 +31,15 @@ GATEWAY="${GATEWAY:-172.29.250.1}"
 # API server all use one issuer URL.
 DEX_HOST="dex.localhost"
 ISSUER_HOST="issuer.krm-foyer.test"
+# Room Pass's issuer (room-pass.sh): Traefik's address, for the room-pass.localhost route.
+ROOM_PASS_HOST="room-pass.localhost"
 ISSUER_URL="https://$ISSUER_HOST:8443"
 # Fixed ClusterIPs in k3s's default Service range (10.43.0.0/16). The API server runs on
 # the node, not in a pod, so it cannot use cluster DNS; host_aliases below puts these in
 # the node's /etc/hosts, and in CoreDNS for pods.
 DEX_SERVICE_IP="10.43.200.10"
 ISSUER_SERVICE_IP="10.43.200.11"
+ROOM_PASS_SERVICE_IP="10.43.200.12"
 VOLUME="${CLUSTER_NAME}-config"
 SERVER_CONTAINER="k3d-${CLUSTER_NAME}-server-0"
 # The same k3s release gitops-reverser's e2e runs on.
@@ -190,7 +193,7 @@ host_aliases() {
     kubectl -n kube-system rollout status deployment/coredns --timeout=90s >/dev/null
   fi
 }
-host_aliases "$DEX_SERVICE_IP:$DEX_HOST" "$ISSUER_SERVICE_IP:$ISSUER_HOST"
+host_aliases "$DEX_SERVICE_IP:$DEX_HOST" "$ISSUER_SERVICE_IP:$ISSUER_HOST" "$ROOM_PASS_SERVICE_IP:$ROOM_PASS_HOST"
 
 echo "== issuers: Dex at https://$DEX_HOST:5556, test issuer at $ISSUER_URL"
 # The test issuer serves its discovery document and the public half of the signing key.

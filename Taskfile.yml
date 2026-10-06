@@ -76,11 +76,12 @@ tasks:
       - test/e2e/cluster/install-traefik.sh
 
   e2e-deploy:
-    desc: "Build the image, deploy krm-foyer into the e2e fixture (as cluster-admin bait), and put the hello example in front of it."
+    desc: "Build the image, deploy krm-foyer into the e2e fixture (as cluster-admin bait), put the hello example in front of it, and Room Pass's QR login beside it."
     deps: [image]
     cmds:
       - IMAGE={{.IMAGE}}:{{.VERSION}} test/e2e/cluster/deploy-foyer.sh
       - test/e2e/cluster/front-door.sh
+      - test/e2e/cluster/room-pass.sh
 
   demo:
     desc: "Start the hello example in a disposable cluster, for a browser on this machine. task e2e-down removes it."
@@ -127,6 +128,7 @@ tasks:
       # The schema and the rendered arguments are tested in cmd/krm-foyer/chart_test.go.
       - helm lint --strict charts/krm-foyer -f test/e2e/cluster/foyer-values.yaml
       - helm lint --strict charts/krm-foyer -f test/e2e/cluster/foyer-values.yaml -f test/e2e/cluster/foyer-brief-values.yaml
+      - helm lint --strict charts/krm-foyer -f test/e2e/cluster/foyer-room-values.yaml
 
   fmt:
     desc: "Format the Go code."

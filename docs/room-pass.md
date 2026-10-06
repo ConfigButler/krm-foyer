@@ -6,11 +6,14 @@ name, and arrive signed in. Voter asked for this in the
 [implementer feedback](implementer-feedback.md) (entry 2), as the release evidence its
 audience-release plan requires before switching to krm-foyer.
 
-**Status: written, not yet run end to end.** Every name, header and route below comes
-from Room Pass 2.0.0's own files (`docs/qr-join.md`, `deploy/`) and from krm-foyer's
-configuration. No journey has run against the two together yet. The
-[last section](#proving-it) says what running it takes, and which parts krm-foyer's e2e
-suite already covers with Dex's static users.
+**Status: run end to end (2026-10-06)** against Room Pass 2.0.0's released image
+(`ghcr.io/sunib/room-pass:2.0.0`, revision `2185782`, pinned by digest) and its CRDs,
+behind its own Dex, in the e2e fixture, by a real Chromium
+([room_pass_test.go](../test/e2e/room_pass_test.go), fixture in
+[room-pass.sh](../test/e2e/cluster/room-pass.sh)). [What runs](#what-the-e2e-suite-runs)
+lists each check. Running it corrected three details of the first version of this page:
+how Room Pass signs out, which the recipe got wrong; the code's `SameSite=Lax`, which a
+typed URL does not test; and the display name, which arrives folded.
 
 ## The journey
 
@@ -22,15 +25,23 @@ QR code ─► <app>/join-room?code=K7Q2      the application's endpoint, on krm
              ─► Room Pass /join on krm-foyer's host: the code is filled in from the
                 cookie, the participant types a display name
              ─► Dex ─► /auth/callback (krm-foyer) ─► 303 /room
-           /auth/session: {"displayName": "...", "groups": ["demo:my-talk"], "connector": "room-pass"}
+           /auth/session: {"displayName": "Ada-Lovelace", "groups": ["demo:my-talk"], "connector": "room-pass"}
 ```
+
+The display name is the one Room Pass stores: what the participant typed, folded to
+letters, digits and dashes (`Ada Lovelace` becomes `Ada-Lovelace`), as its join page
+shows before they continue. The email is made from it, `ada-lovelace@koudijs.dev.test`.
 
 Three programs share one host: the application, krm-foyer, and Room Pass's `/join`,
 `/bind` and `/logout`. That is the point most likely to break. Room Pass's join cookie
 reaches `/join` only when the application set it on the same host
-(`__Host-` cookies have no `Domain`). If the hosts differ, the flow does not fail. It
-quietly falls back to asking the participant to type the code. Only a browser test
-catches that.
+(`__Host-` cookies have no `Domain`), and with `SameSite=Lax`. If either is wrong, the
+flow does not fail. It quietly falls back to asking the participant to type the code.
+Only a browser test catches that, and only one that opens the QR URL the way a scanner
+hands it on: from a link, another site's navigation. A URL typed into the address bar,
+or opened by a test driver's own navigation, carries even a `Strict` cookie through the
+issuer's redirects, so it passes with the mistake Room Pass warns about. The e2e spec
+follows a link from another site, and fails with `Strict` (checked by changing it).
 
 ## The join endpoint stays the application's
 
@@ -44,7 +55,10 @@ The application keeps a small endpoint that follows Room Pass's
 - `Secure`, `HttpOnly`, `Path=/`, **`SameSite=Lax`**: `Strict` breaks the flow, because
   the cookie must survive the redirects through the issuer host;
 - a lifetime of a few minutes; `/join` expires it when it uses it;
-- never logged, and never in the authorization request.
+- never logged, and never in the authorization request. The code is in the QR URL's
+  query, so that includes the edge's access log for that route: in Traefik,
+  `observability: {accessLogs: false}` on its own route; in nginx, `access_log off` in
+  its `location`.
 
 ```go
 // GET /join-room?code=K7Q2: the QR code's target. Voter's is voter/oidc.go:401-484.
@@ -97,8 +111,10 @@ The ID token from a Room Pass login carries `name` (the display name), `email`
 `demo:my-talk`) and `federated_claims.connector_id: room-pass`. Room Pass's reference
 API-server configuration (`deploy/apiserver/authentication-config.yaml`) maps the
 username to `demo:<sub>`, requires `connector_id in ['room-pass']`, and requires every
-group to start with `demo:`. Whatever the mapping, `/auth/whoami` and
-`Krm-Foyer-Identity` show the name it produced.
+group to start with `demo:`. The e2e fixture uses those rules, and also requires the
+token's client to be krm-foyer, by the rules of the
+[browser identity](application-scope.md#a-browser-identity-in-kubernetes). Whatever the
+mapping, `/auth/whoami` and `Krm-Foyer-Identity` show the name it produced.
 
 ## The edge: one host, four owners
 
@@ -112,33 +128,63 @@ group to start with `demo:`. Whatever the mapping, `/auth/whoami` and
 
 Room Pass's issuer host (`login.example.com`) goes to Room Pass entirely; it forwards
 only Dex's protocol paths to Dex, and nothing may expose Dex's Service directly. The
-edge strips `X-Remote-*` from every request, as Room Pass's own
+edge strips `X-Remote-*` from every request it sends Room Pass, as Room Pass's own
 `deploy/edge/traefik/middlewares.yaml` does: Dex's `authproxy` connector believes those
-headers. In Traefik that is the [IngressRoute recipe](ingress.md#recipes) plus Room
-Pass's routes.
+headers. A NetworkPolicy lets only Room Pass's pods reach Dex. In Traefik that is the
+[IngressRoute recipe](ingress.md#recipes) plus Room Pass's routes; the fixture's are in
+[routes.yaml](../test/e2e/cluster/room-pass/routes.yaml). The API server, and krm-foyer,
+fetch the issuer's discovery and keys at the issuer's host too, so it has to resolve
+and be reachable from the control plane and from pods, not only from browsers.
 
-**Logout is two programs.** krm-foyer's `POST /auth/logout` ends the krm-foyer session.
-Room Pass's `/logout` ends its participant binding. Call krm-foyer's first, then send the
-browser to Room Pass's.
+**Logout is two programs, each with its own contract.**
 
-## Proving it
+- krm-foyer's `POST /auth/logout`, with the session's CSRF proof, clears krm-foyer's
+  session cookie and ends the session's open streams.
+- Room Pass's `/logout` accepts only a `POST` with Room Pass's own CSRF token, which only
+  its join page holds: a redirect or a link to it is refused with 403. So after
+  krm-foyer's logout, send the browser to `/join`. An enrolled participant sees
+  "You're already enrolled as …" and a **Sign out of this browser** button, which posts
+  to `/logout`, clears Room Pass's `__Host-rp-session` and returns to `/join`, now asking
+  for a code.
 
-The audience-release plan's checks, against a Room Pass login:
+Neither revokes anything. A copy of krm-foyer's cookie taken before its logout is still
+a session until it expires ([Sessions](design.md#sessions)), and the e2e spec checks
+exactly that. Room Pass's session cookie is sealed the same way, and the participant
+stays enrolled, so the name they chose stays taken: signing in again means joining
+under another name. An ID token already issued stays valid at the API server until it
+expires. To shut a participant out, revoke the Participant in Room Pass and let the
+token's lifetime pass, or end the Room.
 
-| Check | krm-foyer side, already proved with Dex static users |
+## What the e2e suite runs
+
+[room_pass_test.go](../test/e2e/room_pass_test.go) drives Chromium through the
+fixture's two hosts, `room.localhost` (the application, krm-foyer-room and Room Pass's
+`/join`) and `room-pass.localhost` (the issuer), both through Traefik. The fixture
+([room-pass.sh](../test/e2e/cluster/room-pass.sh), [room-pass/](../test/e2e/cluster/room-pass/))
+has Room Pass and its Dex with the `authproxy` connector, the CRDs and a Room, cookie
+keys and RBAC, certificates from the fixture CA, the API server trusting the issuer as a
+third JWT issuer under Room Pass's reference rules, the routes of the table above, and
+a test application whose `/join-room` implements the cookie contract in nginx. Nothing
+Room Pass's is in krm-foyer: krm-foyer-room is the chart with the generic settings
+above ([foyer-room-values.yaml](../test/e2e/cluster/foyer-room-values.yaml)).
+
+| Release check | What the spec does |
 | --- | --- |
-| The login itself, `connector: room-pass` in `/auth/session` | Login parameters reach Dex as configured and refuse others; `sessionClaims.connector` (`foyer_identity_test.go`) |
-| Display metadata | `/auth/session`'s `displayName`, `/auth/whoami`'s extras, `Krm-Foyer-Identity` (`foyer_identity_test.go`, `foyer_check_test.go`) |
-| A write attributed through both extras | Admission and the audit event of a write carry both extras (`foyer_identity_test.go`) |
-| A pod replacement keeps the session | Sessions are sealed cookies; the rehearsal restarts krm-foyer under 1,800 streams |
-| Logout | Logout clears the cookie and ends the session's open streams (`foyer_auth_test.go`, `foyer_stream_test.go`) |
+| The QR journey | Takes the Room's current code as `cmd/room-qr` does, from its status, and follows `https://room.localhost:8443/join-room?code=…` from a link on another site. Expects Room Pass's join page on the shared host with the code shown as scanned and no code field, and the code in no URL but the QR code's own: not in the authorization request, not in Room Pass's handoff URLs. Types a display name and expects to arrive at `/room/` |
+| The silent fallback | The same login without the join cookie shows the code field, so the check above can fail. Changing the cookie to `SameSite=Strict` makes it fail with "Room Pass asked for the room code" |
+| Display metadata | `/auth/session` has `connector: room-pass`, the folded display name, the made-up email and the Room's audience group |
+| A write attributed through both extras | `/auth/whoami` shows `demo:<Dex subject>`, never the typed name, the audience group and both extras. A ConfigMap created from the page with the session's CSRF proof, under a grant to the audience group, has both extras in its audit event, and no impersonation. A Secret, not granted, is the API server's 403 naming that user |
+| A pod replacement keeps the session | krm-foyer-room is restarted; the browser's session, its claims and a write still work, with no new login |
+| Logout | krm-foyer's `POST /auth/logout`, then Room Pass's sign-out form on `/join`; each cookie is gone, and a new scan asks for a display name again. A copy of krm-foyer's cookie taken before logout still answers `/auth/session`: logout revokes nothing |
+| No credential leaks | No page script sees a cookie or storage; no response header or URL the browser saw, nor `/auth/session` or `/auth/whoami`, holds a JWT; krm-foyer-room's, Room Pass's and the application's logs hold no JWT, no cookie value and no join code |
 
-What is not proved is the part that is Room Pass's: the cookie crossing to `/join` on the
-shared host, the `authproxy` connector's claims arriving in krm-foyer's session, and
-`SameSite=Lax` holding through the issuer host's redirects. Running that needs, in the
-e2e fixture: a second Dex in front of Room Pass's public `ghcr.io/sunib/room-pass:2.0.0`
-image, as in Room Pass's `deploy/` (the fixture's Dex cannot take an `authproxy`
-connector, as its port is reachable directly and anyone could forge the headers); an
-issuer host for it, with the API server trusting it as a third JWT issuer; Room Pass's
-CRDs, a Room and its cookie Secret; the routes above; and a Chromium spec walking the QR
-URL. That is a fixture change of a day or two, and it should be its own pull request.
+A second spec checks the `authproxy` boundary. From a pod labelled as Room Pass in its
+namespace, Dex answers; from a pod with another label there, or with Room Pass's label in
+another namespace, the connection is refused: k3s enforces the NetworkPolicy, and
+deleting it makes the spec fail. Through the edge, a login followed with forged
+`X-Remote-*` headers on every request ends at Room Pass's join form and never at
+krm-foyer's callback, and Room Pass's callback and completion paths refuse such a request
+outright.
+
+Not run: a phone. The browser is Chromium, which is what Room Pass's own browser test
+uses too; Safari's handling of `SameSite` and of a camera-opened URL is not covered.

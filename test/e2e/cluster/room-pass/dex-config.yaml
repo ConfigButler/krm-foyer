@@ -1,0 +1,36 @@
+# Room Pass's Dex (deploy/example/dex-config.yaml), with krm-foyer as its client.
+# room-pass.sh fills in the hosts.
+issuer: https://ROOM_PASS_HOST
+storage:
+  type: sqlite3
+  config:
+    file: /var/dex/dex.db
+# No rotation while a fixture lives: a new key means minutes of refused tokens until the
+# API server fetches it.
+expiry:
+  signingKeys: 8760h
+web:
+  http: 0.0.0.0:5556
+oauth2:
+  skipApprovalScreen: true
+staticClients:
+  # krm-foyer-room (foyer-room-values.yaml) on the application's host. It asks for the
+  # groups and federated:id scopes: the API server refuses a token without
+  # federated_claims.
+  - id: krm-foyer
+    name: krm-foyer
+    secret: krm-foyer-room-e2e-secret
+    redirectURIs:
+      - https://ROOM_HOST/auth/callback
+connectors:
+  # The only connector Room Pass works with; its id sets the callback path Room Pass
+  # serves, /callback/room-pass.
+  - type: authproxy
+    id: room-pass
+    name: Join the room
+    config:
+      userIDHeader: X-Remote-User-Id
+      userHeader: X-Remote-User
+      userNameHeader: X-Remote-User-Name
+      emailHeader: X-Remote-User-Email
+      groupHeader: X-Remote-Group

@@ -188,8 +188,9 @@ Security items need tests that try to get past the boundary.
       nginx and Traefik recipes
 - [x] Identity from the check for a domain backend, never the token
       (`?identity=true`, `Krm-Foyer-Identity`), asked for by Voter
-- [ ] Room Pass's QR login run end to end through krm-foyer: a
-      [recipe](room-pass.md) exists; the fixture needs Room Pass's own Dex and a browser spec
+- [x] Room Pass's QR login run end to end through krm-foyer: Room Pass 2.0.0 and its
+      Dex in the fixture, and a Chromium spec from the QR code to logout, with the
+      release checks Voter's plan asks for. See [room-pass.md](room-pass.md)
 
 ### Access
 

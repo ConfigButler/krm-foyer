@@ -117,6 +117,7 @@ FOYER_ADDR=$server_ip:$NODE_PORT
 FOYER_BRIEF_ADDR=$server_ip:$BRIEF_NODE_PORT
 FOYER_NGINX_ADDR=$server_ip:$NGINX_NODE_PORT
 FOYER_NAMESPACE=krm-foyer
+FOYER_IMAGE=$tag
 FOYER_SERVICE_ACCOUNT=system:serviceaccount:krm-foyer:krm-foyer
 FOYER_SHARED_ACCOUNT=system:serviceaccount:krm-foyer:krm-foyer-shared
 EOF

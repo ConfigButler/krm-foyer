@@ -1,0 +1,22 @@
+# The event: one Room, which Room Pass serves (ROOM_NAME e2e). room-pass.sh fills in
+# the host and when it ends, a month from each run. Its join code rotates every 30
+# seconds and stays valid for 120, as Room Pass's docs/qr-join.md advises for a QR flow.
+apiVersion: room-pass.koudijs.dev/v1alpha1
+kind: Room
+metadata:
+  name: e2e
+  namespace: room-pass
+spec:
+  title: krm-foyer e2e
+  attributionNote: Your name labels the changes you make in the e2e suite.
+  endsAt: "ENDS_AT"
+  enrollment: Open
+  maxParticipants: 1000
+  # Every participant's group; the suite binds its grants to it.
+  audienceGroup: demo:krm-foyer-e2e
+  allowedReturnURLs:
+    - https://ROOM_HOST/
+  joinCode:
+    rotateEvery: 30s
+    validFor: 120s
+    length: 6

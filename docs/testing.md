@@ -423,6 +423,19 @@ and VS Code forwards both ports to the machine the browser runs on, keeping thei
 wherever Docker runs. A port-forward follows one pod: when Dex or Traefik rolls,
 run `test/e2e/cluster/port-forward.sh` (or `task e2e-deploy`) again.
 
+[room-pass.sh](../test/e2e/cluster/room-pass.sh) adds Room Pass's QR login
+([room-pass.md](room-pass.md)) on two more hosts through the same Traefik:
+`room.localhost`, which krm-foyer-room (a third release of the chart, signing in at Room
+Pass's Dex), Room Pass's `/join`, `/bind` and `/logout`, and a test application with the
+QR entry point `/join-room` share; and `room-pass.localhost`, Room Pass's issuer. Room
+Pass 2.0.0 and its own Dex, with the `authproxy` connector, a NetworkPolicy that only
+Room Pass passes, SQLite on a volume, Room Pass's CRDs and a Room, all in
+[room-pass/](../test/e2e/cluster/room-pass/). The API server trusts that Dex as a third
+JWT issuer, which it and krm-foyer-room reach at `room-pass.localhost:8443`: a Service
+with a fixed address in front of Traefik. Everything Room Pass's lives in the fixture;
+krm-foyer-room has only the chart's generic login settings. A browser reaches both hosts
+through the front door's port-forward, as `*.localhost` resolves to loopback.
+
 The test issuer is nginx serving a discovery document and a JWKS. The suite holds its
 signing key (`.e2e/issuer-signing.key`), so it can mint tokens with claims Dex never
 issues. Use it for claims; use Dex for anything a real login would do.
@@ -433,7 +446,9 @@ Dex has two demo users, `alice@example.com` and `bob@example.com` (password
 `krm-foyer`, whose tokens the cluster accepts; `kubectl`, the operator's command line,
 whose tokens it accepts under another name, `kubectl:alice@example.com`, as a
 [browser identity](application-scope.md#a-browser-identity-in-kubernetes) needs; and
-`other-app`, whose tokens it must reject.
+`other-app`, whose tokens it must reject. `kubectl` trusts `krm-foyer` as a peer, so
+krm-foyer can ask for its audience with Dex's cross-client scope, and the suite checks
+that such a token is still the browser's.
 
 ```bash
 task e2e-up     # start or reuse the fixture, with Traefik (about a minute the first time)
