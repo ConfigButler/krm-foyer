@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Room Pass's QR login in the e2e fixture (docs/room-pass.md): Room Pass 2.0.0 and the
+# Room Pass's QR login in the e2e fixture (docs/room-pass.md): Room Pass 2.1.0 and the
 # Dex behind it (room-pass/room-pass.yaml), its CRDs and a Room, a test application with
 # the QR entry point (room-pass/room-app.yaml), the two hosts' routes in Traefik
 # (room-pass/routes.yaml), and a third krm-foyer on the application's host
@@ -11,9 +11,9 @@
 # Writes E2E_DIR/room-env: where the suite finds it.
 set -euo pipefail
 
-# Room Pass 2.0.0 (2185782f6f349731909eafdb290007bc3feb168c), the release
+# Room Pass 2.1.0 (df2070d0ed55ba110e9716efd76479b2db4a922b), the release
 # room-pass/crds.yaml is from.
-ROOM_PASS_IMAGE="ghcr.io/sunib/room-pass:2.0.0@sha256:eb5fee5161e52eb6de3983c811ddc883838cbee1dfea33fb013374696e189416"
+ROOM_PASS_IMAGE="ghcr.io/sunib/room-pass:2.1.0@sha256:346b4422278dc7b2f6f2f20d52bee59874916e3021fb477321c0aacca19e58de"
 # The same Dex and nginx as start-cluster.sh.
 DEX_IMAGE="ghcr.io/dexidp/dex:v2.45.1@sha256:8499afd690c437f52301efd2b05b2455da5bd2dfc20332cd697dc9937f808462"
 NGINX_IMAGE="nginx:1.31.6-alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2"

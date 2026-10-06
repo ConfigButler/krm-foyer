@@ -6,8 +6,8 @@ name, and arrive signed in. Voter asked for this in the
 [implementer feedback](implementer-feedback.md) (entry 2), as the release evidence its
 audience-release plan requires before switching to krm-foyer.
 
-**Status: run end to end (2026-10-06)** against Room Pass 2.0.0's released image
-(`ghcr.io/sunib/room-pass:2.0.0`, revision `2185782`, pinned by digest) and its CRDs,
+**Status: run end to end (2026-10-06)** against Room Pass 2.1.0's released image
+(`ghcr.io/sunib/room-pass:2.1.0`, revision `df2070d`, pinned by digest) and its CRDs,
 behind its own Dex, in the e2e fixture, by a real Chromium
 ([room_pass_test.go](../test/e2e/room_pass_test.go), fixture in
 [room-pass.sh](../test/e2e/cluster/room-pass.sh)). [What runs](#what-the-e2e-suite-runs)

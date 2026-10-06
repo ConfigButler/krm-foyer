@@ -1,6 +1,6 @@
-# Room Pass's CRDs, as released in v2.0.0 (2185782f6f349731909eafdb290007bc3feb168c,
-# config/crd/), the release whose image room-pass.yaml pins. Copied unchanged; replace
-# both together.
+# Room Pass's CRDs, as released in v2.1.0 (df2070d0ed55ba110e9716efd76479b2db4a922b,
+# config/crd/bases/), the release whose image room-pass.yaml pins. Copied unchanged;
+# replace both together.
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -67,6 +67,59 @@ spec:
                 x-kubernetes-validations:
                 - message: allowedReturnURLs is immutable
                   rule: self == oldSelf
+              appearance:
+                description: |-
+                  Appearance dresses the join page for this event. Empty, the page looks
+                  as it always has.
+
+                  Pictures are paths on the join host, because the join page admits images
+                  from its own origin only. Serve them there without a login: participants
+                  have not signed in yet.
+
+                  Like any spec change, editing it starts a fresh join-code epoch, which
+                  invalidates the code on screen. Set it before the event.
+                properties:
+                  accentColor:
+                    description: |-
+                      AccentColor fills the buttons and outlines focused fields, as #rrggbb.
+                      The button text is white or near-black, whichever contrasts more.
+                    pattern: ^#[0-9a-fA-F]{6}$
+                    type: string
+                  backgroundColor:
+                    description: |-
+                      BackgroundColor is the page behind the form, as #rrggbb. Setting it, or
+                      BackgroundImage, puts the form on a white card so it stays readable.
+                    pattern: ^#[0-9a-fA-F]{6}$
+                    type: string
+                  backgroundImage:
+                    description: |-
+                      BackgroundImage covers the page behind the form, as a path on the join
+                      host. BackgroundColor shows until it arrives. The whole room loads it at
+                      once over the venue's network, so keep it small.
+                    maxLength: 512
+                    pattern: ^/[A-Za-z0-9._~%!$&+,;=:@?-][A-Za-z0-9._~%!$&+,;=:@/?-]*$
+                    type: string
+                  picture:
+                    description: |-
+                      Picture is shown above the title, as a path on the join host such as
+                      /talks/my-talk/logo.png.
+                    maxLength: 512
+                    pattern: ^/[A-Za-z0-9._~%!$&+,;=:@?-][A-Za-z0-9._~%!$&+,;=:@/?-]*$
+                    type: string
+                  pictureAlt:
+                    description: |-
+                      PictureAlt is what a screen reader says for the picture. Empty marks it
+                      decorative.
+                    maxLength: 120
+                    pattern: ^[^<>\x00-\x1f\x7f]*$
+                    type: string
+                  tagline:
+                    description: 'Tagline is one line under the title: the event,
+                      the room, the time.'
+                    maxLength: 120
+                    pattern: ^[^<>\x00-\x1f\x7f]*$
+                    type: string
+                type: object
               attributionNote:
                 description: |-
                   AttributionNote is the operator's one sentence about what the issued
@@ -284,7 +337,6 @@ spec:
     storage: true
     subresources:
       status: {}
----
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition

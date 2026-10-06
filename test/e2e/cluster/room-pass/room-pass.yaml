@@ -1,4 +1,4 @@
-# Room Pass 2.0.0 and the Dex behind it, as Room Pass's own reference deployment
+# Room Pass 2.1.0 and the Dex behind it, as Room Pass's own reference deployment
 # (deploy/base, deploy/dex) has them, with the fixture's names. room-pass.sh fills in
 # the images, the hosts and the configuration hash, and creates the ConfigMap `dex` and
 # the Secret `room-pass-cookie`.
@@ -134,7 +134,9 @@ spec:
       targetPort: http
 ---
 # Dex as Room Pass's issuer, from deploy/dex: one replica on SQLite, so its signing keys
-# outlive a restart of the pod.
+# outlive a restart of the pod. Room Pass 2.1.0's deploy/dex keeps that state in
+# Kubernetes instead (dex.coreos.com resources, CRDs in deploy/dex-crds); the fixture
+# keeps the volume, which needs no CRDs vendored to match the Dex image.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
