@@ -22,7 +22,7 @@ NGINX_IMAGE="nginx:1.31.6-alpine@sha256:df221db836e1754089190208cee7eeda94f23319
 ROOM_HOST="room.localhost:8443"
 ROOM_PASS_HOST="room-pass.localhost:8443"
 # The issuer's address for the API server and pods; start-cluster.sh maps the name here.
-ROOM_PASS_SERVICE_IP="10.43.200.12"
+ROOM_PASS_SERVICE_IP="10.43.0.212"
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"

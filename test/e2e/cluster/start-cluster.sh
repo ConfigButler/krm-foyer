@@ -39,7 +39,10 @@ ISSUER_URL="https://$ISSUER_HOST:8443"
 # the node's /etc/hosts, and in CoreDNS for pods.
 DEX_SERVICE_IP="10.43.200.10"
 ISSUER_SERVICE_IP="10.43.200.11"
-ROOM_PASS_SERVICE_IP="10.43.200.12"
+# In the band at the start of the Service range that Kubernetes keeps for fixed
+# addresses: this Service is created late (room-pass.sh), after the cluster has handed
+# out addresses of its own, and one could already be 10.43.200.12.
+ROOM_PASS_SERVICE_IP="10.43.0.212"
 VOLUME="${CLUSTER_NAME}-config"
 SERVER_CONTAINER="k3d-${CLUSTER_NAME}-server-0"
 # The same k3s release gitops-reverser's e2e runs on.
