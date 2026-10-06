@@ -129,22 +129,24 @@ func (s *Streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// The gate has found the user; the gateway only carries the credential back
 		// to Clients.
 		Principal: func(*http.Request) (gateway.Principal, error) { return a.Credential, nil },
-		// Kubernetes decides: every watch is opened with the user's own token, and
-		// the API server refuses what RBAC does not allow.
-		Authorizer: gateway.AllowAll{},
-		Clients:    u.backend,
 		// krm-foyer keeps no list of resources (docs/design.md, "Access"): what the
 		// user may watch is what the API server lets them, since every watch is
 		// theirs. The gateway still parses the scope itself and refuses one it will
 		// not serve, an API-server address or a credential among them; only the
 		// unnamed target, the one cluster, exists.
-		Scopes:      gateway.ScopePolicy{Targets: []string{""}, AnyResource: true, AllowLabelSelector: true},
-		Projections: gateway.ProjectionPolicyFunc(project),
-		Diagnostics: func(d gateway.Diagnostic) { s.diagnose(a, d) },
-		// Every write to the browser is bounded, so one that stopped reading ends its
-		// stream rather than holding it, and a shared stream's rechecks, which wait
-		// for the write in progress.
-		WriteTimeout: s.writes,
+		Scopes: gateway.ScopePolicy{Targets: []string{""}, AnyResource: true, AllowLabelSelector: true},
+		StreamConfig: gateway.StreamConfig{
+			// Kubernetes decides: every watch is opened with the user's own token, and
+			// the API server refuses what RBAC does not allow.
+			Authorizer:  gateway.AllowAll{},
+			Clients:     u.backend,
+			Projections: gateway.ProjectionPolicyFunc(project),
+			Diagnostics: func(d gateway.Diagnostic) { s.diagnose(a, d) },
+			// Every write to the browser is bounded, so one that stopped reading ends its
+			// stream rather than holding it, and a shared stream's rechecks, which wait
+			// for the write in progress.
+			WriteTimeout: s.writes,
+		},
 	}
 	// A scope the gateway refuses goes the user's way, and is refused there.
 	if scope, err := gateway.ScopeFromQuery(r.URL.Query()); err == nil && s.shared.serves(scope) {

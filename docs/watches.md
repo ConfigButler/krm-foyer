@@ -66,7 +66,7 @@ either way later: only krm-foyer's flags change, never the page.
 
 ## Choosing a projection
 
-These views are implemented in the pinned krm-stream **0.7.0** gateway, and krm-foyer
+These views are implemented in the pinned krm-stream **0.10.0** gateway, and krm-foyer
 accepts all three. Pass `projection` on `/stream/v1`; omitting it selects `krm-full/v1`.
 
 | Projection | Status | Secret values | Use when |
