@@ -8,8 +8,9 @@
 #
 # Format: https://github.com/artifacthub/hub/blob/master/docs/metadata/artifacthub-repo.yml
 #
-# Once the repository is added in the Artifact Hub control panel, its repositoryID goes
-# here to earn the Verified Publisher badge.
+# repositoryID is the ID Artifact Hub gave the repository when it was added in its
+# control panel; publishing it here earns the Verified Publisher badge.
+repositoryID: 9a991dbf-e9ce-4b3e-ada7-2b8d399e7c10
 
 # Claims repository ownership. The email must match an Artifact Hub account exactly.
 owners:
