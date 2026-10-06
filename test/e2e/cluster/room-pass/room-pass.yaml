@@ -1,0 +1,249 @@
+# Room Pass 2.0.0 and the Dex behind it, as Room Pass's own reference deployment
+# (deploy/base, deploy/dex) has them, with the fixture's names. room-pass.sh fills in
+# the images, the hosts and the configuration hash, and creates the ConfigMap `dex` and
+# the Secret `room-pass-cookie`.
+#
+#   ROOM_HOST       the application's host, which Room Pass shares: /join, /bind, /logout
+#   ROOM_PASS_HOST  the issuer's host: all Room Pass's, which forwards only Dex's
+#                   protocol paths to Dex
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: room-pass
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: room-pass
+  namespace: room-pass
+---
+# Room Pass's Role, from deploy/base/rbac.yaml: its Room, the Participants it enrolls,
+# and its cookie keys by name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: room-pass
+  namespace: room-pass
+rules:
+  - apiGroups: [room-pass.koudijs.dev]
+    resources: [rooms]
+    verbs: [get, list, watch]
+  - apiGroups: [room-pass.koudijs.dev]
+    resources: [rooms/status]
+    verbs: [get, update, patch]
+  - apiGroups: [room-pass.koudijs.dev]
+    resources: [participants]
+    verbs: [get, list, create]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [room-pass-cookie]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: room-pass
+  namespace: room-pass
+subjects:
+  - kind: ServiceAccount
+    name: room-pass
+    namespace: room-pass
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: room-pass
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: room-pass
+  namespace: room-pass
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: room-pass
+  template:
+    metadata:
+      labels:
+        app: room-pass
+      annotations:
+        krm-foyer.test/config-hash: CONFIG_HASH
+    spec:
+      serviceAccountName: room-pass
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: room-pass
+          image: ROOM_PASS_IMAGE
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          env:
+            # The Room this instance serves, in its own namespace (room.yaml).
+            - name: ROOM_NAME
+              value: e2e
+            - name: ROOM_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: DEX_UPSTREAM
+              value: http://dex:5556
+            # Origins, port included: Room Pass routes by Host, and the browser's Host
+            # carries the port of the front door.
+            - name: JOIN_ORIGIN
+              value: https://ROOM_HOST
+            - name: ISSUER_ORIGIN
+              value: https://ROOM_PASS_HOST
+            - name: ALLOWED_RETURN_URLS
+              value: https://ROOM_HOST/
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: room-pass
+  namespace: room-pass
+spec:
+  selector:
+    app: room-pass
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# Dex as Room Pass's issuer, from deploy/dex: one replica on SQLite, so its signing keys
+# outlive a restart of the pod.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dex
+  namespace: room-pass
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: room-pass
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dex
+  template:
+    metadata:
+      labels:
+        app: dex
+      annotations:
+        krm-foyer.test/config-hash: CONFIG_HASH
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dex
+          image: DEX_IMAGE
+          args: [dex, serve, /etc/dex/config.yaml]
+          ports:
+            - name: http
+              containerPort: 5556
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dex
+              readOnly: true
+            - name: data
+              mountPath: /var/dex
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          readinessProbe:
+            httpGet:
+              path: /.well-known/openid-configuration
+              port: http
+            periodSeconds: 2
+      volumes:
+        - name: config
+          configMap:
+            name: dex
+        - name: data
+          persistentVolumeClaim:
+            claimName: dex
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+---
+# Cluster-internal only: nothing routes to it, and Room Pass forwards only Dex's protocol
+# paths to it from the issuer's host.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+  namespace: room-pass
+spec:
+  selector:
+    app: dex
+  ports:
+    - name: http
+      port: 5556
+      targetPort: http
+---
+# The boundary that makes the authproxy connector safe (deploy/dex/networkpolicy.yaml):
+# authproxy believes the X-Remote-* headers on its callback, so only Room Pass, which
+# sets them after enrolling a participant, may reach Dex at all. k3s enforces
+# NetworkPolicy; the suite checks that another pod cannot connect, and that a pod
+# labelled as Room Pass can.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dex-only-from-room-pass
+  namespace: room-pass
+spec:
+  podSelector:
+    matchLabels:
+      app: dex
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: room-pass
+      ports:
+        - protocol: TCP
+          port: 5556

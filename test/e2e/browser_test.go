@@ -41,6 +41,13 @@ func (f *fixture) browser() *browser { return f.browserVia(f.client.Transport) }
 // briefBrowser reaches the brief krm-foyer, whose sessions end within a minute.
 func (f *fixture) briefBrowser() *browser { return f.browserVia(f.briefTransport) }
 
+// frontDoorBrowser reaches the origin through Traefik, with the routes behind
+// /auth/check (traefik-routes.yaml) as well as krm-foyer's own.
+func (f *fixture) frontDoorBrowser() *browser { return f.browserVia(f.frontDoorTransport) }
+
+// nginxBrowser reaches the origin through docs/ingress.md's nginx recipe.
+func (f *fixture) nginxBrowser() *browser { return f.browserVia(f.nginxTransport) }
+
 func (f *fixture) browserVia(transport http.RoundTripper) *browser {
 	jar, err := cookiejar.New(nil)
 	Expect(err).NotTo(HaveOccurred())

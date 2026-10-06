@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/json"
 	"io"
@@ -9,9 +10,12 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	authenticationv1 "k8s.io/api/authentication/v1"
 
 	"github.com/ConfigButler/krm-foyer/internal/gate"
 	"github.com/ConfigButler/krm-foyer/internal/interruption"
@@ -162,4 +166,154 @@ func TestWhoAmIFailsClosed(t *testing.T) {
 	if n := redirected.Load(); n != 0 {
 		t.Fatalf("the redirect was followed %d times", n)
 	}
+}
+
+// identifyFoyer serves Identify from api behind a gate with creds, answering 204 when
+// it names the user, with the identities' clock at *now.
+func identifyFoyer(t *testing.T, api *apiServer, creds gate.Credentials, now *time.Time) (*Streams, *httptest.Server) {
+	t.Helper()
+	g, err := gate.New(gate.Config{Credentials: creds})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, _ := url.Parse(api.URL)
+	roots := x509.NewCertPool()
+	roots.AddCert(api.Certificate())
+	s, err := New(Config{Server: server, RootCAs: roots, Gate: g})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.identities = newIdentities(func() time.Time { return *now })
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if info, ok := s.Identify(w, r); ok {
+			w.Header().Set("X-User", info.Username)
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	t.Cleanup(front.Close)
+	return s, front
+}
+
+// /auth/check may be asked on every request to a domain backend. One review answers
+// a token's checks for IdentityTTL, never past the session's end, and never for
+// another token; a failure is not kept, and the next check asks again.
+func TestIdentifyReusesAnAnswer(t *testing.T) {
+	now := sessionEnd.Add(-time.Hour)
+	api := newSharedAPI(t)
+	creds := &switchable{token: userToken}
+	_, front := identifyFoyer(t, api.apiServer, creds, &now)
+	reviews := func() int {
+		n := 0
+		for _, r := range api.received() {
+			if strings.HasSuffix(r.URL.Path, "/selfsubjectreviews") {
+				n++
+			}
+		}
+		return n
+	}
+	check := func() (int, string) {
+		code, header, _ := getWhoami(t, front, nil)
+		return code, header.Get("X-User")
+	}
+
+	for range 3 {
+		if code, user := check(); code != http.StatusNoContent || user != "oidc:alice@example.com" {
+			t.Fatalf("%d %q", code, user)
+		}
+	}
+	if n := reviews(); n != 1 {
+		t.Fatalf("%d reviews for three checks of one token, want 1", n)
+	}
+
+	creds.set(otherToken)
+	if _, user := check(); user != "oidc:bob@example.com" {
+		t.Fatalf("another token was answered as %q", user)
+	}
+	if n := reviews(); n != 2 {
+		t.Fatalf("%d reviews, want another token to be asked about", n)
+	}
+
+	creds.set(userToken)
+	now = now.Add(IdentityTTL)
+	check()
+	if n := reviews(); n != 3 {
+		t.Fatalf("%d reviews, want the answer to expire after IdentityTTL", n)
+	}
+
+	// Within IdentityTTL of the session's end, the answer lasts only until that end.
+	now = sessionEnd.Add(-IdentityTTL / 2)
+	check()
+	now = sessionEnd.Add(-time.Nanosecond)
+	check()
+	if n := reviews(); n != 4 {
+		t.Fatalf("%d reviews, want one answer to the end of the session", n)
+	}
+
+	api.ssr = status(http.StatusInternalServerError, "InternalError", "etcd")
+	now = now.Add(-time.Minute) // a new answer is needed: the last expired at the session's end
+	creds.set(otherToken)       // its answer expired long ago
+	for range 2 {
+		if code, _ := check(); code != http.StatusServiceUnavailable {
+			t.Fatalf("a failing API server: %d", code)
+		}
+	}
+	if n := reviews(); n != 6 {
+		t.Fatalf("%d reviews, want a failure to be asked again, not kept", n)
+	}
+}
+
+// The answers kept are bounded: past the bound, a check asks the API server rather
+// than keep one more, and expired answers make room.
+func TestIdentitiesAreBounded(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	c := newIdentities(func() time.Time { return now })
+	c.max = 2
+	end := now.Add(time.Hour)
+	c.put("a", authenticationv1.UserInfo{Username: "a"}, end)
+	c.put("b", authenticationv1.UserInfo{Username: "b"}, end)
+	c.put("c", authenticationv1.UserInfo{Username: "c"}, end)
+	if _, ok := c.get("c"); ok {
+		t.Fatal("kept an answer past the bound")
+	}
+	if info, ok := c.get("a"); !ok || info.Username != "a" {
+		t.Fatal("lost an answer within the bound")
+	}
+	now = now.Add(IdentityTTL)
+	c.put("c", authenticationv1.UserInfo{Username: "c"}, end)
+	if info, ok := c.get("c"); !ok || info.Username != "c" {
+		t.Fatal("expired answers did not make room")
+	}
+	if len(c.entries) != 1 {
+		t.Fatalf("%d answers kept, want the expired ones gone", len(c.entries))
+	}
+	if _, kept := c.entries[sha256.Sum256([]byte("c"))]; !kept {
+		t.Fatal("an answer is kept under something other than its token's hash")
+	}
+
+	// A copy goes out: what a caller does to it changes nothing kept.
+	c.put("d", authenticationv1.UserInfo{Username: "d", Groups: []string{"g"}}, end)
+	got, _ := c.get("d")
+	got.Groups[0] = "system:masters"
+	if again, _ := c.get("d"); again.Groups[0] != "g" {
+		t.Fatal("a caller changed a kept answer")
+	}
+}
+
+// switchable is a credential whose token a test can change.
+type switchable struct {
+	mu    sync.Mutex
+	token string
+}
+
+func (c *switchable) set(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.token = token
+}
+
+func (c *switchable) Token(*http.Request) (gate.Credential, *interruption.Interruption) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return gate.Credential{Token: c.token, User: "u", Session: c.token, Expires: sessionEnd,
+		Live: func(context.Context) bool { return true }}, nil
 }

@@ -1,0 +1,72 @@
+# The test application's nginx (room-app-nginx.conf). room-pass.sh fills in the image and
+# the configuration hash, and creates the ConfigMap and the Secret.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: room-app
+  namespace: fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: room-app
+  template:
+    metadata:
+      labels:
+        app: room-app
+      annotations:
+        krm-foyer.test/config-hash: CONFIG_HASH
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: NGINX_IMAGE
+          command: [nginx, -c, /etc/room-app/config/nginx.conf, -g, "daemon off;"]
+          ports:
+            - name: https
+              containerPort: 8443
+          readinessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/room-app/config
+              readOnly: true
+            - name: tls
+              mountPath: /etc/room-app/tls
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: room-app
+        - name: tls
+          secret:
+            secretName: room-app-tls
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: room-app
+  namespace: fixture
+spec:
+  selector:
+    app: room-app
+  ports:
+    - name: https
+      port: 443
+      targetPort: https

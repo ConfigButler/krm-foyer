@@ -1,0 +1,141 @@
+# The two hosts of Room Pass's QR login (docs/room-pass.md), in Traefik's IngressRoutes,
+# each in the namespace of the Service it routes to:
+#
+#   room.localhost       the application's host, shared by four owners:
+#                        /auth/ /k8s/ /stream/ /_foyer/  krm-foyer-room
+#                        /join /bind /logout (exact)     Room Pass
+#                        everything else, /join-room too  the test application (room-app)
+#   room-pass.localhost  the issuer's host: all of it Room Pass's, which forwards only
+#                        Dex's protocol paths to Dex
+#
+# A browser reaches both through the front door's port-forward, on 127.0.0.1:8443. The
+# API server and krm-foyer reach the issuer's host at the fixed address of the Service
+# room-pass-issuer below, in front of Traefik (start-cluster.sh puts its name there).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-identity-headers
+  namespace: room-pass
+spec:
+  # Room Pass's deploy/edge/traefik/middlewares.yaml: Dex's authproxy connector turns
+  # X-Remote-* into an identity, so nothing from a browser may carry them. Room Pass
+  # removes them too; this is the outer of the two controls.
+  headers:
+    customRequestHeaders:
+      X-Remote-User: ""
+      X-Remote-User-Id: ""
+      X-Remote-User-Name: ""
+      X-Remote-User-Email: ""
+      X-Remote-Group: ""
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: room-pass
+  namespace: room-pass
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: Host(`room.localhost`) && (Path(`/join`) || Path(`/bind`) || Path(`/logout`))
+      middlewares:
+        - name: strip-identity-headers
+      services:
+        - name: room-pass
+          port: 8080
+    - match: Host(`room-pass.localhost`)
+      middlewares:
+        - name: strip-identity-headers
+      services:
+        - name: room-pass
+          port: 8080
+  tls:
+    secretName: room-edge-tls
+---
+# Traefik to krm-foyer-room is TLS, verified by its Service name, as for the main one.
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: krm-foyer-room
+  namespace: krm-foyer
+spec:
+  serverName: krm-foyer-room.krm-foyer.svc
+  rootCAs:
+    - configMap: krm-foyer-issuer-ca
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: krm-foyer-room
+  namespace: krm-foyer
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: Host(`room.localhost`) && (PathPrefix(`/auth/`) || PathPrefix(`/k8s/`) || PathPrefix(`/stream/`) || PathPrefix(`/_foyer/`))
+      services:
+        - name: krm-foyer-room
+          port: 443
+          scheme: https
+          serversTransport: krm-foyer-room
+  tls:
+    secretName: room-edge-tls
+---
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: room-app
+  namespace: fixture
+spec:
+  serverName: room-app.fixture.svc
+  rootCAs:
+    - configMap: hello-web-ca
+---
+# The test application: its pages and its QR entry point. It has no use for cookies;
+# Traefik removes them (the no-cookie Middleware of traefik-routes.yaml), and its
+# tripwire refuses any that arrive.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: room-app
+  namespace: fixture
+spec:
+  entryPoints: [websecure]
+  routes:
+    # The QR code's target carries the join code in its query, and the code is a
+    # credential while it is valid: this route keeps it out of Traefik's access log.
+    - match: Host(`room.localhost`) && Path(`/join-room`)
+      observability:
+        accessLogs: false
+      middlewares:
+        - name: no-cookie
+      services:
+        - name: room-app
+          port: 443
+          scheme: https
+          serversTransport: room-app
+    - match: Host(`room.localhost`)
+      middlewares:
+        - name: no-cookie
+      services:
+        - name: room-app
+          port: 443
+          scheme: https
+          serversTransport: room-app
+  tls:
+    secretName: room-edge-tls
+---
+# The issuer's host for the API server and for pods, which cannot use the browser's
+# port-forward: Traefik's websecure port at a fixed address, which start-cluster.sh maps
+# room-pass.localhost to. Port 8443, so the issuer URL is the same everywhere.
+apiVersion: v1
+kind: Service
+metadata:
+  name: room-pass-issuer
+  namespace: traefik-system
+spec:
+  clusterIP: ROOM_PASS_SERVICE_IP
+  selector:
+    app.kubernetes.io/name: traefik
+  ports:
+    - name: websecure
+      port: 8443
+      targetPort: 8443

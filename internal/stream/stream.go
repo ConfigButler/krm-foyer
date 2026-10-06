@@ -61,6 +61,8 @@ type Streams struct {
 	writes    time.Duration
 	// shared is nil without shared watches.
 	shared *shared
+	// identities are /auth/check's reused answers to who a token belongs to.
+	identities *identities
 }
 
 // New returns streams from cfg.Server.
@@ -73,7 +75,8 @@ func New(cfg Config) (*Streams, error) {
 		return nil, errors.New("no gate")
 	}
 	s := &Streams{
-		server: url.URL{Scheme: cfg.Server.Scheme, Host: cfg.Server.Host},
+		identities: newIdentities(nil),
+		server:     url.URL{Scheme: cfg.Server.Scheme, Host: cfg.Server.Host},
 		// The same pinned transport as the proxy's. The user's token is added per
 		// request by client-go, from the rest.Config built for that user alone.
 		transport: &http.Transport{

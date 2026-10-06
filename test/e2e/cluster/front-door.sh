@@ -71,6 +71,43 @@ for route in fixture/hello krm-foyer/krm-foyer; do
   done
 done
 
+echo "== front door: Traefik's routes behind /auth/check"
+# ForwardAuth verifies krm-foyer by the fixture CA. Both keys, as Traefik reads either.
+kubectl -n fixture create secret generic foyer-check-ca \
+  --from-file=ca.crt="$E2E_DIR/ca.crt" --from-file=tls.ca="$E2E_DIR/ca.crt" \
+  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl apply -f "$here/traefik-routes.yaml" >/dev/null
+
+echo "== the nginx recipe, in front of krm-foyer on a NodePort"
+# docs/ingress.md's nginx recipe as the document has it: its nginx block, and its njs
+# script, copied out of the document, so a spec of the recipe is a spec of the text.
+stage="$E2E_DIR/nginx-door"
+mkdir -p "$stage"
+recipe() {
+  awk -v fence='```'"$1" '
+    /^\*\*nginx, `auth_request`\.\*\*/ { section = 1 }
+    section && $0 == fence { inside = 1; next }
+    inside && $0 == "```" { exit }
+    inside { print }
+  ' "$repo/docs/ingress.md"
+}
+recipe nginx > "$stage/recipe.conf"
+recipe js > "$stage/foyer.js"
+[ -s "$stage/recipe.conf" ] || { echo "no nginx recipe found in docs/ingress.md" >&2; exit 1; }
+apply create configmap nginx-door \
+  --from-file=nginx.conf="$here/nginx-door.conf" \
+  --from-file=foyer-upstream.conf="$here/nginx-door-upstream.conf" \
+  --from-file=recipe.conf="$stage/recipe.conf" --from-file=foyer.js="$stage/foyer.js" \
+  --from-file=ca.crt="$E2E_DIR/ca.crt"
+config_hash="$(cat "$here"/nginx-door* "$stage"/* "$E2E_DIR/ca.crt" "$E2E_DIR/foyer/tls.crt" | sha256sum | cut -c1-16)"
+sed -e "s|NGINX_IMAGE|$NGINX_IMAGE|" -e "s|CONFIG_HASH|$config_hash|" "$here/nginx-door.yaml" \
+  | kubectl apply -f - >/dev/null
+if ! kubectl -n fixture rollout status deployment/nginx-door --timeout=120s; then
+  kubectl -n fixture describe pods -l app=nginx-door >&2
+  kubectl -n fixture logs deployment/nginx-door --tail=50 >&2 || true
+  exit 1
+fi
+
 echo "== port-forwards"
 "$here/port-forward.sh"
 # Through the forward, as a browser: the example's page, and /auth/ reaching krm-foyer
@@ -79,4 +116,20 @@ front() { curl -sS --cacert "$E2E_DIR/ca.crt" --resolve "foyer.localhost:8443:12
 front -f https://foyer.localhost:8443/ | grep -q '<title>Hello, krm-foyer</title>'
 code="$(front -o /dev/null -w '%{http_code}' https://foyer.localhost:8443/auth/session)"
 [ "$code" = 401 ] || { echo "the front door does not reach krm-foyer (/auth/session: $code)" >&2; exit 1; }
+# Traefik's routes ask krm-foyer first: a signed-out fetch is its 401, a page load its
+# redirect to the login. Anything else is a route or a ForwardAuth that does not work.
+# Traefik takes a moment to load new routes, and until then the Gateway's catch-all
+# answers, so this waits up to 30 seconds for each.
+expect_code() {
+  local path="$1" want="$2" what="$3" code=""
+  for _ in $(seq 1 30); do
+    code="$(front -o /dev/null -w '%{http_code}' "https://foyer.localhost:8443$path")"
+    [ "$code" = "$want" ] && return 0
+    sleep 1
+  done
+  echo "$path is not $what (signed out: $code, want $want)" >&2
+  exit 1
+}
+expect_code /public/whoami 401 "behind /auth/check"
+expect_code /members/ 302 "behind the login gate"
 echo "the hello example is at $FOYER_URL"

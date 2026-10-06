@@ -1,0 +1,390 @@
+# Room Pass's CRDs, as released in v2.0.0 (2185782f6f349731909eafdb290007bc3feb168c,
+# config/crd/), the release whose image room-pass.yaml pins. Copied unchanged; replace
+# both together.
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: rooms.room-pass.koudijs.dev
+spec:
+  group: room-pass.koudijs.dev
+  names:
+    kind: Room
+    listKind: RoomList
+    plural: rooms
+    singular: room
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.joinCode.code
+      name: Code
+      type: string
+    - jsonPath: .spec.enrollment
+      name: Enrollment
+      type: string
+    - jsonPath: .status.participantCount
+      name: Participants
+      type: integer
+    - jsonPath: .spec.endsAt
+      name: Ends
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              allowedReturnURLs:
+                description: AllowedReturnURLs must also appear in the deployment
+                  allowlist.
+                items:
+                  maxLength: 2048
+                  pattern: ^https://[^/?#@]+/[^#]*$
+                  type: string
+                maxItems: 16
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: set
+                x-kubernetes-validations:
+                - message: allowedReturnURLs is immutable
+                  rule: self == oldSelf
+              attributionNote:
+                description: |-
+                  AttributionNote is the operator's one sentence about what the issued
+                  address is for. Room Pass knows the address is synthetic and never a real
+                  mailbox; what the application behind it does with the address -- put it on
+                  a Git commit, write it to an audit log, nothing at all -- is not Room
+                  Pass's to claim. Empty means the join page claims nothing beyond the
+                  address being unroutable.
+
+                  It is appended to a sentence that already ends "...it is never a real
+                  mailbox", so say only what Room Pass cannot: "It labels your changes in
+                  Git." Repeating the mailbox clause reads as a stutter on the page.
+                maxLength: 200
+                pattern: ^[^<>\x00-\x1f\x7f]*$
+                type: string
+              audienceGroup:
+                description: AudienceGroup selects operator-managed RBAC; Room Pass
+                  never creates grants.
+                maxLength: 128
+                pattern: ^demo:[a-zA-Z0-9][a-zA-Z0-9:_-]*$
+                type: string
+                x-kubernetes-validations:
+                - message: audienceGroup is immutable
+                  rule: self == oldSelf
+              endsAt:
+                description: EndsAt can be extended without changing participant identities.
+                format: date-time
+                type: string
+              enrollment:
+                default: Closed
+                enum:
+                - Open
+                - Closed
+                type: string
+              joinCode:
+                default:
+                  length: 6
+                  rotateEvery: 15s
+                  validFor: 30s
+                description: JoinCodeSpec controls rotation and the grace period for
+                  typing a previous code.
+                properties:
+                  length:
+                    default: 6
+                    maximum: 12
+                    minimum: 6
+                    type: integer
+                  rotateEvery:
+                    default: 15s
+                    enum:
+                    - 10s
+                    - 15s
+                    - 30s
+                    - 60s
+                    type: string
+                  validFor:
+                    default: 30s
+                    enum:
+                    - 20s
+                    - 30s
+                    - 45s
+                    - 60s
+                    - 90s
+                    - 120s
+                    - 180s
+                    - 240s
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: joinCode is immutable
+                  rule: self == oldSelf
+                - message: validFor must provide at least five seconds overlap and
+                    retain at most four codes
+                  rule: duration(self.validFor) >= duration(self.rotateEvery) + duration('5s')
+                    && duration(self.validFor) <= duration(self.rotateEvery) + duration(self.rotateEvery)
+                    + duration(self.rotateEvery) + duration(self.rotateEvery)
+              maxParticipants:
+                maximum: 10000
+                minimum: 1
+                type: integer
+              stopped:
+                default: false
+                description: Stopped permanently denies enrollment and new identity
+                  assertions.
+                type: boolean
+                x-kubernetes-validations:
+                - message: stopping is irreversible
+                  rule: '!oldSelf || self'
+              title:
+                description: Title appears on the participant join page.
+                maxLength: 120
+                minLength: 1
+                type: string
+            required:
+            - allowedReturnURLs
+            - audienceGroup
+            - endsAt
+            - enrollment
+            - joinCode
+            - maxParticipants
+            - stopped
+            - title
+            type: object
+          status:
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              joinCode:
+                properties:
+                  code:
+                    maxLength: 12
+                    type: string
+                  expiresAt:
+                    format: date-time
+                    type: string
+                  issuedAt:
+                    format: date-time
+                    type: string
+                required:
+                - code
+                - expiresAt
+                - issuedAt
+                type: object
+              observedGeneration:
+                format: int64
+                type: integer
+              participantCount:
+                type: integer
+              validJoinCodes:
+                description: ValidJoinCodes is operator-only credential material,
+                  never a public response.
+                items:
+                  properties:
+                    code:
+                      maxLength: 12
+                      type: string
+                    expiresAt:
+                      format: date-time
+                      type: string
+                    issuedAt:
+                      format: date-time
+                      type: string
+                  required:
+                  - code
+                  - expiresAt
+                  - issuedAt
+                  type: object
+                maxItems: 4
+                type: array
+            required:
+            - participantCount
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: participants.room-pass.koudijs.dev
+spec:
+  group: room-pass.koudijs.dev
+  names:
+    kind: Participant
+    listKind: ParticipantList
+    plural: participants
+    singular: participant
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.roomRef.name
+      name: Room
+      type: string
+    - jsonPath: .spec.revoked
+      name: Revoked
+      type: boolean
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              displayName:
+                description: |-
+                  DisplayName is an unverified demo label, never an authorization key.
+
+                  It is stored in its FOLDED form (see labelName in internal/server): what a
+                  participant types is normalized before it reaches here, so this value is
+                  legal in all three places it travels to -- a Kubernetes label value on
+                  every ballot the voter app writes, one path segment in the mirrored audit
+                  trail, and the tail of a submission's object name. The pattern is exactly
+                  what the fold emits and is deliberately narrower than a label value: no
+                  "_" or ".", because an object name is DNS-1123 and rejects the first.
+
+                  MaxLength matches maxParticipantID rather than a label value's 63, so the
+                  display name and the address derived from it share one limit instead of
+                  two that disagree past forty characters.
+                maxLength: 40
+                minLength: 1
+                pattern: ^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$
+                type: string
+                x-kubernetes-validations:
+                - message: displayName is immutable
+                  rule: self == oldSelf
+              revoked:
+                default: false
+                type: boolean
+                x-kubernetes-validations:
+                - message: revocation is irreversible
+                  rule: '!oldSelf || self'
+              roomRef:
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: UID prevents name reuse from reviving enrollment.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+                x-kubernetes-validations:
+                - message: roomRef is immutable
+                  rule: self == oldSelf
+            required:
+            - displayName
+            - revoked
+            - roomRef
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

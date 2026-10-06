@@ -50,14 +50,21 @@ type fixture struct {
 	client *http.Client
 
 	// foyerURL is krm-foyer's public URL, deployed by deploy-foyer.sh, and
-	// foyerAccount the service account it runs as: cluster-admin, as bait.
-	foyerURL, foyerNamespace, foyerAccount string
+	// foyerAccount the service account it runs as: cluster-admin, as bait. foyerAddr
+	// is the node's address and NodePort the suite reaches it on.
+	foyerURL, foyerAddr, foyerNamespace, foyerAccount string
 	// sharedAccount is the identity shared watches are opened with: narrow, and not
 	// the bait.
 	sharedAccount string
 	// briefTransport reaches the brief krm-foyer, whose sessions end within a minute,
 	// instead of the main one.
 	briefTransport http.RoundTripper
+	// frontDoorTransport reaches krm-foyer's name through Traefik, the front door, as
+	// a browser does: krm-foyer's routes and the application's, on one origin.
+	frontDoorTransport http.RoundTripper
+	// nginxTransport reaches krm-foyer's name through docs/ingress.md's nginx recipe
+	// (nginx-door.conf), in front of the main krm-foyer.
+	nginxTransport http.RoundTripper
 	// rehearsalUsers is how many rehearsal users Dex has: rehearsal-001@example.com
 	// and on, with alice's password (start-cluster.sh).
 	rehearsalUsers int
@@ -81,8 +88,12 @@ func (f *fixture) remember(tokens ...string) {
 }
 
 const (
-	password     = "password"
-	foyerClient  = "krm-foyer"
+	password    = "password"
+	foyerClient = "krm-foyer"
+	// The operator's command line: a client whose tokens the API server maps to
+	// kubectl:<email>, not oidc:<email> (authentication-config.yaml).
+	cliClient    = "kubectl"
+	cliSecret    = "kubectl-e2e-secret"
 	foyerSecret  = "krm-foyer-e2e-secret"
 	otherClient  = "other-app"
 	otherSecret  = "other-app-e2e-secret"
@@ -127,6 +138,7 @@ func loadFixture() *fixture {
 	// Every string contains the empty one: a missing account would pass assertions
 	// that it never appears.
 	Expect(env["FOYER_SHARED_ACCOUNT"]).NotTo(BeEmpty(), "FOYER_SHARED_ACCOUNT in foyer-env (an older deployment? run task e2e-deploy)")
+	Expect(env["FOYER_NGINX_ADDR"]).NotTo(BeEmpty(), "FOYER_NGINX_ADDR in foyer-env (an older deployment? run task e2e-deploy)")
 	foyer, err := url.Parse(env["FOYER_URL"])
 
 	Expect(err).NotTo(HaveOccurred())
@@ -161,11 +173,17 @@ func loadFixture() *fixture {
 		testIssuer:      env["TEST_ISSUER"],
 		signingKey:      key.(*rsa.PrivateKey),
 		foyerURL:        env["FOYER_URL"],
+		foyerAddr:       env["FOYER_ADDR"],
 		foyerNamespace:  env["FOYER_NAMESPACE"],
 		foyerAccount:    env["FOYER_SERVICE_ACCOUNT"],
 		sharedAccount:   env["FOYER_SHARED_ACCOUNT"],
 		briefTransport:  transportTo(env["FOYER_BRIEF_ADDR"]),
-		rehearsalUsers:  rehearsalUsers,
+		// The front door: Traefik, through the port-forward on this container's
+		// loopback (port-forward.sh), under the same name as krm-foyer, as a browser
+		// reaches it.
+		frontDoorTransport: transportTo(net.JoinHostPort("127.0.0.1", foyer.Port())),
+		nginxTransport:     transportTo(env["FOYER_NGINX_ADDR"]),
+		rehearsalUsers:     rehearsalUsers,
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   30 * time.Second,
@@ -190,11 +208,16 @@ func readEnv(file, missing string) map[string]string {
 // login returns a Dex ID token for user, issued to clientID. It uses the password
 // grant so the suite can hold a user's own credential and ask the API server directly.
 func (f *fixture) login(ctx context.Context, user, clientID, secret string) string {
+	return f.loginScopes(ctx, user, clientID, secret, "openid email profile")
+}
+
+// loginScopes is login, asking Dex for scope.
+func (f *fixture) loginScopes(ctx context.Context, user, clientID, secret, scope string) string {
 	form := url.Values{
 		"grant_type": {"password"},
 		"username":   {user},
 		"password":   {password},
-		"scope":      {"openid email profile"},
+		"scope":      {scope},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.dexIssuer+"/token", strings.NewReader(form.Encode()))
 	Expect(err).NotTo(HaveOccurred())
@@ -248,17 +271,24 @@ func b64JSON(v any) string {
 // selfSubjectReview asks the API server who it takes token for. The answer is 201 with
 // the username, or the refusal's status code with no username.
 func (f *fixture) selfSubjectReview(ctx context.Context, token string) (int, string) {
+	code, name, _ := f.selfSubjectReviewGroups(ctx, token)
+	return code, name
+}
+
+// selfSubjectReviewGroups is selfSubjectReview with the groups the API server mapped.
+func (f *fixture) selfSubjectReviewGroups(ctx context.Context, token string) (int, string, []string) {
 	a := f.direct(ctx, token, http.MethodPost, "/apis/authentication.k8s.io/v1/selfsubjectreviews",
 		[]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`))
 	var review struct {
 		Status struct {
 			UserInfo struct {
-				Username string `json:"username"`
+				Username string   `json:"username"`
+				Groups   []string `json:"groups"`
 			} `json:"userInfo"`
 		} `json:"status"`
 	}
 	_ = json.Unmarshal(a.Body, &review)
-	return a.Code, review.Status.UserInfo.Username
+	return a.Code, review.Status.UserInfo.Username, review.Status.UserInfo.Groups
 }
 
 // answer is one HTTP response, reduced to what the suite compares.
@@ -393,6 +423,13 @@ func (f *fixture) grant(ns, username, resource string, verbs ...string) (revoke 
 	return func() { f.kubectl("-n", ns, "delete", "rolebinding", name) }
 }
 
+// grantGroup is grant, to a Kubernetes group instead of a username.
+func (f *fixture) grantGroup(ns, group, resource string, verbs ...string) {
+	name := "e2e-" + randomID()
+	f.kubectl("-n", ns, "create", "role", name, "--resource="+resource, "--verb="+strings.Join(verbs, ","))
+	f.kubectl("-n", ns, "create", "rolebinding", name, "--role="+name, "--group="+group)
+}
+
 // replaceFoyer replaces the main krm-foyer's pod by running kubectl with args in its
 // namespace (a rollout restart, or a forced delete), and returns once the new pod is
 // the only one and answers. Sessions are in their cookies, so they survive this.
@@ -429,6 +466,44 @@ func (f *fixture) replaceFoyer(ctx context.Context, args ...string) {
 		}
 		return nil
 	}).Should(Succeed())
+	f.forgetGonePods()
+}
+
+// forgetGonePods removes the node's connection tracking for krm-foyer's NodePort that
+// still leads to a pod that is gone. A connection is tracked with the pod it was sent
+// to, and kube-proxy forgets TCP entries only when they time out (up to two minutes).
+// Until then a new connection from the same client port can follow the old entry to
+// an address nobody answers: a dial timeout. One client making thousands of connections
+// a minute, as this suite does, reuses ports that soon after a pod is replaced. So
+// whatever replaces a pod forgets it, as kube-proxy does for UDP.
+func (f *fixture) forgetGonePods() {
+	GinkgoHelper()
+	live := map[string]bool{}
+	for _, ip := range strings.Fields(f.kubectl("-n", f.foyerNamespace, "get", "pods",
+		"-o", "jsonpath={.items[*].status.podIP}")) {
+		live[ip] = true
+	}
+	_, port, err := net.SplitHostPort(f.foyerAddr)
+	Expect(err).NotTo(HaveOccurred())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "exec", f.serverContainer,
+		"conntrack", "-L", "-p", "tcp", "--orig-port-dst", port).Output()
+	Expect(err).NotTo(HaveOccurred())
+	gone := map[string]bool{}
+	for line := range strings.Lines(string(out)) {
+		// The reply's source is the pod the connection was sent to.
+		for _, field := range strings.Fields(line) {
+			if ip, ok := strings.CutPrefix(field, "src="); ok && strings.HasPrefix(ip, "10.42.") && !live[ip] {
+				gone[ip] = true
+			}
+		}
+	}
+	for ip := range gone {
+		// Exit status 1 when there was nothing left to delete.
+		_ = exec.CommandContext(ctx, "docker", "exec", f.serverContainer,
+			"conntrack", "-D", "-p", "tcp", "--orig-port-dst", port, "--reply-src", ip).Run()
+	}
 }
 
 // kubectl runs as the fixture's admin, for setup only. Nothing a spec asserts on is

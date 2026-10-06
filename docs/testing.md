@@ -360,9 +360,12 @@ single-node k3d cluster on it, then deploys the two issuers into the cluster
 ([issuers.yaml](../test/e2e/cluster/issuers.yaml)). The API server trusts both through an
 [AuthenticationConfiguration](../test/e2e/cluster/authentication-config.yaml), under the
 same rules, and records requests with an [audit policy](../test/e2e/cluster/audit-policy.yaml).
-The API server is not a pod and cannot use cluster DNS: k3d's `--host-alias` puts each
-issuer's name in the node's `/etc/hosts`, pointing at its Service's fixed ClusterIP, and
-in CoreDNS for pods, so every caller uses the same issuer URL. Dex keeps its state in
+The API server is not a pod and cannot use cluster DNS: the script puts each issuer's
+name in the node's `/etc/hosts`, pointing at its Service's fixed ClusterIP, and in a
+CoreDNS server block for pods (the `coredns-custom` ConfigMap, which k3s's Corefile
+imports), so every caller uses the same issuer URL. It writes `/etc/hosts` on every run,
+because Docker rewrites it when the node restarts, which a changed authentication
+configuration causes. Dex keeps its state in
 custom resources, its signing keys included: with memory storage, a restarted Dex signs
 with new keys, and the API server refused every token for 221 seconds before it fetched
 them. The devcontainer joins the network, and a CI runner is the Docker host, so both reach
@@ -401,7 +404,18 @@ an `HTTPRoute` sending `/` to the file server without the `Cookie` header, one s
 `/auth`, `/k8s`, `/stream` and `/_foyer` to krm-foyer, and a `BackendTLSPolicy` for each
 backend under which Traefik verifies its certificate (with a wrong hostname in it, every
 request fails). The file server answers 400 to any request that still carries a cookie,
-so every signed-in browser spec fails if the route stops removing it. Then
+so every signed-in browser spec fails if the route stops removing it. It also applies
+[traefik-routes.yaml](../test/e2e/cluster/traefik-routes.yaml), the Traefik recipe of
+[the check](ingress.md#the-check): an `IngressRoute` on the same host with ForwardAuth
+middlewares to `/auth/check`, which Traefik reaches at krm-foyer's Service name (its
+certificate holds both names). `/public/whoami` stands in for a domain backend and
+echoes the `Krm-Foyer-Identity` it received, and `/members/` is a page behind the login
+gate. Specs reach them with `fx.frontDoorBrowser()`, through Traefik. The nginx
+recipe of the check runs too, as the document has it: front-door.sh copies its blocks
+out of [ingress.md](ingress.md#recipes) into
+[nginx-door.conf](../test/e2e/cluster/nginx-door.conf), an nginx in front of krm-foyer
+on a NodePort of its own, under the same public name, whose two backends echo what they
+receive. Specs reach it with `fx.nginxBrowser()`. Then
 [port-forward.sh](../test/e2e/cluster/port-forward.sh) forwards Traefik to
 `127.0.0.1:8443` and Dex to `127.0.0.1:5556` in this container, detached, and checks both
 by their public names. Browsers resolve `foyer.localhost` and `dex.localhost` to loopback,
@@ -410,14 +424,32 @@ and VS Code forwards both ports to the machine the browser runs on, keeping thei
 wherever Docker runs. A port-forward follows one pod: when Dex or Traefik rolls,
 run `test/e2e/cluster/port-forward.sh` (or `task e2e-deploy`) again.
 
+[room-pass.sh](../test/e2e/cluster/room-pass.sh) adds Room Pass's QR login
+([room-pass.md](room-pass.md)) on two more hosts through the same Traefik:
+`room.localhost`, which krm-foyer-room (a third release of the chart, signing in at Room
+Pass's Dex), Room Pass's `/join`, `/bind` and `/logout`, and a test application with the
+QR entry point `/join-room` share; and `room-pass.localhost`, Room Pass's issuer. Room
+Pass 2.0.0 and its own Dex, with the `authproxy` connector, a NetworkPolicy that only
+Room Pass passes, SQLite on a volume, Room Pass's CRDs and a Room, all in
+[room-pass/](../test/e2e/cluster/room-pass/). The API server trusts that Dex as a third
+JWT issuer, which it and krm-foyer-room reach at `room-pass.localhost:8443`: a Service
+with a fixed address in front of Traefik. Everything Room Pass's lives in the fixture;
+krm-foyer-room has only the chart's generic login settings. A browser reaches both hosts
+through the front door's port-forward, as `*.localhost` resolves to loopback.
+
 The test issuer is nginx serving a discovery document and a JWKS. The suite holds its
 signing key (`.e2e/issuer-signing.key`), so it can mint tokens with claims Dex never
 issues. Use it for claims; use Dex for anything a real login would do.
 
 Dex has two demo users, `alice@example.com` and `bob@example.com` (password
 `password`), which Kubernetes sees as `oidc:alice@example.com` and
-`oidc:bob@example.com`, plus 200 generated rehearsal users. There are two clients: `krm-foyer`, whose tokens the cluster
-accepts, and `other-app`, whose tokens it must reject.
+`oidc:bob@example.com`, plus 200 generated rehearsal users. There are three clients:
+`krm-foyer`, whose tokens the cluster accepts; `kubectl`, the operator's command line,
+whose tokens it accepts under another name, `kubectl:alice@example.com`, as a
+[browser identity](application-scope.md#a-browser-identity-in-kubernetes) needs; and
+`other-app`, whose tokens it must reject. `kubectl` trusts `krm-foyer` as a peer, so
+krm-foyer can ask for its audience with Dex's cross-client scope, and the suite checks
+that such a token is still the browser's.
 
 ```bash
 task e2e-up     # start or reuse the fixture, with Traefik (about a minute the first time)
@@ -426,6 +458,13 @@ task demo       # e2e-up and e2e-deploy, then how to sign in from your browser
 task test-e2e   # run the suite; brings the fixture up and deploys krm-foyer first
 task e2e-down   # remove the cluster, Dex, the network and the certificates
 ```
+
+After the suite replaces krm-foyer's pod, it removes the node's connection tracking that
+still leads to the gone pod (`fixture.forgetGonePods`). Otherwise the suite, one client
+making thousands of connections a minute, reuses client ports whose stale entries send
+its SYNs to an address nobody answers, and the rehearsal's 1,800 connections at once
+time out. [rollout-connections.md](investigations/rollout-connections.md) has the
+measurements.
 
 When something fails, the API server's view is usually the answer:
 `docker logs k3d-krm-foyer-e2e-server-0` shows authenticator errors, and

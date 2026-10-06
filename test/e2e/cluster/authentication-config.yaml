@@ -8,19 +8,39 @@ kind: AuthenticationConfiguration
 jwt:
   - issuer:
       url: https://dex.localhost:5556
-      # Only tokens minted for krm-foyer. A token Dex issued to any other client is
-      # rejected with 401, which the suite checks: an issuer the cluster trusts is not
-      # the same as every token from that issuer.
-      audiences: [krm-foyer]
+      # Only tokens minted for krm-foyer, or for the operator's command line. A token
+      # Dex issued to any other client is rejected with 401, which the suite checks: an
+      # issuer the cluster trusts is not the same as every token from that issuer.
+      audiences: [krm-foyer, kubectl]
+      audienceMatchPolicy: MatchAny
       certificateAuthority: |
 CA_PEM
     claimMappings: &claimMappings
+      # A browser identity (docs/application-scope.md): one person, two usernames,
+      # told apart by the client the issuer gave the token to. Through krm-foyer they
+      # are oidc:<email>; on the command line kubectl:<email>, which is where an
+      # operator's broad grants belong. Every script on an application's origin can
+      # use what krm-foyer's token may do, and with this it may do only what
+      # oidc:<email> is granted.
+      #
+      # The client is azp when the token has one, and azp must then be a string and
+      # one of its audiences (Dex sets it when a client asks for another audience with
+      # the cross-client scope). Without azp it is the audience: a string, or a list
+      # of exactly one. Two audiences and no azp name no client. Each client the
+      # cluster knows is listed with its prefix, and nothing falls back to one: an
+      # unknown or doubtful client is no key of the map, the lookup fails, and the
+      # token is refused. The rule under claimValidationRules says so first, with a
+      # message. CEL has no variables here, so the client is spelled out each time.
       username:
-        claim: email
-        prefix: "oidc:"
+        expression: >-
+          {'krm-foyer': 'oidc:', 'kubectl': 'kubectl:'}[(has(claims.azp) ? (type(claims.azp) == string && claims.azp in (type(claims.aud) == string ? [claims.aud] : claims.aud) ? claims.azp : '') : (type(claims.aud) == string ? claims.aud : size(claims.aud) == 1 ? claims.aud[0] : ''))]
+          + claims.email
+      # Groups follow the same split, so a group grant to one is never one to the other.
       groups:
-        claim: groups
-        prefix: "oidc:"
+        expression: >-
+          has(claims.groups) ? dyn(claims.groups).map(g,
+          {'krm-foyer': 'oidc:', 'kubectl': 'kubectl:'}[(has(claims.azp) ? (type(claims.azp) == string && claims.azp in (type(claims.aud) == string ? [claims.aud] : claims.aud) ? claims.azp : '') : (type(claims.aud) == string ? claims.aud : size(claims.aud) == 1 ? claims.aud[0] : ''))]
+          + g) : []
       # The two keys gitops-reverser reads from user.extra, in audit events and
       # admission requests, for a commit's author (docs/design.md, "Attribution"):
       # from the signed token, here and nowhere else. A claim that is missing maps to
@@ -31,6 +51,11 @@ CA_PEM
         - key: configbutler.ai/claims/email
           valueExpression: "claims.?email.orValue('')"
     claimValidationRules: &claimValidationRules
+      # The client, as the username above reads it, must be one the cluster names.
+      - expression: >-
+          (has(claims.azp) ? (type(claims.azp) == string && claims.azp in (type(claims.aud) == string ? [claims.aud] : claims.aud) ? claims.azp : '') : (type(claims.aud) == string ? claims.aud : size(claims.aud) == 1 ? claims.aud[0] : ''))
+          in ['krm-foyer', 'kubectl']
+        message: "the token's client (azp, or its only audience) must be krm-foyer or kubectl"
       # Mapping the username from email makes the API server check email_verified on
       # its own, but that check is claims.?email_verified.orValue(true): a token without
       # the claim passes. The name is only an identity if the issuer vouched for it, so
@@ -47,9 +72,55 @@ CA_PEM
   # of a copy.
   - issuer:
       url: https://issuer.krm-foyer.test:8443
-      audiences: [krm-foyer]
+      # Dex's audiences, so the suite can mint what either client would receive.
+      audiences: [krm-foyer, kubectl]
+      audienceMatchPolicy: MatchAny
       certificateAuthority: |
 CA_PEM
     claimMappings: *claimMappings
     claimValidationRules: *claimValidationRules
     userValidationRules: *userValidationRules
+
+  # Room Pass's Dex (test/e2e/cluster/room-pass.sh), for its QR login through
+  # krm-foyer-room. Room Pass's own reference rules (its
+  # deploy/apiserver/authentication-config.yaml): a participant is the connector
+  # room-pass, named by Dex's opaque subject, never the name they typed, and may only
+  # be in demo: groups, so a forged identity, if every control in front of Dex failed,
+  # would still be in none of the groups the platform binds. The API server reaches the
+  # issuer through Traefik, at room-pass.localhost's fixed address.
+  - issuer:
+      url: https://room-pass.localhost:8443
+      audiences: [krm-foyer]
+      certificateAuthority: |
+CA_PEM
+    claimValidationRules:
+      # The client, by the same rules as for Dex above: krm-foyer is the only one.
+      - expression: >-
+          (has(claims.azp) ? (type(claims.azp) == string && claims.azp in (type(claims.aud) == string ? [claims.aud] : claims.aud) ? claims.azp : '') : (type(claims.aud) == string ? claims.aud : size(claims.aud) == 1 ? claims.aud[0] : ''))
+          == 'krm-foyer'
+        message: "the token's client (azp, or its only audience) must be krm-foyer"
+      # Dex sets federated_claims only for the federated:id scope.
+      - expression: "has(claims.federated_claims) && claims.federated_claims.connector_id == 'room-pass'"
+        message: "unknown or missing Dex connector; the client must request the federated:id scope"
+      - expression: "has(claims.groups) && dyn(claims.groups).all(g, g.startsWith('demo:'))"
+        message: "the room-pass connector may only assert demo groups"
+      - expression: "has(claims.email_verified) && type(claims.email_verified) == bool && claims.email_verified"
+        message: "email_verified must be the boolean true"
+    claimMappings:
+      username:
+        expression: "'demo:' + claims.sub"
+      groups:
+        claim: groups
+        prefix: ""
+      # The attribution keys, as for Dex above: the name the participant chose, as
+      # Room Pass stored it, and the address it made from it.
+      extra:
+        - key: configbutler.ai/claims/display-name
+          valueExpression: "claims.?name.orValue('')"
+        - key: configbutler.ai/claims/email
+          valueExpression: "claims.?email.orValue('')"
+    userValidationRules:
+      - expression: "user.username.startsWith('demo:')"
+        message: "username must carry the demo: prefix"
+      - expression: "user.groups.all(group, !group.startsWith('system:'))"
+        message: "groups must not use the Kubernetes system: prefix"

@@ -14,12 +14,17 @@ set -euo pipefail
 : "${IMAGE:?set IMAGE to the krm-foyer image to deploy}"
 CLUSTER_NAME="${CLUSTER_NAME:-krm-foyer-e2e}"
 FOYER_HOST="foyer.localhost"
+# Its Service's name, for an ingress that calls krm-foyer itself: Traefik's ForwardAuth
+# to /auth/check (traefik-routes.yaml) verifies krm-foyer's certificate by this name.
+FOYER_SERVICE_HOST="krm-foyer.krm-foyer.svc"
 # Browsers reach krm-foyer through the front door on this port (front-door.sh), so it is
 # part of the public URL; the suite goes to the NodePort directly, under the same name.
 FOYER_URL="https://$FOYER_HOST:8443"
 NODE_PORT=30443
 # A second krm-foyer whose sessions end within a minute (foyer-brief-values.yaml).
 BRIEF_NODE_PORT=30444
+# docs/ingress.md's nginx recipe in front of the main krm-foyer (front-door.sh).
+NGINX_NODE_PORT=30445
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
@@ -42,11 +47,12 @@ mkdir -p "$E2E_DIR/foyer"
 if [ ! -f "$E2E_DIR/foyer/tls.crt" ] \
   || ! openssl x509 -checkend 86400 -noout -in "$E2E_DIR/foyer/tls.crt" >/dev/null 2>&1 \
   || ! openssl verify -CAfile "$E2E_DIR/ca.crt" "$E2E_DIR/foyer/tls.crt" >/dev/null 2>&1 \
-  || ! openssl x509 -noout -checkhost "$FOYER_HOST" -in "$E2E_DIR/foyer/tls.crt" | grep -q 'does match'; then
+  || ! openssl x509 -noout -checkhost "$FOYER_HOST" -in "$E2E_DIR/foyer/tls.crt" | grep -q 'does match' \
+  || ! openssl x509 -noout -checkhost "$FOYER_SERVICE_HOST" -in "$E2E_DIR/foyer/tls.crt" | grep -q 'does match'; then
   openssl req -newkey rsa:2048 -nodes -subj "/CN=$FOYER_HOST" \
     -keyout "$E2E_DIR/foyer/tls.key" -out "$E2E_DIR/foyer/tls.csr" 2>/dev/null
   openssl x509 -req -in "$E2E_DIR/foyer/tls.csr" -CA "$E2E_DIR/ca.crt" -CAkey "$E2E_DIR/ca.key" \
-    -CAcreateserial -days 30 -extfile <(printf 'subjectAltName=DNS:%s' "$FOYER_HOST") \
+    -CAcreateserial -days 30 -extfile <(printf 'subjectAltName=DNS:%s,DNS:%s' "$FOYER_HOST" "$FOYER_SERVICE_HOST") \
     -out "$E2E_DIR/foyer/tls.crt" 2>/dev/null
 fi
 
@@ -109,7 +115,9 @@ cat > "$E2E_DIR/foyer-env" <<EOF
 FOYER_URL=$FOYER_URL
 FOYER_ADDR=$server_ip:$NODE_PORT
 FOYER_BRIEF_ADDR=$server_ip:$BRIEF_NODE_PORT
+FOYER_NGINX_ADDR=$server_ip:$NGINX_NODE_PORT
 FOYER_NAMESPACE=krm-foyer
+FOYER_IMAGE=$tag
 FOYER_SERVICE_ACCOUNT=system:serviceaccount:krm-foyer:krm-foyer
 FOYER_SHARED_ACCOUNT=system:serviceaccount:krm-foyer:krm-foyer-shared
 EOF

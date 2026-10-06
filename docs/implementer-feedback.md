@@ -41,6 +41,15 @@ as far as Voter is concerned.
 
 ---
 
+## krm-foyer's answer (2026-10-05)
+
+| Entry | What changed |
+| --- | --- |
+| [1. Identity for a domain backend](#1-identity-for-a-domain-backend-on-the-same-origin) | `/auth/check` exists. It is a 204 or the refusal `/k8s` would give, judged on the request the ingress forwards, so a write to the backend needs the session's CSRF proof from krm-foyer's origin. With `?identity=true`, the 204 carries `Krm-Foyer-Identity`: the API server's `userInfo` with the session's `displayName` and `connector`, in one base64url JSON header, never the token. A SelfSubjectReview is reused per token for 30 seconds, within the session's request rate. The e2e suite forges the header through the real Traefik and checks the backend never sees it. See [the check](ingress.md#the-check) |
+| [2. Room Pass's QR login](#2-prove-the-room-pass-qr-login-through-krm-foyer) | Run end to end (2026-10-06): Room Pass 2.0.0 and its own Dex with the `authproxy` connector in the e2e fixture, on a shared host with krm-foyer and a test application whose `/join-room` sets the join cookie, and a Chromium spec from the QR code to Room Pass's join page with the code already supplied, a display name, back to the application's page, `connector: room-pass` and the display metadata in `/auth/session`, a write with both extras in its audit event, a pod replacement and both logouts. It also checks the silent fallback, and that only Room Pass can reach Dex. Running it corrected [the recipe](room-pass.md): Room Pass's sign-out is a form on its `/join`, not a redirect to `/logout` |
+| [3. Routing recipes](#3-routing-recipes-for-one-host-traefik-and-vite) | A Traefik `IngressRoute` with ForwardAuth middlewares, run by the e2e fixture beside its Gateway API routes; an nginx `auth_request` block, run by the fixture as the document has it since its login link carries the whole page, encoded (2026-10-06); a Vite dev-server proxy, in which Vite takes `task demo`'s public URL so cookies and CSRF work unchanged. The Vite recipe is not run by the suite. A redirect from the check is now absolute, because Traefik resolves a relative one against the check's address |
+| [4. The operator as cluster-admin](#4-the-operator-signs-in-as-cluster-admin) | The browser identity recipe: one username expression gives krm-foyer's tokens (by `azp`, or the audience) a different name from the command line's, so `cluster-admin` stays on the command-line name. The fixture now does this, and a spec proves krm-foyer is refused what the command-line name was granted |
+
 ## What 0.2.0 already covers
 
 | Voter today | krm-foyer 0.2.0 | Voter code that goes away |
@@ -72,7 +81,7 @@ Room Pass, and none of the open entries below has been tried there.
 
 ## 1. Identity for a domain backend on the same origin
 
-**open · ask · `/auth/check` with identity headers**
+**done · `/auth/check?identity=true`, see [the check](ingress.md#the-check)**
 
 Some of Voter is domain logic, and it stays in a backend:
 
@@ -112,7 +121,7 @@ this entry too.
 
 ## 2. Prove the Room Pass QR login through krm-foyer
 
-**open · ask · release evidence, not new krm-foyer code**
+**done · run end to end by the e2e suite, see [room-pass.md](room-pass.md#what-the-e2e-suite-runs)**
 
 The audience-release plan says: *"Before switching voter to foyer, prove one real
 QR-to-login journey there."* That has not happened. krm-foyer's fixture signs in with
@@ -146,7 +155,7 @@ entry 3.
 
 ## 3. Routing recipes for one host: Traefik and Vite
 
-**open · ask · roadmap: "Routing recipes for one shared domain"**
+**done · Traefik run by the e2e fixture, Vite written: see [recipes](ingress.md#recipes) and [the dev-server proxy](ingress.md#during-development-a-dev-server-proxy)**
 
 Voter would serve four things from one host:
 
@@ -168,7 +177,7 @@ expect to lose an afternoon.
 
 ## 4. The operator signs in as cluster-admin
 
-**open question · [application scope](https://github.com/ConfigButler/krm-foyer/blob/main/docs/application-scope.md)**
+**done · [a browser identity](application-scope.md#a-browser-identity-in-kubernetes), proved by one e2e spec**
 
 The operator logs in through GitHub as `github:simonkoudijs@gmail.com`, and that user
 is bound to `cluster-admin` (`auth/rbac/humans-rbac.yaml`). Today Voter's backend uses
@@ -240,9 +249,13 @@ we can extract it as the example rather than have the guide written from scratch
 
 ## Suggested order
 
-1. **Operator-only pilot, now.** It needs entry 3, and entry 4 decided. With the GitHub
-   login, Voter's admin and CoffeeConfig editor run through `/k8s` and `/stream/v1`.
-   This is the roadmap's own *"Voter's CoffeeConfig editor running on krm-foyer"*.
+1. **Operator-only pilot, now.** It needs entry 3, entry 4 decided, and the
+   ValidatingAdmissionPolicy that keeps a CoffeeConfig save to `spec` (see
+   [What stays Voter's work](#what-stays-voters-work)): through `/k8s`, the editor's
+   `patch` grant also reaches labels and annotations, which gitops-reverser would
+   commit. With the GitHub login, Voter's admin and CoffeeConfig editor run through
+   `/k8s` and `/stream/v1`. This is the roadmap's own *"Voter's CoffeeConfig editor
+   running on krm-foyer"*.
 2. **The audience login.** It needs entry 2. Participant login moves as one piece,
    since there can only be one session cookie on the origin.
 3. **Votes and the storefront.** They need entry 1, or a decision in Voter to move

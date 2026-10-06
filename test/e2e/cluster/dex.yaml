@@ -31,6 +31,18 @@ staticClients:
     secret: krm-foyer-e2e-secret
     redirectURIs:
       - https://foyer.localhost:8443/auth/callback
+  # The operator's command line, as kubectl's OIDC plugin would be: a client of its own,
+  # so the API server can tell its tokens from krm-foyer's and map the same person to a
+  # different username (authentication-config.yaml). docs/application-scope.md.
+  - id: kubectl
+    name: kubectl
+    secret: kubectl-e2e-secret
+    redirectURIs:
+      - http://localhost:8000
+    # krm-foyer may ask for this client's audience with Dex's cross-client scope, as
+    # krm-foyer asks for the cluster's in a deployment like Voter's: its token then has
+    # both audiences and azp: krm-foyer, and is still the browser's (foyer_scope_test.go).
+    trustedPeers: [krm-foyer]
   # A client the cluster does not accept tokens for. Its tokens are real Dex tokens
   # with the wrong audience.
   - id: other-app

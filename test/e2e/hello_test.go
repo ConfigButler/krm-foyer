@@ -275,13 +275,17 @@ var _ = Describe("The hello example", Label("browser"), Ordered, func() {
 })
 
 // startBrowser starts Chromium in this container's network namespace and returns a tab
-// in it. Both are gone when the spec tree is done.
-func startBrowser(ctx context.Context) context.Context {
+// in it. Both are gone when the spec tree is done. It trusts the front door's and Dex's
+// certificates, and those in the files more names.
+func startBrowser(ctx context.Context, more ...string) context.Context {
 	// Trust exactly the certificates of the front door and Dex, by their public keys:
 	// the fixture's CA is not in the browser's store.
 	trusted := []string{
 		spki(filepath.Join(fx.dir, "foyer", "tls.crt")),
 		spki(filepath.Join(fx.dir, "tls", "dex.crt")),
+	}
+	for _, file := range more {
+		trusted = append(trusted, spki(file))
 	}
 	// This container: the devcontainer, or the CI job's container. Docker names it by
 	// its hostname unless told otherwise.

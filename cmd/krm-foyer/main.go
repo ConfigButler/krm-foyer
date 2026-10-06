@@ -353,7 +353,8 @@ func handler(cfg config, logger *slog.Logger, m *metrics.Metrics) (http.Handler,
 		return nil, nil, err
 	}
 	return server.New(server.Config{
-		Version: version, Kubernetes: api, Stream: streams, WhoAmI: streams.WhoAmI(), Auth: login.Handler(), Ready: login.Ready,
+		Version: version, Kubernetes: api, Stream: streams, WhoAmI: streams.WhoAmI(),
+		Check: login.Check(streams.Identify), Auth: login.Handler(), Ready: login.Ready,
 	}), login.Run, nil
 }
 

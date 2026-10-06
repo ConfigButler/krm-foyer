@@ -1,0 +1,28 @@
+# A third krm-foyer in the e2e fixture, for Room Pass's QR login (docs/room-pass.md):
+# on the application's host, room.localhost, which it shares with Room Pass's /join and
+# the test application (room-pass/routes.yaml), and signing in at Room Pass's Dex.
+# Nothing here is Room Pass's: the connector parameter, the scopes and the claim paths
+# are krm-foyer's generic settings, with Dex's names. room-pass.sh installs it, with
+# the main release's image, and creates the Secrets named here.
+publicURL: https://room.localhost:8443
+oidc:
+  issuer: https://room-pass.localhost:8443
+  clientID: krm-foyer
+  clientSecret:
+    secretName: krm-foyer-room-oidc
+  # groups carries the Room's audience group, and federated:id the connector, which the
+  # API server's rules for this issuer require.
+  scopes: [openid, email, profile, groups, "federated:id"]
+  caConfigMap:
+    name: krm-foyer-issuer-ca
+tls:
+  secretName: krm-foyer-room-tls
+login:
+  authorizationParameters:
+    connector_id: {allowFromRequest: true, allowedValues: [room-pass]}
+  sessionClaims:
+    connector: /federated_claims/connector_id
+sessionKeys:
+  secretName: krm-foyer-room-session-keys
+image:
+  pullPolicy: Never

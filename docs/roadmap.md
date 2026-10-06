@@ -75,8 +75,10 @@ new design only when multiple replicas or stronger revocation guarantees are req
    Add docs/link checks early enough to prevent status drift; keep broader coverage
    targets secondary to tests of specific failure modes.
 
-The page login gate (`/auth/check`) is a convenience after the deployment and integration
-work: `requireSession()` already handles arrival while signed out. Application scopes,
+The login gate and identity for a domain backend (`/auth/check`) exist since Voter
+asked for them, with a browser identity proved in the cluster's authentication
+configuration as the first step of application scope; see
+[implementer feedback](implementer-feedback.md). A scope list in krm-foyer,
 external-login modes and upgrade protocols stay driven by actual adopter requirements.
 
 ## Completed milestones
@@ -125,7 +127,10 @@ Security items need tests that try to get past the boundary.
 - [x] The implemented `foyer` authentication/access specs: login, identity, differential answers,
       RBAC changes, watches, path and subresource refusals, CSRF, logout and the token
       scan, each checked by deploying a krm-foyer broken on purpose
-- [ ] The remaining `foyer` specs: refusal of a refresh, and dedicated ingress/login-gate behavior
+- [x] Login gate and identity check through the real Traefik: a forged identity header,
+      writes without CSRF proof and from another origin, signed-out page loads and scripts
+- [ ] The remaining `foyer` specs: refusal of a refresh, and spoofed `Host` and
+      `X-Forwarded-*` through the ingress
 - [x] Browser e2e: log in, read, create, edit, get refused with 403, hit a 409, log out,
       and no credential within the page's reach. Chromium driven from the Go suite
       with chromedp, keeping browser e2e in Go. Node separately runs the helper unit
@@ -154,9 +159,10 @@ Security items need tests that try to get past the boundary.
       whatever the method; a test that a cross-site `GET` navigation is refused before it
       reaches the backend
 
-- [ ] [Application scope](application-scope.md): first document a browser identity in the
-      cluster's authentication config, proved by one e2e spec; then a scope list in
-      krm-foyer for clusters where that is not possible
+- [x] [Application scope](application-scope.md), first step: a browser identity in the
+      cluster's authentication config, documented and proved by one e2e spec
+- [ ] Application scope, then: a scope list in krm-foyer for clusters where the
+      authentication config cannot change
 
 ### Deployment
 
@@ -171,15 +177,22 @@ Security items need tests that try to get past the boundary.
 - [ ] Helm chart values for both models
 - [ ] Rolling updates that refuse no connection: krm-foyer stops listening as soon as
       it is told to stop, while its Service may still route to it for a moment, so a
-      rollout refuses connections briefly (seen by the rehearsal, which restarts it). A
-      wait before shutdown, or readiness turned off first, with a test
-- [ ] Routing recipes for one shared domain: a Gateway API `HTTPRoute`, an nginx server
-      block and a Vite dev-server proxy
+      rollout refuses connections briefly, and now and then leaves one unanswered.
+      Parked (2026-10-06), not needed for the demo: the measurements, what was tried and
+      a pending spec are in
+      [rollout-connections.md](investigations/rollout-connections.md)
+- [x] Routing recipes for one shared domain: a Gateway API `HTTPRoute`, a Traefik
+      `IngressRoute` and an nginx server block (all run by the e2e fixture, nginx's
+      copied from the document), and a Vite dev-server proxy (written, not run). See
+      [ingress](ingress.md)
 - [x] `requireSession()` in the browser helper for navigation to login
-- [ ] Login gate: `GET /auth/check` for an ingress gating the application's pages, with
+- [x] Login gate: `GET /auth/check` for an ingress gating the application's pages, with
       nginx and Traefik recipes
-- [ ] Later, when a hybrid application asks: identity headers from the check for a domain
-      backend, never the token
+- [x] Identity from the check for a domain backend, never the token
+      (`?identity=true`, `Krm-Foyer-Identity`), asked for by Voter
+- [x] Room Pass's QR login run end to end through krm-foyer: Room Pass 2.0.0 and its
+      Dex in the fixture, and a Chromium spec from the QR code to logout, with the
+      release checks Voter's plan asks for. See [room-pass.md](room-pass.md)
 
 ### Access
 

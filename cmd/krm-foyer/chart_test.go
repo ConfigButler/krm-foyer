@@ -221,6 +221,18 @@ func TestChartRendersArgsTheBinaryAccepts(t *testing.T) {
 			t.Fatalf("shared %+v", cfg.login.shared)
 		}
 	})
+	t.Run("e2e Room Pass fixture", func(t *testing.T) {
+		cfg := parseRendered(t, render(t, []string{e2e + "foyer-room-values.yaml"}))
+		l := cfg.login.auth
+		if !slices.Equal(l.Scopes, []string{"openid", "email", "profile", "groups", "federated:id"}) || cfg.login.shared != nil {
+			t.Fatalf("scopes %q, shared %+v", l.Scopes, cfg.login.shared)
+		}
+		p := l.Login.AuthorizationParameters
+		if c := p["connector_id"]; !c.AllowFromRequest || !slices.Equal(c.AllowedValues, []string{"room-pass"}) || len(p) != 1 ||
+			l.Login.SessionClaims.Connector != "/federated_claims/connector_id" {
+			t.Fatalf("login %+v", l.Login)
+		}
+	})
 	t.Run("every value set", func(t *testing.T) {
 		values := filepath.Join(t.TempDir(), "values.yaml")
 		// Large numbers, which Helm reads from a file as floats, and a fraction.
