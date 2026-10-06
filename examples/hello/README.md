@@ -41,15 +41,16 @@ change either way.
 
 ```js
 import { session, login, k8s } from '/_foyer/foyer.js';
-import { LiveResourceStore, connectManagedResourceStream, resourceStreamURL } from './krm-stream.js';
+import { LiveResourceStore, applyStreamEvent, connectResourceStream, resourceStreamURL } from './krm-stream.js';
 
 const s = await session();          // {authenticated, email, ...}; never a token
 if (!s.authenticated) login();      // to the issuer, and back to this page
 
 // The notes as they are, and as they change, for what RBAC lets this user see.
 const store = new LiveResourceStore();
-connectManagedResourceStream(resourceStreamURL('/stream/v1',
-  { group: 'hello.krm-foyer.example', version: 'v1', resource: 'notes', namespace: 'hello' }), store);
+connectResourceStream(resourceStreamURL('/stream/v1',
+  { group: 'hello.krm-foyer.example', version: 'v1', resource: 'notes', namespace: 'hello' }),
+  (event) => applyStreamEvent(store, event));
 
 // A save is the user's edit alone, on the version they last saw.
 const { uid, resourceVersion, patch } = store.captureSave(id);

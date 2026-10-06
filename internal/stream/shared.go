@@ -167,7 +167,7 @@ func newShared(cfg SharedConfig, s *Streams) (*shared, error) {
 	m := s.gate.Metrics()
 	upstream := &sharedUpstream{kube: kube.NewBackend(data), metrics: m}
 	return &shared{
-		backend: gateway.NewSharedBackendWithOptions(upstream, gateway.SharedOptions{
+		backend: gateway.NewSharedBackend(upstream, gateway.SharedOptions{
 			Observer: observer{metrics: m},
 		}),
 		resources: slices.Clone(cfg.Resources),

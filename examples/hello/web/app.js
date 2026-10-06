@@ -11,7 +11,7 @@
 import { session, login, logout, k8s } from '/_foyer/foyer.js';
 // krm-stream's browser library, one file vendored from its npm package (task
 // vendor-krm-stream). It keeps what the server sent apart from what the user typed.
-import { LiveResourceStore, connectManagedResourceStream, resourceStreamURL } from './krm-stream.js';
+import { LiveResourceStore, applyStreamEvent, connectResourceStream, resourceStreamURL } from './krm-stream.js';
 
 const namespace = new URLSearchParams(location.search).get('namespace') || 'hello';
 const group = 'hello.krm-foyer.example';
@@ -94,12 +94,15 @@ function showConnection(state) {
 function connect() {
   connection?.close();
   return new Promise((synced) => {
-    connection = connectManagedResourceStream(
+    connection = connectResourceStream(
       resourceStreamURL('/stream/v1', { group, version: 'v1', resource: 'notes', namespace }),
-      store,
+      (event) => {
+        applyStreamEvent(store, event);
+        if (event.type === 'synced') {
+          synced();
+        }
+      },
       {
-        onSynced: synced,
-        onStateChange: showConnection,
         onError: (code, message, terminal) => {
           if (!terminal) {
             return; // the connection recovers on its own
@@ -113,6 +116,10 @@ function connect() {
         },
       },
     );
+    showConnection(connection.state);
+    connection.subscribe(showConnection);
+    // A rendering bug stops the stream; say so rather than leave it unhandled.
+    connection.closed.catch((err) => say(`The live view stopped: ${err.message}`, 'error'));
   });
 }
 

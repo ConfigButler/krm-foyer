@@ -2,6 +2,10 @@
 
 **Draft for the krm-stream team, 2026-10-05. Not submitted upstream.**
 
+**Update 2026-10-06:** krm-stream built Deliverables 1 and 2 (0.8.0, and native resume
+in 0.10.0), without pagination or streaming lists. What it takes to adopt
+them here: [adopting native watches](adopting-krm-stream-native-watches.md).
+
 Suggested issue title: **feat(client): add a native Kubernetes watch connector with
 the shared frontend lifecycle**
 

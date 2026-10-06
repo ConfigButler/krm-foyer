@@ -1,150 +1,152 @@
-// dist/sse.js
-var SSEDecoder = class {
-  #buffer = "";
-  /** Feed a chunk of the stream; get back the events that completed with it. */
-  push(chunk) {
-    this.#buffer += chunk;
-    const out = [];
-    const trailingCR = this.#buffer.endsWith("\r");
-    const complete = trailingCR ? this.#buffer.slice(0, -1) : this.#buffer;
-    this.#buffer = complete.replace(/\r\n|\r/g, "\n") + (trailingCR ? "\r" : "");
-    for (; ; ) {
-      const sep = this.#buffer.indexOf("\n\n");
-      if (sep === -1)
-        break;
-      const frame = this.#buffer.slice(0, sep);
-      this.#buffer = this.#buffer.slice(sep + 2);
-      const ev = parseFrame(frame);
-      if (ev)
-        out.push(ev);
-    }
-    return out;
+// dist/lifecycle.js
+function runConnection(transport, consume, opts) {
+  const maxRetries = opts.maxRetries ?? 8;
+  const healthyResetMs = opts.healthyResetMs ?? 3e4;
+  const delay = opts.retryDelayMs ?? 500;
+  const cap = opts.maxRetryDelayMs ?? 3e4;
+  if (!Number.isFinite(healthyResetMs) || healthyResetMs <= 0 || healthyResetMs > 2147483647 || !Number.isSafeInteger(maxRetries) || maxRetries < 0 || !Number.isFinite(delay) || delay < 0 || !Number.isFinite(cap) || cap < 0 || cap > 2147483647) {
+    throw new RangeError("krm-stream: invalid retry budget or delay");
   }
-};
-var StreamSequence = class {
-  #next = 1;
-  observe(event) {
-    if (!Number.isSafeInteger(event.seq) || event.seq !== this.#next) {
-      return { expected: this.#next, received: event.seq };
-    }
-    this.#next++;
-    return null;
-  }
-};
-function parseFrame(frame) {
-  const data = [];
-  for (const line of frame.split("\n")) {
-    if (line === "" || line.startsWith(":"))
-      continue;
-    const colon = line.indexOf(":");
-    const field = colon === -1 ? line : line.slice(0, colon);
-    let value = colon === -1 ? "" : line.slice(colon + 1);
-    if (value.startsWith(" "))
-      value = value.slice(1);
-    if (field === "data")
-      data.push(value);
-  }
-  if (data.length === 0)
-    return null;
-  try {
-    return JSON.parse(data.join("\n"));
-  } catch {
-    return null;
-  }
-}
-function applyStreamEvent(store, ev) {
-  switch (ev.type) {
-    case "reset":
-      store.beginSnapshot();
-      return { type: ev.type, added: false, structural: false, flashed: [], conflicts: [] };
-    case "added":
-    case "modified": {
-      if (!ev.object)
-        return { type: ev.type, added: false, structural: false, flashed: [], conflicts: [] };
-      const result = store.applyServerEvent(ev.object, { redacted: ev.redacted });
-      return { type: ev.type, uid: ev.object.metadata.uid, ...result };
-    }
-    case "deleted": {
-      const uid = ev.identity?.uid;
-      if (uid)
-        store.removeResource(uid);
-      return { type: ev.type, uid, added: false, structural: true, flashed: [], conflicts: [] };
-    }
-    case "synced":
-      store.endSnapshot();
-      return { type: ev.type, added: false, structural: false, flashed: [], conflicts: [] };
-    default:
-      return { type: ev.type, added: false, structural: false, flashed: [], conflicts: [] };
-  }
-}
-function connectResourceStream(url, store, opts = {}) {
-  if (opts.signal?.aborted)
-    return { close: () => {
-    }, closed: Promise.resolve() };
   const controller = new AbortController();
-  const fetchImpl = opts.fetch ?? globalThis.fetch;
-  const abort = () => controller.abort();
-  opts.signal?.addEventListener("abort", abort, { once: true });
-  const closed = (async () => {
-    const res = await fetchImpl(url, {
-      signal: controller.signal,
-      headers: { Accept: "text/event-stream", ...opts.headers },
-      // The stream IS the response body; a cached one is a stream that never moves.
-      cache: "no-store",
-      credentials: opts.credentials ?? "same-origin"
-    });
-    if (!res.ok || !res.body) {
-      const code = res.status === 401 ? "UNAUTHENTICATED" : res.status === 403 ? "FORBIDDEN" : res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504 ? "UPSTREAM_UNAVAILABLE" : "INTERNAL";
-      const terminal = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429;
-      const message = await statusMessage(res, controller.signal) ?? `stream: HTTP ${res.status}`;
-      if (controller.signal.aborted)
-        return;
-      opts.onError?.(code, message, terminal, retryAfter(res.headers.get("Retry-After")));
-      return;
-    }
-    if (controller.signal.aborted) {
-      await res.body.cancel();
-      return;
-    }
-    opts.onOpen?.();
-    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
-    const cancelReader = () => {
-      void reader.cancel().catch(() => {
-      });
-    };
-    controller.signal.addEventListener("abort", cancelReader, { once: true });
-    if (controller.signal.aborted)
-      cancelReader();
-    const decoder = new SSEDecoder();
-    const sequence = new StreamSequence();
-    try {
-      for (; ; ) {
-        const { done, value } = await reader.read();
-        if (done || controller.signal.aborted)
-          return;
-        for (const ev of decoder.push(value)) {
-          if (controller.signal.aborted)
-            return;
-          if (feed(store, sequence, ev, opts)) {
-            controller.abort();
-            return;
-          }
-        }
-      }
-    } catch (err) {
-      if (!controller.signal.aborted)
-        throw err;
-    } finally {
-      controller.signal.removeEventListener("abort", cancelReader);
-      await reader.cancel().catch(() => {
-      });
-    }
-  })();
-  return {
-    close: () => controller.abort(),
-    closed: closed.catch(() => {
-    }).finally(() => opts.signal?.removeEventListener("abort", abort))
+  const subscribers = /* @__PURE__ */ new Set();
+  let state = Object.freeze({ status: "connecting", retries: 0 });
+  let terminal = false;
+  let hintMs;
+  let healthTimer;
+  const clearHealthTimer = () => {
+    clearTimeout(healthTimer);
+    healthTimer = void 0;
   };
+  let failure;
+  const fail = (error) => {
+    failure ??= { error };
+    clearHealthTimer();
+    controller.abort();
+  };
+  const call = (callback) => {
+    try {
+      callback();
+    } catch (error) {
+      fail(error);
+    }
+  };
+  const publish = (status, detail = {}) => {
+    state = Object.freeze({ status, retries: state.retries, ...detail });
+    for (const callback of subscribers)
+      call(() => callback(state));
+  };
+  const close = () => {
+    clearHealthTimer();
+    controller.abort();
+  };
+  opts.signal?.addEventListener("abort", close, { once: true });
+  if (opts.signal?.aborted)
+    close();
+  const run = async () => {
+    while (!controller.signal.aborted) {
+      publish("connecting");
+      if (controller.signal.aborted)
+        break;
+      hintMs = void 0;
+      let gap;
+      await transport({
+        consume: (event) => call(() => consume(event)),
+        opened: () => publish("syncing"),
+        reset: () => {
+          clearHealthTimer();
+          publish("syncing");
+        },
+        synced: () => {
+          hintMs = void 0;
+          if (state.status !== "live") {
+            healthTimer = setTimeout(() => {
+              healthTimer = void 0;
+              if (!controller.signal.aborted && state.status === "live") {
+                state = { ...state, retries: 0 };
+                publish("live");
+              }
+            }, healthyResetMs);
+          }
+          publish("live");
+        },
+        gap: (expected, received) => {
+          clearHealthTimer();
+          gap = Object.freeze({ expected, received });
+        },
+        error: (code, message, isTerminal, retryAfterMs) => {
+          if (isTerminal)
+            clearHealthTimer();
+          terminal ||= isTerminal;
+          if (!isTerminal && retryAfterMs !== void 0)
+            hintMs = retryAfterMs;
+          call(() => opts.onError?.(code, message, isTerminal, retryAfterMs));
+        }
+      }, controller.signal);
+      clearHealthTimer();
+      if (controller.signal.aborted)
+        break;
+      if (terminal)
+        return "terminal";
+      if (state.retries >= maxRetries)
+        return "exhausted";
+      const ceiling = Math.min(cap, delay * 2 ** Math.min(state.retries, 30));
+      const jittered = Math.floor(ceiling * (0.5 + Math.random() * 0.5));
+      const wait = Math.min(cap, Math.max(jittered, hintMs ?? 0));
+      state = { ...state, retries: state.retries + 1 };
+      publish("retrying", { retryInMs: wait, ...gap && { gap } });
+      await new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          controller.signal.removeEventListener("abort", done);
+          resolve();
+        };
+        const timer = setTimeout(done, wait);
+        controller.signal.addEventListener("abort", done, { once: true });
+        if (controller.signal.aborted)
+          done();
+      });
+    }
+    return "closed";
+  };
+  const closed = Promise.resolve().then(async () => {
+    try {
+      const ended = await run();
+      publish(failure ? "closed" : ended);
+    } finally {
+      clearHealthTimer();
+      opts.signal?.removeEventListener("abort", close);
+      subscribers.clear();
+    }
+    if (failure)
+      throw failure.error;
+  });
+  return {
+    close,
+    closed,
+    get state() {
+      return state;
+    },
+    subscribe(callback) {
+      subscribers.add(callback);
+      return () => {
+        subscribers.delete(callback);
+      };
+    }
+  };
+}
+
+// dist/http.js
+function request(url, accept, signal, opts) {
+  return (opts.fetch ?? globalThis.fetch)(url, {
+    signal,
+    headers: { Accept: accept, ...opts.headers },
+    cache: "no-store",
+    credentials: opts.credentials ?? "same-origin"
+  });
+}
+function refusal(status) {
+  const code = status === 401 ? "UNAUTHENTICATED" : status === 403 ? "FORBIDDEN" : status === 429 || status === 502 || status === 503 || status === 504 ? "UPSTREAM_UNAVAILABLE" : "INTERNAL";
+  return { code, terminal: status >= 400 && status < 500 && status !== 408 && status !== 429 };
 }
 var maxStatusBytes = 16 * 1024;
 var statusBudgetMs = 2e3;
@@ -208,195 +210,189 @@ function retryAfter(header, now = Date.now()) {
   const at2 = Date.parse(value);
   return Number.isNaN(at2) ? void 0 : Math.max(0, at2 - now);
 }
-function connectWithEventSource(url, store, opts = {}) {
-  if (opts.signal?.aborted)
-    return { close: () => {
-    }, closed: Promise.resolve() };
-  const es = new EventSource(url, { withCredentials: true });
-  let sequence = new StreamSequence();
-  let stopped = false;
-  let resolve;
-  const closed = new Promise((r) => {
-    resolve = r;
-  });
-  const shut = () => {
-    stopped = true;
-    es.close();
-    opts.signal?.removeEventListener("abort", shut);
-    resolve();
+
+// dist/version.js
+var VERSION = "0.10.0";
+var PROTOCOL_VERSION = 1;
+
+// dist/sse.js
+var SSEDecoder = class {
+  #buffer = "";
+  /** Feed a chunk of the stream; get back the events that completed with it. */
+  push(chunk) {
+    this.#buffer += chunk;
+    const out = [];
+    const trailingCR = this.#buffer.endsWith("\r");
+    const complete = trailingCR ? this.#buffer.slice(0, -1) : this.#buffer;
+    this.#buffer = complete.replace(/\r\n|\r/g, "\n") + (trailingCR ? "\r" : "");
+    for (; ; ) {
+      const sep = this.#buffer.indexOf("\n\n");
+      if (sep === -1)
+        break;
+      const frame = this.#buffer.slice(0, sep);
+      this.#buffer = this.#buffer.slice(sep + 2);
+      const ev = parseFrame(frame);
+      if (ev)
+        out.push(ev);
+    }
+    return out;
+  }
+};
+var StreamSequence = class {
+  #next = 1;
+  observe(event) {
+    if (!Number.isSafeInteger(event.seq) || event.seq !== this.#next) {
+      return { expected: this.#next, received: event.seq };
+    }
+    this.#next++;
+    return null;
+  }
+};
+function parseFrame(frame) {
+  const data = [];
+  for (const line of frame.split("\n")) {
+    if (line === "" || line.startsWith(":"))
+      continue;
+    const colon = line.indexOf(":");
+    const field = colon === -1 ? line : line.slice(0, colon);
+    let value = colon === -1 ? "" : line.slice(colon + 1);
+    if (value.startsWith(" "))
+      value = value.slice(1);
+    if (field === "data")
+      data.push(value);
+  }
+  if (data.length === 0)
+    return null;
+  try {
+    return JSON.parse(data.join("\n"));
+  } catch {
+    return null;
+  }
+}
+function toStateEvent(wire) {
+  switch (wire.type) {
+    case "reset":
+      return {
+        type: "reset",
+        ...wire.target === void 0 ? {} : { target: wire.target },
+        ...wire.scope === void 0 ? {} : { scope: wire.scope },
+        ...wire.projection === void 0 ? {} : { projection: wire.projection }
+      };
+    case "added":
+    case "modified":
+      if (!wire.object)
+        return null;
+      return {
+        type: wire.type,
+        object: wire.object,
+        ...wire.redacted === void 0 ? {} : { redacted: wire.redacted }
+      };
+    case "deleted":
+      if (!wire.identity?.uid)
+        return null;
+      return { type: "deleted", identity: wire.identity };
+    case "synced":
+      return { type: "synced" };
+    default:
+      return null;
+  }
+}
+async function streamOnce(url, hooks, signal, opts = {}) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted)
+    abort();
+  const sequence = new StreamSequence();
+  const { consume } = hooks;
+  const deliver2 = (wire) => {
+    const gap = sequence.observe(wire);
+    if (gap) {
+      hooks.gap(gap.expected, gap.received);
+      return false;
+    }
+    if (wire.type === "error") {
+      const hint = typeof wire.retryAfterMs === "number" && wire.retryAfterMs >= 0 ? wire.retryAfterMs : void 0;
+      hooks.error(wire.code ?? "INTERNAL", wire.message ?? "", wire.terminal ?? false, hint);
+      return wire.terminal !== true;
+    }
+    const event = toStateEvent(wire);
+    if (!event)
+      return true;
+    if (event.type === "reset") {
+      hooks.reset();
+      if (controller.signal.aborted)
+        return false;
+    }
+    consume(event);
+    if (event.type === "synced" && !controller.signal.aborted)
+      hooks.synced();
+    return true;
   };
-  es.onopen = () => {
-    if (stopped)
+  try {
+    if (controller.signal.aborted)
       return;
-    sequence = new StreamSequence();
-    opts.onOpen?.();
-  };
-  es.onmessage = (e) => {
-    if (stopped)
-      return;
-    let ev;
-    try {
-      ev = JSON.parse(e.data);
-    } catch {
+    const res = await request(url, "text/event-stream", controller.signal, opts);
+    if (!res.ok || !res.body) {
+      const { code, terminal } = refusal(res.status);
+      const message = await statusMessage(res, controller.signal) ?? `stream: HTTP ${res.status}`;
+      if (controller.signal.aborted)
+        return;
+      hooks.error(code, message, terminal, retryAfter(res.headers.get("Retry-After")));
       return;
     }
-    if (feed(store, sequence, ev, opts))
-      shut();
-  };
-  es.onerror = () => {
-    if (es.readyState === EventSource.CLOSED)
-      shut();
-  };
-  opts.signal?.addEventListener("abort", shut, { once: true });
-  return { close: shut, closed };
-}
-function feed(store, sequence, ev, opts) {
-  const gap = sequence.observe(ev);
-  if (gap) {
-    opts.onGap?.(gap.expected, gap.received);
-    return true;
+    if (controller.signal.aborted) {
+      await res.body.cancel().catch(() => {
+      });
+      return;
+    }
+    const protocol = res.headers.get("X-KRM-Stream-Protocol");
+    if (protocol !== null && protocol.trim() !== String(PROTOCOL_VERSION)) {
+      await res.body.cancel().catch(() => {
+      });
+      if (controller.signal.aborted)
+        return;
+      hooks.error("INTERNAL", `stream: protocol mismatch: the gateway speaks X-KRM-Stream-Protocol ${JSON.stringify(protocol)}, this client speaks ${PROTOCOL_VERSION}`, true);
+      return;
+    }
+    hooks.opened();
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    const cancelReader = () => {
+      void reader.cancel().catch(() => {
+      });
+    };
+    controller.signal.addEventListener("abort", cancelReader, { once: true });
+    if (controller.signal.aborted)
+      cancelReader();
+    const decoder = new SSEDecoder();
+    try {
+      for (; ; ) {
+        const { done, value } = await reader.read();
+        if (done || controller.signal.aborted)
+          return;
+        for (const ev of decoder.push(value)) {
+          if (controller.signal.aborted)
+            return;
+          if (!deliver2(ev)) {
+            controller.abort();
+            return;
+          }
+        }
+      }
+    } finally {
+      controller.signal.removeEventListener("abort", cancelReader);
+      await reader.cancel().catch(() => {
+      });
+    }
+  } catch {
+  } finally {
+    signal.removeEventListener("abort", abort);
   }
-  if (ev.type === "error") {
-    const hint = typeof ev.retryAfterMs === "number" && ev.retryAfterMs >= 0 ? ev.retryAfterMs : void 0;
-    opts.onError?.(ev.code ?? "INTERNAL", ev.message ?? "", ev.terminal ?? false, hint);
-    return ev.terminal === true;
-  }
-  const change = applyStreamEvent(store, ev);
-  if (ev.type === "synced")
-    opts.onSynced?.();
-  opts.onChange?.(change);
-  return false;
 }
 
 // dist/connection.js
-function connectManagedResourceStream(url, store, opts = {}) {
-  const maxRetries = opts.maxRetries ?? 8;
-  const healthyResetMs = opts.healthyResetMs ?? 3e4;
-  const delay = opts.retryDelayMs ?? 500;
-  const cap = opts.maxRetryDelayMs ?? 3e4;
-  if (!Number.isFinite(healthyResetMs) || healthyResetMs <= 0 || healthyResetMs > 2147483647 || !Number.isSafeInteger(maxRetries) || maxRetries < 0 || !Number.isFinite(delay) || delay < 0 || !Number.isFinite(cap) || cap < 0 || cap > 2147483647) {
-    throw new RangeError("krm-stream: invalid retry budget or delay");
-  }
-  const controller = new AbortController();
-  const subscribers = /* @__PURE__ */ new Set();
-  let state = Object.freeze({ status: "connecting", retries: 0 });
-  let terminal = false;
-  let hintMs;
-  let healthTimer;
-  const clearHealthTimer = () => {
-    clearTimeout(healthTimer);
-    healthTimer = void 0;
-  };
-  const publish = (status, retryInMs) => {
-    state = Object.freeze({ status, retries: state.retries, ...retryInMs === void 0 ? {} : { retryInMs } });
-    opts.onStateChange?.(state);
-    for (const callback of subscribers)
-      callback(state);
-  };
-  const close = () => {
-    clearHealthTimer();
-    controller.abort();
-  };
-  opts.signal?.addEventListener("abort", close, { once: true });
-  if (opts.signal?.aborted)
-    close();
-  const closed = Promise.resolve().then(async () => {
-    try {
-      while (!controller.signal.aborted) {
-        publish("connecting");
-        if (controller.signal.aborted)
-          break;
-        hintMs = void 0;
-        const stream = connectResourceStream(url, store, {
-          ...opts,
-          signal: controller.signal,
-          onGap: (expected, received) => {
-            clearHealthTimer();
-            opts.onGap?.(expected, received);
-          },
-          onOpen: () => {
-            publish("syncing");
-            opts.onOpen?.();
-          },
-          onChange: (change) => {
-            if (change.type === "reset") {
-              clearHealthTimer();
-              publish("syncing");
-            }
-            opts.onChange?.(change);
-          },
-          onSynced: () => {
-            hintMs = void 0;
-            if (state.status !== "live") {
-              healthTimer = setTimeout(() => {
-                healthTimer = void 0;
-                if (!controller.signal.aborted && state.status === "live") {
-                  state = { ...state, retries: 0 };
-                  publish("live");
-                }
-              }, healthyResetMs);
-            }
-            publish("live");
-            opts.onSynced?.();
-          },
-          onError: (code, message, isTerminal, retryAfterMs) => {
-            if (isTerminal)
-              clearHealthTimer();
-            terminal ||= isTerminal;
-            if (!isTerminal && retryAfterMs !== void 0)
-              hintMs = retryAfterMs;
-            opts.onError?.(code, message, isTerminal, retryAfterMs);
-          }
-        });
-        await stream.closed;
-        clearHealthTimer();
-        if (controller.signal.aborted)
-          break;
-        if (terminal) {
-          publish("terminal");
-          return;
-        }
-        if (state.retries >= maxRetries) {
-          publish("exhausted");
-          return;
-        }
-        const ceiling = Math.min(cap, delay * 2 ** Math.min(state.retries, 30));
-        const jittered = Math.floor(ceiling * (0.5 + Math.random() * 0.5));
-        const wait = Math.min(cap, Math.max(jittered, hintMs ?? 0));
-        state = { ...state, retries: state.retries + 1 };
-        publish("retrying", wait);
-        await new Promise((resolve) => {
-          const done = () => {
-            clearTimeout(timer);
-            controller.signal.removeEventListener("abort", done);
-            resolve();
-          };
-          const timer = setTimeout(done, wait);
-          controller.signal.addEventListener("abort", done, { once: true });
-          if (controller.signal.aborted)
-            done();
-        });
-      }
-      publish("closed");
-    } finally {
-      clearHealthTimer();
-      opts.signal?.removeEventListener("abort", close);
-      subscribers.clear();
-    }
-  });
-  return {
-    close,
-    closed,
-    get state() {
-      return state;
-    },
-    subscribe(callback) {
-      subscribers.add(callback);
-      return () => {
-        subscribers.delete(callback);
-      };
-    }
-  };
+function connectResourceStream(url, consume, opts = {}) {
+  return runConnection((hooks, signal) => streamOnce(url, hooks, signal, opts), consume, opts);
 }
 
 // dist/deep.js
@@ -430,6 +426,369 @@ function clone(v) {
     return out;
   }
   return v;
+}
+
+// dist/native.js
+var reserved = [
+  "watch",
+  "resourceVersion",
+  "resourceVersionMatch",
+  "limit",
+  "continue",
+  "sendInitialEvents",
+  "allowWatchBookmarks"
+];
+function connectNativeWatch(collectionURL, consume, opts = {}) {
+  const url = collectionURL.split("#")[0];
+  const query = new URLSearchParams(url.includes("?") ? url.slice(url.indexOf("?") + 1) : "");
+  for (const name of reserved) {
+    if (query.has(name))
+      throw new Error(`krm-stream: the collection URL must not set ${name}; the connector does`);
+  }
+  const position = { checkpoint: void 0, type: void 0 };
+  return runConnection((hooks, signal) => watchOnce(url, hooks, signal, opts, position), consume, opts);
+}
+var Malformed = class extends Error {
+};
+var Truncated = class extends Error {
+};
+var resumable = (status) => status === 408 || status === 429 || status >= 500;
+async function watchOnce(url, hooks, signal, opts, position) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted)
+    abort();
+  const aborted = () => controller.signal.aborted;
+  const { consume } = hooks;
+  const refused = async (phase, res) => {
+    if (!resumable(res.status))
+      position.checkpoint = void 0;
+    const { code, terminal } = classify(res.status);
+    const message = await statusMessage(res, controller.signal) ?? `native ${phase}: HTTP ${res.status}`;
+    if (aborted())
+      return;
+    hooks.error(code, message, terminal, retryAfter(res.headers.get("Retry-After")));
+  };
+  const malformed = (phase, error) => {
+    position.checkpoint = void 0;
+    if (!aborted())
+      hooks.error("INTERNAL", `native ${phase}: ${error.message}`, false);
+  };
+  const advance = (resourceVersion) => {
+    if (aborted())
+      return;
+    position.checkpoint = typeof resourceVersion === "string" && resourceVersion !== "" ? resourceVersion : void 0;
+  };
+  try {
+    if (aborted())
+      return;
+    const resumeFrom = position.checkpoint;
+    let from;
+    if (resumeFrom === void 0) {
+      const listed = await request(url, "application/json", controller.signal, opts);
+      if (!listed.ok || !listed.body)
+        return await refused("list", listed);
+      if (aborted())
+        return void await listed.body.cancel().catch(() => {
+        });
+      hooks.opened();
+      let collection;
+      try {
+        const text = await readText(listed.body, controller.signal);
+        if (text === void 0)
+          return;
+        collection = readCollection(text);
+      } catch (error) {
+        if (error instanceof Unpaginated) {
+          if (!aborted())
+            hooks.error("INTERNAL", error.message, true);
+          return;
+        }
+        if (error instanceof Malformed)
+          return malformed("list", error);
+        throw error;
+      }
+      position.type = collection.type;
+      from = collection.resourceVersion;
+      hooks.reset();
+      if (aborted())
+        return;
+      consume({ type: "reset" });
+      for (const object of collection.items) {
+        if (aborted())
+          return;
+        consume({ type: "added", object });
+      }
+      if (aborted())
+        return;
+    } else {
+      from = resumeFrom;
+    }
+    const watched = await request(`${url}${url.includes("?") ? "&" : "?"}watch=1&allowWatchBookmarks=true&resourceVersion=${encodeURIComponent(from)}`, "application/json", controller.signal, opts);
+    if (!watched.ok || !watched.body)
+      return await refused("watch", watched);
+    if (aborted())
+      return void await watched.body.cancel().catch(() => {
+      });
+    if (resumeFrom === void 0) {
+      consume({ type: "synced" });
+      if (aborted())
+        return void await watched.body.cancel().catch(() => {
+        });
+      position.checkpoint = from;
+    }
+    hooks.synced();
+    const reader = watched.body.getReader();
+    const cancelReader = () => {
+      void reader.cancel().catch(() => {
+      });
+    };
+    controller.signal.addEventListener("abort", cancelReader, { once: true });
+    if (aborted())
+      cancelReader();
+    const decoder = new WatchDecoder();
+    try {
+      for (; ; ) {
+        const { done, value } = await reader.read();
+        if (aborted())
+          return;
+        let lines;
+        try {
+          if (done)
+            return decoder.end();
+          lines = decoder.push(value);
+        } catch (error) {
+          if (error instanceof Truncated) {
+            return void hooks.error("INTERNAL", `native watch: ${error.message}`, false);
+          }
+          if (!(error instanceof Malformed))
+            throw error;
+          return malformed("watch", error);
+        }
+        for (const line of lines) {
+          if (aborted())
+            return;
+          let more;
+          try {
+            more = deliver(line, position.type, hooks, advance, position);
+          } catch (error) {
+            if (!(error instanceof Malformed))
+              throw error;
+            return malformed("watch", error);
+          }
+          if (!more)
+            return;
+        }
+      }
+    } finally {
+      controller.signal.removeEventListener("abort", cancelReader);
+      await reader.cancel().catch(() => {
+      });
+    }
+  } catch {
+  } finally {
+    controller.abort();
+    signal.removeEventListener("abort", abort);
+  }
+}
+function deliver(line, type, hooks, advance, position) {
+  let frame;
+  try {
+    frame = JSON.parse(line);
+  } catch {
+    throw new Malformed("a watch frame is not JSON");
+  }
+  if (!isRecord(frame) || typeof frame.type !== "string" || !isRecord(frame.object)) {
+    throw new Malformed("a watch frame has no type or object");
+  }
+  const object = frame.object;
+  switch (frame.type) {
+    case "ADDED":
+    case "MODIFIED": {
+      const applied = resource(object, type, "watch");
+      hooks.consume({ type: frame.type === "ADDED" ? "added" : "modified", object: applied });
+      advance(applied.metadata.resourceVersion);
+      return true;
+    }
+    case "DELETED": {
+      const removed = resource(object, type, "watch");
+      hooks.consume({ type: "deleted", identity: identity(removed) });
+      advance(removed.metadata.resourceVersion);
+      return true;
+    }
+    case "BOOKMARK":
+      advance(isRecord(object.metadata) ? object.metadata.resourceVersion : void 0);
+      return true;
+    case "ERROR": {
+      const { code, terminal, message, retryAfterMs, keepsCheckpoint } = statusError(object);
+      if (!keepsCheckpoint)
+        position.checkpoint = void 0;
+      hooks.error(code, message, terminal, retryAfterMs);
+      return false;
+    }
+    default:
+      throw new Malformed(`unknown watch event type ${JSON.stringify(frame.type)}`);
+  }
+}
+function classify(status) {
+  return status === 410 ? { code: "RESYNC_REQUIRED", terminal: false } : refusal(status);
+}
+function statusError(status) {
+  const reason = typeof status.reason === "string" ? status.reason : void 0;
+  const expired = reason === "Expired" || reason === "Gone";
+  const code = typeof status.code === "number" ? status.code : expired ? 410 : void 0;
+  const { code: errorCode, terminal } = code === void 0 ? { code: "INTERNAL", terminal: false } : classify(code);
+  const text = typeof status.message === "string" ? status.message : "";
+  const details = status.details;
+  const seconds = isRecord(details) ? details.retryAfterSeconds : void 0;
+  return {
+    code: errorCode,
+    terminal,
+    message: text !== "" ? text : `native watch: error ${code ?? reason ?? "without a status"}`,
+    retryAfterMs: typeof seconds === "number" && seconds >= 0 ? seconds * 1e3 : void 0,
+    keepsCheckpoint: code !== void 0 && !expired && resumable(code)
+  };
+}
+var Unpaginated = class extends Error {
+};
+function readCollection(text) {
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new Malformed("the collection is not JSON");
+  }
+  if (!isRecord(body))
+    throw new Malformed("the collection is not an object");
+  const metadata = isRecord(body.metadata) ? body.metadata : {};
+  if (typeof metadata.continue === "string" && metadata.continue !== "") {
+    throw new Unpaginated("native list: the response is one page of a paginated collection, which this connector does not support");
+  }
+  const resourceVersion = metadata.resourceVersion;
+  if (typeof resourceVersion !== "string" || resourceVersion === "") {
+    throw new Malformed("the collection has no metadata.resourceVersion");
+  }
+  const raw = body.items;
+  if (raw !== null && !Array.isArray(raw))
+    throw new Malformed("the collection has no items array");
+  const type = itemType(body);
+  const uids = /* @__PURE__ */ new Set();
+  const items = (raw ?? []).map((item) => {
+    const object = resource(item, type, "list");
+    if (uids.has(object.metadata.uid))
+      throw new Malformed(`the collection lists UID ${object.metadata.uid} twice`);
+    uids.add(object.metadata.uid);
+    return object;
+  });
+  return { items, resourceVersion, type };
+}
+function itemType(collection) {
+  const { apiVersion, kind } = collection;
+  if (typeof apiVersion !== "string" || apiVersion === "" || apiVersion.startsWith("meta.k8s.io/"))
+    return void 0;
+  if (typeof kind !== "string" || !/^[A-Za-z0-9]+List$/.test(kind))
+    return void 0;
+  return { apiVersion, kind: kind.slice(0, -"List".length) };
+}
+function resource(value, type, phase) {
+  const where = phase === "list" ? "a collection item" : "a watch object";
+  if (!isRecord(value) || !isRecord(value.metadata))
+    throw new Malformed(`${where} has no metadata`);
+  const { uid, name, namespace } = value.metadata;
+  if (typeof uid !== "string" || uid === "")
+    throw new Malformed(`${where} has no metadata.uid`);
+  if (typeof name !== "string" || name === "")
+    throw new Malformed(`${where} ${uid} has no metadata.name`);
+  if (namespace !== void 0 && typeof namespace !== "string") {
+    throw new Malformed(`${where} ${uid} has an invalid metadata.namespace`);
+  }
+  const present = (field) => typeof field === "string" && field !== "";
+  if (present(value.apiVersion) && present(value.kind))
+    return value;
+  const apiVersion = present(value.apiVersion) ? value.apiVersion : type?.apiVersion;
+  const kind = present(value.kind) ? value.kind : type?.kind;
+  if (apiVersion === void 0 || kind === void 0) {
+    throw new Malformed(`${where} ${uid} has no apiVersion or kind, and the collection does not name its item type`);
+  }
+  return { ...value, apiVersion, kind };
+}
+function identity(object) {
+  const { uid, name, namespace } = object.metadata;
+  return {
+    uid,
+    apiVersion: object.apiVersion,
+    kind: object.kind,
+    ...namespace === void 0 ? {} : { namespace },
+    name
+  };
+}
+var WatchDecoder = class {
+  #utf8 = new TextDecoder("utf-8", { fatal: true });
+  #buffer = "";
+  /** Feed a chunk; get back the complete, nonblank lines it finished. */
+  push(chunk) {
+    this.#buffer += decode(this.#utf8, chunk);
+    const lines = [];
+    for (; ; ) {
+      const end = this.#buffer.indexOf("\n");
+      if (end === -1)
+        break;
+      const line = this.#buffer.slice(0, end).trim();
+      this.#buffer = this.#buffer.slice(end + 1);
+      if (line !== "")
+        lines.push(line);
+    }
+    return lines;
+  }
+  /** The stream ended. Anything still buffered — a character cut off included — is a truncated frame:
+   * every complete line has already been returned, so the cut can only be inside the last one. */
+  end() {
+    let rest;
+    try {
+      rest = this.#utf8.decode();
+    } catch {
+      throw new Truncated("the watch ended inside a UTF-8 character");
+    }
+    if ((this.#buffer + rest).trim() !== "")
+      throw new Truncated("the watch ended inside a frame");
+  }
+};
+async function readText(body, signal) {
+  const reader = body.getReader();
+  const cancel = () => {
+    void reader.cancel().catch(() => {
+    });
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  if (signal.aborted)
+    cancel();
+  const utf8 = new TextDecoder("utf-8", { fatal: true });
+  let text = "";
+  try {
+    for (; ; ) {
+      const { done, value } = await reader.read();
+      if (signal.aborted)
+        return void 0;
+      if (done)
+        return text + decode(utf8);
+      text += decode(utf8, value);
+    }
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    await reader.cancel().catch(() => {
+    });
+  }
+}
+function decode(utf8, chunk) {
+  try {
+    return chunk === void 0 ? utf8.decode() : utf8.decode(chunk, { stream: true });
+  } catch {
+    throw new Malformed("the response is not valid UTF-8");
+  }
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // dist/path.js
@@ -539,8 +898,8 @@ function withOpenAPIKeyedLists(policy, schema) {
 }
 function mapKeysAt(root, path) {
   let schema = root;
-  for (const segment of path) {
-    schema = typeof segment === "number" ? schema?.items : schema?.properties?.[segment];
+  for (const segment2 of path) {
+    schema = typeof segment2 === "number" ? schema?.items : schema?.properties?.[segment2];
     if (!schema)
       return void 0;
   }
@@ -628,12 +987,12 @@ function remapListConflicts(s, path, previousOrder, outputKeys) {
   const outputIndex = new Map(outputKeys.map((key, index) => [key, index]));
   const moved = [];
   for (const [encoded, conflict] of s.conflicts) {
-    const segment = conflict.path[path.length];
-    if (!isPrefix(path, conflict.path) || typeof segment !== "number")
+    const segment2 = conflict.path[path.length];
+    if (!isPrefix(path, conflict.path) || typeof segment2 !== "number")
       continue;
-    const key = previousOrder[segment];
+    const key = previousOrder[segment2];
     const nextIndex = key === void 0 ? void 0 : outputIndex.get(key);
-    if (nextIndex === void 0 || nextIndex === segment)
+    if (nextIndex === void 0 || nextIndex === segment2)
       continue;
     s.conflicts.delete(encoded);
     moved.push({ ...conflict, path: [...path, nextIndex, ...conflict.path.slice(path.length + 1)] });
@@ -670,10 +1029,10 @@ function indexAssociativeList(values, keys) {
   for (const value of values) {
     if (!isPlainObject(value))
       return void 0;
-    const identity = keys.map((key) => value[key]);
-    if (identity.some((part) => part === void 0 || part === null || typeof part === "object"))
+    const identity2 = keys.map((key) => value[key]);
+    if (identity2.some((part) => part === void 0 || part === null || typeof part === "object"))
       return void 0;
-    const encoded = JSON.stringify(identity);
+    const encoded = JSON.stringify(identity2);
     if (indexed.values.has(encoded))
       return void 0;
     indexed.order.push(encoded);
@@ -718,6 +1077,30 @@ function clearConflict(s, path) {
 }
 
 // dist/store.js
+function applyStreamEvent(store, event) {
+  switch (event.type) {
+    case "reset":
+      store.beginSnapshot();
+      return { type: event.type, added: false, structural: false, flashed: [], conflicts: [] };
+    case "added":
+    case "modified": {
+      const result = store.applyServerEvent(event.object, { redacted: event.redacted });
+      return { type: event.type, uid: event.object.metadata.uid, ...result };
+    }
+    case "deleted": {
+      const uid = event.identity.uid;
+      store.removeResource(uid);
+      return { type: event.type, uid, added: false, structural: true, flashed: [], conflicts: [] };
+    }
+    case "synced":
+      store.endSnapshot();
+      return { type: event.type, added: false, structural: false, flashed: [], conflicts: [] };
+  }
+}
+var MACHINERY = [
+  ["metadata", "managedFields"],
+  ["metadata", "annotations", "kubectl.kubernetes.io/last-applied-configuration"]
+];
 var LiveResourceStore = class {
   #policy;
   #revision = 0;
@@ -733,15 +1116,22 @@ var LiveResourceStore = class {
   }
   // ------------------------------------------------------------------ the stream in --
   /** `added` and `modified` — the only two upsert spellings, and they are treated identically
-   * (spec §4). Both mean "here is this object's complete current state". */
+   * (spec §4). Both mean "here is this object's complete current state", and during a snapshot cycle
+   * that the object is still in scope. */
   applyServerEvent(object, opts = {}) {
+    this.#seen?.add(object.metadata.uid);
+    return this.#upsert(object, opts);
+  }
+  /** Replace the server object and reconcile the draft. Membership is the caller's business: only the
+   * stream's own upserts count towards a snapshot, so a save or read response that lands mid-cycle
+   * can never keep alive an object the snapshot no longer contains. */
+  #upsert(object, opts) {
     const id = object.metadata.uid;
     const incoming = clone(object);
     const redacted = (opts.redacted ?? []).map((entry) => ({
       path: typeof entry.path === "string" ? parsePointer(entry.path) : [...entry.path],
       rev: entry.rev
     }));
-    this.#seen?.add(id);
     const existing = this.#resources.get(id);
     if (!existing) {
       this.#resources.set(id, {
@@ -818,10 +1208,10 @@ var LiveResourceStore = class {
   adoptSaved(object) {
     const existing = this.#resources.get(object.metadata.uid);
     if (!existing) {
-      this.applyServerEvent(object);
+      this.#upsert(object, {});
       return;
     }
-    this.applyServerEvent(object, { redacted: existing.redacted });
+    this.#upsert(object, { redacted: existing.redacted });
   }
   // ------------------------------------------------------------------------- edits --
   setValue(id, path, value) {
@@ -905,7 +1295,8 @@ var LiveResourceStore = class {
     const res = this.#must(id);
     if (this.isEditable(id, path))
       return !deepEqual(get(res.server, path), get(res.draft, path));
-    if (!this.#policy.containsEditable(res.server, path))
+    const regions = this.#regionsFor(res.server, res.redacted.map((r) => r.path));
+    if (!regions.container(path))
       return false;
     return this.changes(id).some((c) => isPrefix(path, c.path));
   }
@@ -952,14 +1343,14 @@ var LiveResourceStore = class {
   /** Capture the patch, UID and merge-base version synchronously, before any await. A stale version
    * is safe: Kubernetes rejects it with 409. Never replace it with a newer GET's version. */
   captureSave(id) {
-    const resource = this.#must(id);
+    const resource2 = this.#must(id);
     const patch = this.patch(id);
     if (!patch)
       return null;
-    const resourceVersion = resource.server.metadata.resourceVersion;
+    const resourceVersion = resource2.server.metadata.resourceVersion;
     if (!resourceVersion)
       throw new Error("krm-stream: conditional save requires resourceVersion");
-    return { uid: resource.server.metadata.uid, resourceVersion, patch };
+    return { uid: resource2.server.metadata.uid, resourceVersion, patch };
   }
   /** Capture before starting a host GET. The returned function applies its projected response only
    * if no server event or earlier response has advanced this resource since capture. Local edits
@@ -983,7 +1374,7 @@ var LiveResourceStore = class {
           return false;
         redacted = paths.map((path) => known.get(pathKey(path)));
       }
-      this.applyServerEvent(object, { redacted });
+      this.#upsert(object, { redacted });
       return true;
     };
   }
@@ -1010,12 +1401,17 @@ var LiveResourceStore = class {
     }
     return res;
   }
+  /** The policy, minus the protected paths: this object's redactions and the machinery. A path
+   * inside one is read-only. A path holding one cannot be replaced or removed whole, which would
+   * rewrite what it holds, so where the policy makes it editable it is merged key by key instead: a
+   * new Secret key beside withheld values, or one annotation beside the last-applied one. */
   #regionsFor(object, redacted) {
-    const insideRedacted = (path) => redacted.some((r) => isPrefix(r, path));
-    const containsRedacted = (path) => redacted.some((r) => isPrefix(path, r));
+    const protectedPaths = [...MACHINERY, ...redacted];
+    const inside = (path) => protectedPaths.some((p) => isPrefix(p, path));
+    const holds = (path) => protectedPaths.some((p) => isPrefix(path, p));
     return {
-      editable: (path) => !insideRedacted(path) && !containsRedacted(path) && this.#policy.isEditable(object, path),
-      container: (path) => !insideRedacted(path) && this.#policy.containsEditable(object, path),
+      editable: (path) => !inside(path) && !holds(path) && this.#policy.isEditable(object, path),
+      container: (path) => !inside(path) && (this.#policy.containsEditable(object, path) || holds(path) && this.#policy.isEditable(object, path)),
       listMapKeys: (path) => this.#policy.listMapKeys?.(object, path)
     };
   }
@@ -1106,10 +1502,42 @@ function resourceStreamURL(base, scope) {
   set("projection", scope.projection);
   return `${base}${base.includes("?") ? "&" : "?"}${q.toString()}`;
 }
-
-// dist/version.js
-var VERSION = "0.7.0";
-var PROTOCOL_VERSION = 1;
+function nativeCollectionURL(proxyBase, scope) {
+  const q = new URLSearchParams();
+  if (scope.labelSelector)
+    q.append("labelSelector", scope.labelSelector);
+  if (scope.name)
+    q.append("fieldSelector", `metadata.name=${scope.name}`);
+  const query = q.toString();
+  return collectionPath(proxyBase, scope) + (query ? `?${query}` : "");
+}
+function nativeObjectURL(proxyBase, scope) {
+  return `${collectionPath(proxyBase, scope)}/${segment("name", scope.name)}`;
+}
+function collectionPath(proxyBase, scope) {
+  const path = [withoutTrailingSlashes(proxyBase)];
+  if (scope.group)
+    path.push("apis", segment("group", scope.group));
+  else
+    path.push("api");
+  path.push(segment("version", scope.version));
+  if (scope.namespace)
+    path.push("namespaces", segment("namespace", scope.namespace));
+  path.push(segment("resource", scope.resource));
+  return path.join("/");
+}
+function segment(what, value) {
+  if (!value || value === "." || value === ".." || value.includes("/")) {
+    throw new Error(`krm-stream: invalid ${what} ${JSON.stringify(value ?? "")}`);
+  }
+  return encodeURIComponent(value);
+}
+function withoutTrailingSlashes(base) {
+  let end = base.length;
+  while (end > 0 && base[end - 1] === "/")
+    end--;
+  return base.slice(0, end);
+}
 export {
   DEFAULT_EDITABLE_REGIONS,
   LiveResourceStore,
@@ -1119,14 +1547,15 @@ export {
   VERSION,
   applyStreamEvent,
   clone,
-  connectManagedResourceStream,
+  connectNativeWatch,
   connectResourceStream,
-  connectWithEventSource,
   deepEqual,
   defaultPolicy,
   get,
   has,
   isPrefix,
+  nativeCollectionURL,
+  nativeObjectURL,
   parsePointer,
   pathKey,
   readOnlyPolicy,
