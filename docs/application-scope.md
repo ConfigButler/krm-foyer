@@ -94,7 +94,7 @@ which someone has to keep in step with the application.
 
 ### A browser identity in Kubernetes
 
-**Documented and proved (2026-10-05).** This is the first step the decision names, and
+**Documented and proved (2026-10-05; client rules tightened 2026-10-06).** This is the first step the decision names, and
 it needs no krm-foyer code. Voter's operator asked for it
 ([implementer feedback](implementer-feedback.md), entry 4): they sign in as a
 cluster-admin, and through krm-foyer every script on Voter's origin would hold that.
@@ -105,11 +105,23 @@ command line's another. RBAC then grants the browser's name only what the applic
 needs, and keeps the broad grants on the other. Kubernetes enforces the scope itself,
 and the audit log records which name acted.
 
-The client is the token's **authorized party**: `azp` when the issuer sets it, which
-Dex does when a client asks for another audience with the cross-client scope
-`audience:server:client_id:<id>`, and the audience otherwise. So the same expression
-works for a cluster that accepts krm-foyer's own audience, as the e2e fixture does, and
-for one where krm-foyer asks for the cluster's audience, as Voter's does:
+The client is the token's **authorized party**: `azp` when the token has one, which
+Dex sets when a client asks for another audience with the cross-client scope
+`audience:server:client_id:<id>`, and the audience otherwise. The rules are strict,
+because a mistake hands out the command line's name:
+
+- **With `azp`,** it must be a string and one of the token's audiences.
+- **Without `azp`,** the audience must be a string or a list of exactly one. A list of
+  two or more names no client: OpenID Connect requires `azp` with several audiences, and
+  no rule can say which of them asked.
+- **Every client is listed, each with its prefix.** Nothing falls back to a prefix. A
+  client the list does not name, or a token whose client is in doubt, has no key in
+  the map; the lookup fails and the API server refuses the token. A validation rule
+  says so first, with a message.
+
+So one configuration works for a cluster that accepts krm-foyer's own audience, as the
+e2e fixture does, and for one where krm-foyer asks for the cluster's audience, as
+Voter's does:
 
 ```yaml
 apiVersion: apiserver.config.k8s.io/v1
@@ -117,18 +129,32 @@ kind: AuthenticationConfiguration
 jwt:
   - issuer:
       url: https://dex.example.com
-      # Both clients' tokens are accepted. With the cross-client scope, both carry
-      # the audience kubernetes, and krm-foyer's carries azp: krm-foyer.
+      # Both clients' tokens are accepted. With the cross-client scope krm-foyer's
+      # carry the audience kubernetes and azp: krm-foyer; the command line's own
+      # client is kubernetes, and its tokens carry that audience and no azp.
       audiences: [kubernetes]
     claimMappings:
+      # The client, as described above, looked up in a map of the clients there are:
+      # foyer:<email> for the browser, github:<email> for the command line, which
+      # keeps the cluster-admin binding. CEL has no variables here, so the client is
+      # spelled out each time it is used.
       username:
-        # The browser's name: foyer:<email>. The command line keeps github:<email>,
-        # and with it the cluster-admin binding.
-        expression: "((has(claims.azp) ? claims.azp : claims.aud) == 'krm-foyer' ? 'foyer:' : 'github:') + claims.email"
+        expression: >-
+          {'krm-foyer': 'foyer:', 'kubernetes': 'github:'}[(has(claims.azp) ? (type(claims.azp) == string && claims.azp in (type(claims.aud) == string ? [claims.aud] : claims.aud) ? claims.azp : '') : (type(claims.aud) == string ? claims.aud : size(claims.aud) == 1 ? claims.aud[0] : ''))]
+          + claims.email
+      # The same split for groups, so that no group binding reaches both.
       groups:
-        # The same split for groups, so that no group binding reaches both.
-        expression: "has(claims.groups) ? dyn(claims.groups).map(g, ((has(claims.azp) ? claims.azp : claims.aud) == 'krm-foyer' ? 'foyer:' : 'github:') + g) : []"
+        expression: >-
+          has(claims.groups) ? dyn(claims.groups).map(g,
+          {'krm-foyer': 'foyer:', 'kubernetes': 'github:'}[(has(claims.azp) ? (type(claims.azp) == string && claims.azp in (type(claims.aud) == string ? [claims.aud] : claims.aud) ? claims.azp : '') : (type(claims.aud) == string ? claims.aud : size(claims.aud) == 1 ? claims.aud[0] : ''))]
+          + g) : []
     claimValidationRules:
+      # The same client, which must be one in the map. The map lookup above refuses
+      # any other on its own; this says why.
+      - expression: >-
+          (has(claims.azp) ? (type(claims.azp) == string && claims.azp in (type(claims.aud) == string ? [claims.aud] : claims.aud) ? claims.azp : '') : (type(claims.aud) == string ? claims.aud : size(claims.aud) == 1 ? claims.aud[0] : ''))
+          in ['krm-foyer', 'kubernetes']
+        message: "the token's client (azp, or its only audience) must be krm-foyer or kubernetes"
       # A username from email is only an identity if the issuer vouched for it.
       - expression: "has(claims.email_verified) && type(claims.email_verified) == bool && claims.email_verified"
         message: "email_verified must be the boolean true"
@@ -145,13 +171,25 @@ names: krm-foyer's tokens are `oidc:<email>` and the command line's are
 with a `kubectl` client in [dex.yaml](../test/e2e/cluster/dex.yaml)). Its spec
 ([foyer_scope_test.go](../test/e2e/foyer_scope_test.go)) signs alice in both ways,
 checks the API server's two names for her, grants the command-line name `list` on
-Secrets, and shows krm-foyer refused with the API server's 403 for `oidc:alice`.
+Secrets, and shows krm-foyer refused with the API server's 403 for `oidc:alice`. With
+tokens the suite signs itself, it checks every client form above against the real API
+server: the browser's and the command line's audiences as strings, as lists of one and
+with `azp`, each named and grouped as its client; and an `azp` that is another client,
+not an audience, a list, a number, null or empty, two audiences without `azp` in either
+order, and another client's audience, each refused with 401, so neither the
+command-line name nor a command-line group grant is reachable through them.
 
 What to know before using it:
 
-- **An issuer that sends a list of audiences and no `azp` fails the expression,** and
-  the API server refuses the token. That fails closed. If your issuer does that, compare
-  with `in` instead.
+- **A list of audiences needs `azp`.** A token with two audiences and no `azp` is
+  refused, whatever the order of its audiences, as is an `azp` that is not a string, is
+  not one of the audiences, or is a client the map does not list. An earlier version
+  of this recipe compared the client with `krm-foyer` and gave everything else the
+  command line's prefix: a list audience, or another client's `azp`, got the
+  command-line name and its groups. Replace any copy of that version.
+- **Another client of the same issuer** that has the cluster's audience, as a Dex
+  `trustedPeers` client can get it, is refused until it is added to the map with a
+  prefix of its own.
 - **RBAC twice.** Each grant the person needs in both places is written for both names,
   or through a group for each.
 - **Domain logic that matches on identity sees the browser's name.** Admission rules and

@@ -259,17 +259,24 @@ func b64JSON(v any) string {
 // selfSubjectReview asks the API server who it takes token for. The answer is 201 with
 // the username, or the refusal's status code with no username.
 func (f *fixture) selfSubjectReview(ctx context.Context, token string) (int, string) {
+	code, name, _ := f.selfSubjectReviewGroups(ctx, token)
+	return code, name
+}
+
+// selfSubjectReviewGroups is selfSubjectReview with the groups the API server mapped.
+func (f *fixture) selfSubjectReviewGroups(ctx context.Context, token string) (int, string, []string) {
 	a := f.direct(ctx, token, http.MethodPost, "/apis/authentication.k8s.io/v1/selfsubjectreviews",
 		[]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`))
 	var review struct {
 		Status struct {
 			UserInfo struct {
-				Username string `json:"username"`
+				Username string   `json:"username"`
+				Groups   []string `json:"groups"`
 			} `json:"userInfo"`
 		} `json:"status"`
 	}
 	_ = json.Unmarshal(a.Body, &review)
-	return a.Code, review.Status.UserInfo.Username
+	return a.Code, review.Status.UserInfo.Username, review.Status.UserInfo.Groups
 }
 
 // answer is one HTTP response, reduced to what the suite compares.
@@ -402,6 +409,13 @@ func (f *fixture) grant(ns, username, resource string, verbs ...string) (revoke 
 	f.kubectl("-n", ns, "create", "role", name, "--resource="+resource, "--verb="+strings.Join(verbs, ","))
 	f.kubectl("-n", ns, "create", "rolebinding", name, "--role="+name, "--user="+username)
 	return func() { f.kubectl("-n", ns, "delete", "rolebinding", name) }
+}
+
+// grantGroup is grant, to a Kubernetes group instead of a username.
+func (f *fixture) grantGroup(ns, group, resource string, verbs ...string) {
+	name := "e2e-" + randomID()
+	f.kubectl("-n", ns, "create", "role", name, "--resource="+resource, "--verb="+strings.Join(verbs, ","))
+	f.kubectl("-n", ns, "create", "rolebinding", name, "--role="+name, "--group="+group)
 }
 
 // replaceFoyer replaces the main krm-foyer's pod by running kubectl with args in its
