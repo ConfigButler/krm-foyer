@@ -61,6 +61,9 @@ type fixture struct {
 	// frontDoorTransport reaches krm-foyer's name through Traefik, the front door, as
 	// a browser does: krm-foyer's routes and the application's, on one origin.
 	frontDoorTransport http.RoundTripper
+	// nginxTransport reaches krm-foyer's name through docs/ingress.md's nginx recipe
+	// (nginx-door.conf), in front of the main krm-foyer.
+	nginxTransport http.RoundTripper
 	// rehearsalUsers is how many rehearsal users Dex has: rehearsal-001@example.com
 	// and on, with alice's password (start-cluster.sh).
 	rehearsalUsers int
@@ -134,6 +137,7 @@ func loadFixture() *fixture {
 	// Every string contains the empty one: a missing account would pass assertions
 	// that it never appears.
 	Expect(env["FOYER_SHARED_ACCOUNT"]).NotTo(BeEmpty(), "FOYER_SHARED_ACCOUNT in foyer-env (an older deployment? run task e2e-deploy)")
+	Expect(env["FOYER_NGINX_ADDR"]).NotTo(BeEmpty(), "FOYER_NGINX_ADDR in foyer-env (an older deployment? run task e2e-deploy)")
 	foyer, err := url.Parse(env["FOYER_URL"])
 
 	Expect(err).NotTo(HaveOccurred())
@@ -176,6 +180,7 @@ func loadFixture() *fixture {
 		// loopback (port-forward.sh), under the same name as krm-foyer, as a browser
 		// reaches it.
 		frontDoorTransport: transportTo(net.JoinHostPort("127.0.0.1", foyer.Port())),
+		nginxTransport:     transportTo(env["FOYER_NGINX_ADDR"]),
 		rehearsalUsers:     rehearsalUsers,
 		client: &http.Client{
 			Transport: transport,

@@ -360,9 +360,11 @@ single-node k3d cluster on it, then deploys the two issuers into the cluster
 ([issuers.yaml](../test/e2e/cluster/issuers.yaml)). The API server trusts both through an
 [AuthenticationConfiguration](../test/e2e/cluster/authentication-config.yaml), under the
 same rules, and records requests with an [audit policy](../test/e2e/cluster/audit-policy.yaml).
-The API server is not a pod and cannot use cluster DNS: k3d's `--host-alias` puts each
-issuer's name in the node's `/etc/hosts`, pointing at its Service's fixed ClusterIP, and
-in CoreDNS for pods, so every caller uses the same issuer URL. Dex keeps its state in
+The API server is not a pod and cannot use cluster DNS: the script puts each issuer's
+name in the node's `/etc/hosts`, pointing at its Service's fixed ClusterIP, and in
+CoreDNS's NodeHosts for pods, so every caller uses the same issuer URL. It does so on
+every run, because a restart of the node, which a changed authentication configuration
+causes, rewrites both. Dex keeps its state in
 custom resources, its signing keys included: with memory storage, a restarted Dex signs
 with new keys, and the API server refused every token for 221 seconds before it fetched
 them. The devcontainer joins the network, and a CI runner is the Docker host, so both reach
@@ -407,7 +409,12 @@ so every signed-in browser spec fails if the route stops removing it. It also ap
 middlewares to `/auth/check`, which Traefik reaches at krm-foyer's Service name (its
 certificate holds both names). `/public/whoami` stands in for a domain backend and
 echoes the `Krm-Foyer-Identity` it received, and `/members/` is a page behind the login
-gate. Specs reach them with `fx.frontDoorBrowser()`, through Traefik. Then
+gate. Specs reach them with `fx.frontDoorBrowser()`, through Traefik. The nginx
+recipe of the check runs too, as the document has it: front-door.sh copies its blocks
+out of [ingress.md](ingress.md#recipes) into
+[nginx-door.conf](../test/e2e/cluster/nginx-door.conf), an nginx in front of krm-foyer
+on a NodePort of its own, under the same public name, whose two backends echo what they
+receive. Specs reach it with `fx.nginxBrowser()`. Then
 [port-forward.sh](../test/e2e/cluster/port-forward.sh) forwards Traefik to
 `127.0.0.1:8443` and Dex to `127.0.0.1:5556` in this container, detached, and checks both
 by their public names. Browsers resolve `foyer.localhost` and `dex.localhost` to loopback,

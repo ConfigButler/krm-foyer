@@ -23,6 +23,8 @@ FOYER_URL="https://$FOYER_HOST:8443"
 NODE_PORT=30443
 # A second krm-foyer whose sessions end within a minute (foyer-brief-values.yaml).
 BRIEF_NODE_PORT=30444
+# docs/ingress.md's nginx recipe in front of the main krm-foyer (front-door.sh).
+NGINX_NODE_PORT=30445
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
@@ -113,6 +115,7 @@ cat > "$E2E_DIR/foyer-env" <<EOF
 FOYER_URL=$FOYER_URL
 FOYER_ADDR=$server_ip:$NODE_PORT
 FOYER_BRIEF_ADDR=$server_ip:$BRIEF_NODE_PORT
+FOYER_NGINX_ADDR=$server_ip:$NGINX_NODE_PORT
 FOYER_NAMESPACE=krm-foyer
 FOYER_SERVICE_ACCOUNT=system:serviceaccount:krm-foyer:krm-foyer
 FOYER_SHARED_ACCOUNT=system:serviceaccount:krm-foyer:krm-foyer-shared

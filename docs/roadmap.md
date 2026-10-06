@@ -179,9 +179,10 @@ Security items need tests that try to get past the boundary.
       it is told to stop, while its Service may still route to it for a moment, so a
       rollout refuses connections briefly (seen by the rehearsal, which restarts it). A
       wait before shutdown, or readiness turned off first, with a test
-- [x] Routing recipes for one shared domain: a Gateway API `HTTPRoute` and a Traefik
-      `IngressRoute` (both run by the e2e fixture), an nginx server block and a Vite
-      dev-server proxy (written, not run). See [ingress](ingress.md)
+- [x] Routing recipes for one shared domain: a Gateway API `HTTPRoute`, a Traefik
+      `IngressRoute` and an nginx server block (all run by the e2e fixture, nginx's
+      copied from the document), and a Vite dev-server proxy (written, not run). See
+      [ingress](ingress.md)
 - [x] `requireSession()` in the browser helper for navigation to login
 - [x] Login gate: `GET /auth/check` for an ingress gating the application's pages, with
       nginx and Traefik recipes

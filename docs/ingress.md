@@ -441,9 +441,17 @@ matched by length unless `priority` says otherwise; give the gated routes a prio
 they share an entry point with Gateway API routes, as the fixture does.
 
 **nginx, `auth_request`.** nginx accepts only 2xx, 401 and 403 from the check, and turns
-the 401 into the login itself, so it does not use `redirect=true`.
+the 401 into the login itself, so it does not use `redirect=true`. The page goes into
+the login link as one `return_to` value, so it has to be encoded, and stock nginx has
+no directive that encodes a variable for a query. The recipe uses
+[njs](https://nginx.org/en/docs/njs/), which the official nginx images include: load it
+at the top of `nginx.conf` with `load_module modules/ngx_http_js_module.so;`.
 
 ```nginx
+# The page the browser asked for, encoded as one query value (foyer.js, below).
+js_import foyer from /etc/nginx/foyer.js;
+js_set $foyer_return_to foyer.returnTo;
+
 location = /_check {
     internal;
     proxy_pass https://krm-foyer.krm-foyer.svc/auth/check?identity=true;
@@ -474,13 +482,34 @@ location /admin/ {
 }
 
 location @login {
-    return 302 /auth/login?return_to=$request_uri;
+    # Relative, so the browser stays on the origin it used, whatever port nginx has.
+    absolute_redirect off;
+    return 302 /auth/login?return_to=$foyer_return_to;
 }
 ```
 
-`$request_uri` is the raw request target; krm-foyer's login checks it as a local path and
-refuses anything else, so it cannot send the browser off-site. Unlike the Traefik recipe,
-this one is not run by the e2e suite.
+```js
+// foyer.js: the raw request target, path and query, as one query value. Every byte
+// that would end the value or change its meaning (& = + # % and the rest) is
+// percent-encoded, so krm-foyer decodes exactly the target the browser sent.
+function returnTo(r) {
+    return encodeURIComponent(r.variables.request_uri);
+}
+
+export default { returnTo };
+```
+
+`$request_uri` is the raw request target, so the page comes back exactly as the
+browser asked for it, its own encoding included. Put in the query as it is, as an
+earlier version of this recipe did, it would not: the page's `&` starts a parameter of
+the login's (`/admin/edit?name=x&tab=history` came back as `/admin/edit?name=x`), its
+`%26` and `+` are decoded once too often, and a parameter of the page's named
+`return_to` or `oidc.login_hint` becomes the login's own. krm-foyer's login checks the
+decoded value as a local path and refuses anything else, so it cannot send the browser
+off-site. The e2e fixture runs this recipe as written here
+([nginx-door.conf](../test/e2e/cluster/nginx-door.conf) takes it from this page), in
+front of krm-foyer, and walks a login from a gated page with several parameters, with
+percent-encoding and a literal `+`, and with parameters named like the login's own.
 
 ### How to deploy it
 
