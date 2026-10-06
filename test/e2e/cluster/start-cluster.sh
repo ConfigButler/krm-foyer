@@ -33,8 +33,8 @@ DEX_HOST="dex.localhost"
 ISSUER_HOST="issuer.krm-foyer.test"
 ISSUER_URL="https://$ISSUER_HOST:8443"
 # Fixed ClusterIPs in k3s's default Service range (10.43.0.0/16). The API server runs on
-# the node, not in a pod, so it cannot use cluster DNS; --host-alias puts these in the
-# node's /etc/hosts (and in CoreDNS, for pods) when the cluster is created.
+# the node, not in a pod, so it cannot use cluster DNS; host_aliases below puts these in
+# the node's /etc/hosts, and in CoreDNS for pods.
 DEX_SERVICE_IP="10.43.200.10"
 ISSUER_SERVICE_IP="10.43.200.11"
 VOLUME="${CLUSTER_NAME}-config"
@@ -122,8 +122,6 @@ if ! k3d cluster get "$CLUSTER_NAME" >/dev/null 2>&1; then
   k3d cluster create "$CLUSTER_NAME" \
     --image "$K3S_IMAGE" --servers 1 --agents 0 --wait --timeout 180s \
     --network "$NETWORK" --no-lb --api-port 127.0.0.1:0 \
-    --host-alias "$DEX_SERVICE_IP:$DEX_HOST" \
-    --host-alias "$ISSUER_SERVICE_IP:$ISSUER_HOST" \
     --kubeconfig-update-default=false --kubeconfig-switch-context=false \
     --volume "$VOLUME:/etc/krm-foyer-e2e@server:0" \
     --k3s-arg "--disable=traefik,servicelb,metrics-server@server:0" \
@@ -131,10 +129,6 @@ if ! k3d cluster get "$CLUSTER_NAME" >/dev/null 2>&1; then
     --k3s-arg "--kube-apiserver-arg=audit-policy-file=/etc/krm-foyer-e2e/audit-policy.yaml@server:0" \
     --k3s-arg "--kube-apiserver-arg=audit-log-path=/etc/krm-foyer-e2e/audit.log@server:0" \
     --k3s-arg "--kube-apiserver-arg=audit-log-maxsize=50@server:0"
-elif ! docker exec "$SERVER_CONTAINER" grep -q "^${DEX_SERVICE_IP}[[:space:]].*${DEX_HOST}" /etc/hosts; then
-  # --host-alias is fixed at creation, so a cluster from an older script cannot find Dex.
-  echo "cluster $CLUSTER_NAME has no alias $DEX_HOST -> $DEX_SERVICE_IP (made by an older script); run task e2e-down" >&2
-  exit 1
 elif [ "$(cat "$E2E_DIR/apiserver.hash" 2>/dev/null)" != "$apiserver_hash" ]; then
   echo "the API server's configuration changed; restarting it"
   put_config
@@ -170,6 +164,33 @@ for _ in $(seq 1 45); do
   sleep 2
 done
 kubectl wait --for=condition=Ready "node/$SERVER_CONTAINER" --timeout=90s >/dev/null
+
+echo "== host aliases"
+# The issuers' names, at their Services' fixed addresses: in the node's /etc/hosts for
+# the API server, and in CoreDNS's NodeHosts for pods. k3d's --host-alias writes both
+# once, at creation, and a restart of the node loses both: Docker rewrites /etc/hosts,
+# and k3s rewrites NodeHosts. So they are put back on every run, after any restart.
+host_aliases() {
+  local entry ip name node_hosts added=""
+  node_hosts="$(kubectl -n kube-system get configmap coredns -o jsonpath='{.data.NodeHosts}')"
+  for entry in "$@"; do
+    ip="${entry%%:*}" name="${entry#*:}"
+    docker exec "$SERVER_CONTAINER" grep -q "^${ip}[[:space:]]\+${name}\$" /etc/hosts \
+      || docker exec "$SERVER_CONTAINER" sh -c "echo '$ip $name' >> /etc/hosts"
+    if ! grep -q "^${ip}[[:space:]]\+${name}\$" <<<"$node_hosts"; then
+      node_hosts="$node_hosts"$'\n'"$ip $name"
+      added=1
+    fi
+  done
+  if [ -n "$added" ]; then
+    kubectl -n kube-system patch configmap coredns --type=merge \
+      -p "$(jq -n --arg h "$node_hosts" '{data: {NodeHosts: $h}}')" >/dev/null
+    # A new pod reads the ConfigMap as it is now; the running one only within a minute.
+    kubectl -n kube-system rollout restart deployment/coredns >/dev/null
+    kubectl -n kube-system rollout status deployment/coredns --timeout=90s >/dev/null
+  fi
+}
+host_aliases "$DEX_SERVICE_IP:$DEX_HOST" "$ISSUER_SERVICE_IP:$ISSUER_HOST"
 
 echo "== issuers: Dex at https://$DEX_HOST:5556, test issuer at $ISSUER_URL"
 # The test issuer serves its discovery document and the public half of the signing key.
