@@ -249,9 +249,13 @@ we can extract it as the example rather than have the guide written from scratch
 
 ## Suggested order
 
-1. **Operator-only pilot, now.** It needs entry 3, and entry 4 decided. With the GitHub
-   login, Voter's admin and CoffeeConfig editor run through `/k8s` and `/stream/v1`.
-   This is the roadmap's own *"Voter's CoffeeConfig editor running on krm-foyer"*.
+1. **Operator-only pilot, now.** It needs entry 3, entry 4 decided, and the
+   ValidatingAdmissionPolicy that keeps a CoffeeConfig save to `spec` (see
+   [What stays Voter's work](#what-stays-voters-work)): through `/k8s`, the editor's
+   `patch` grant also reaches labels and annotations, which gitops-reverser would
+   commit. With the GitHub login, Voter's admin and CoffeeConfig editor run through
+   `/k8s` and `/stream/v1`. This is the roadmap's own *"Voter's CoffeeConfig editor
+   running on krm-foyer"*.
 2. **The audience login.** It needs entry 2. Participant login moves as one piece,
    since there can only be one session cookie on the origin.
 3. **Votes and the storefront.** They need entry 1, or a decision in Voter to move
