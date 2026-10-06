@@ -548,13 +548,12 @@ var _ = Describe("krm-foyer", Label("foyer"), func() {
 	})
 
 	// docs/ingress.md: krm-foyer terminates TLS itself by default, or sits behind a
-	// transparent ingress. These run with an nginx container in front of it.
+	// transparent ingress. The fixture has both kinds in front of it: Traefik (the
+	// Gateway, and the check's routes in foyer_check_test.go) and the nginx recipe
+	// (foyer_nginx_test.go), which also prove the shared origin, the login gate and its
+	// return path. These two remain.
 	Context("behind an ingress", func() {
 		PIt("takes its redirect URI and CSRF origin from configuration, whatever Host or X-Forwarded-Host says")
 		PIt("delivers watch events without the ingress buffering them")
-		PIt("shares the origin with an application served by nginx on /, without seeing its requests")
-		PIt("sends a signed-out page load to login through /auth/check, and back to that page afterwards")
-		PIt("answers /auth/check with a status only: no token and no identity headers")
-		PIt("ignores a return path from the ingress header that is not a local path")
 	})
 })
