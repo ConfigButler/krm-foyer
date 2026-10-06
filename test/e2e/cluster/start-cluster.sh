@@ -170,28 +170,33 @@ kubectl wait --for=condition=Ready "node/$SERVER_CONTAINER" --timeout=90s >/dev/
 
 echo "== host aliases"
 # The issuers' names, at their Services' fixed addresses: in the node's /etc/hosts for
-# the API server, and in CoreDNS's NodeHosts for pods. k3d's --host-alias writes both
-# once, at creation, and a restart of the node loses both: Docker rewrites /etc/hosts,
-# and k3s rewrites NodeHosts. So they are put back on every run, after any restart.
+# the API server, and in CoreDNS for pods. Docker rewrites /etc/hosts when the node
+# restarts, which a changed authentication configuration causes, so the entries are put
+# back on every run. For pods they are a server block of CoreDNS's own, in the
+# coredns-custom ConfigMap that k3s's Corefile imports and k3s leaves alone; NodeHosts,
+# where k3d's --host-alias writes, is rewritten by k3s at every start.
 host_aliases() {
-  local entry ip name node_hosts added=""
-  node_hosts="$(kubectl -n kube-system get configmap coredns -o jsonpath='{.data.NodeHosts}')"
+  local entry ip name zones="" hosts="" applied
   for entry in "$@"; do
     ip="${entry%%:*}" name="${entry#*:}"
     docker exec "$SERVER_CONTAINER" grep -q "^${ip}[[:space:]]\+${name}\$" /etc/hosts \
       || docker exec "$SERVER_CONTAINER" sh -c "echo '$ip $name' >> /etc/hosts"
-    if ! grep -q "^${ip}[[:space:]]\+${name}\$" <<<"$node_hosts"; then
-      node_hosts="$node_hosts"$'\n'"$ip $name"
-      added=1
-    fi
+    zones="$zones${zones:+ }$name:53"
+    hosts="$hosts    $ip $name"$'\n'
   done
-  if [ -n "$added" ]; then
-    kubectl -n kube-system patch configmap coredns --type=merge \
-      -p "$(jq -n --arg h "$node_hosts" '{data: {NodeHosts: $h}}')" >/dev/null
-    # A new pod reads the ConfigMap as it is now; the running one only within a minute.
-    kubectl -n kube-system rollout restart deployment/coredns >/dev/null
-    kubectl -n kube-system rollout status deployment/coredns --timeout=90s >/dev/null
-  fi
+  applied="$(kubectl -n kube-system create configmap coredns-custom \
+    --from-literal=fixture-issuers.server="$zones {"$'\n'"  hosts {"$'\n'"$hosts  }"$'\n'"}"$'\n' \
+    --dry-run=client -o yaml | kubectl apply -f -)"
+  case "$applied" in
+    *unchanged*) ;;
+    *)
+      # A new pod reads the ConfigMap as it is now. On a new cluster k3s creates CoreDNS a
+      # moment after the API server answers.
+      for _ in $(seq 1 45); do kubectl -n kube-system get deployment coredns >/dev/null 2>&1 && break; sleep 2; done
+      kubectl -n kube-system rollout restart deployment/coredns >/dev/null
+      kubectl -n kube-system rollout status deployment/coredns --timeout=120s >/dev/null
+      ;;
+  esac
 }
 host_aliases "$DEX_SERVICE_IP:$DEX_HOST" "$ISSUER_SERVICE_IP:$ISSUER_HOST" "$ROOM_PASS_SERVICE_IP:$ROOM_PASS_HOST"
 

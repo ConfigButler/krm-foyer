@@ -361,10 +361,11 @@ single-node k3d cluster on it, then deploys the two issuers into the cluster
 [AuthenticationConfiguration](../test/e2e/cluster/authentication-config.yaml), under the
 same rules, and records requests with an [audit policy](../test/e2e/cluster/audit-policy.yaml).
 The API server is not a pod and cannot use cluster DNS: the script puts each issuer's
-name in the node's `/etc/hosts`, pointing at its Service's fixed ClusterIP, and in
-CoreDNS's NodeHosts for pods, so every caller uses the same issuer URL. It does so on
-every run, because a restart of the node, which a changed authentication configuration
-causes, rewrites both. Dex keeps its state in
+name in the node's `/etc/hosts`, pointing at its Service's fixed ClusterIP, and in a
+CoreDNS server block for pods (the `coredns-custom` ConfigMap, which k3s's Corefile
+imports), so every caller uses the same issuer URL. It writes `/etc/hosts` on every run,
+because Docker rewrites it when the node restarts, which a changed authentication
+configuration causes. Dex keeps its state in
 custom resources, its signing keys included: with memory storage, a restarted Dex signs
 with new keys, and the API server refused every token for 221 seconds before it fetched
 them. The devcontainer joins the network, and a CI runner is the Docker host, so both reach
