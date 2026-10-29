@@ -697,6 +697,99 @@ func TestParseResources(t *testing.T) {
 	}
 }
 
+// Namespaced resources are configured as namespace/resource, the namespaces of one
+// resource gathered, and never admitted in every namespace.
+func TestParseNamespacedResources(t *testing.T) {
+	got, err := ParseNamespacedResources(" hello/notes.hello.krm-foyer.example, team/configmaps,team/notes.hello.krm-foyer.example,,hello/notes.hello.krm-foyer.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := sharedResource("hello.krm-foyer.example", "notes")
+	notes.AllowAllNamespaces = false
+	cms := sharedResource("", "configmaps")
+	cms.AllowAllNamespaces = false
+	want := []NamespacedResource{{notes, []string{"hello", "team"}}, {cms, []string{"team"}}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	for _, bad := range []string{"notes.hello.krm-foyer.example", "Hello/notes", "/notes", "hello/", "hello/a/b", "hello.example/notes", "hello/Notes"} {
+		if _, err := ParseNamespacedResources(bad); err == nil {
+			t.Errorf("%q was taken", bad)
+		}
+	}
+	file := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(file, []byte(sharedToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	everywhere, err := ParseResources("notes.hello.krm-foyer.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, cfg := range map[string]SharedConfig{
+		"shared everywhere and in some namespaces": {TokenFile: file, Resources: everywhere, NamespacedResources: got},
+		"shared in no namespace":                   {TokenFile: file, NamespacedResources: []NamespacedResource{{GroupResource: cms}}},
+	} {
+		if _, err := New(Config{Server: mustURL(t, "https://api.example"), Gate: mustGate(t), Shared: &cfg}); err == nil {
+			t.Errorf("%s was taken", name)
+		}
+	}
+}
+
+// A resource shared in some namespaces is shared there alone. The identity is
+// granted those namespaces and no others, so a stream anywhere else, and one of every
+// namespace at once, must never reach the shared watch: it is the user's own, opened
+// with the user's token, with no review sent about it.
+func TestANamespacedResourceIsSharedInItsNamespacesAlone(t *testing.T) {
+	api := newSharedAPI(t)
+	namespaced, err := ParseNamespacedResources("hello/notes.hello.krm-foyer.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := metrics.New()
+	f := sharedFoyer(t, api, byHeader{}, m, time.Minute, func(c *Config) {
+		c.Shared.Resources = nil
+		c.Shared.NamespacedResources = namespaced
+	})
+	elsewhere := strings.Replace(notes, "namespace=hello", "namespace=elsewhere", 1)
+	everywhere := strings.Replace(notes, "&namespace=hello", "", 1)
+	for _, target := range []string{notes, notes, elsewhere, everywhere} {
+		f.open(t.Context(), t, target, as(userToken)).until(t, "synced")
+	}
+
+	for _, r := range api.received() {
+		if !strings.HasSuffix(r.URL.Path, "/notes") {
+			continue
+		}
+		auth := r.Header.Get("Authorization")
+		switch r.URL.Path {
+		case "/apis/hello.krm-foyer.example/v1/namespaces/hello/notes":
+			if auth != "Bearer "+sharedToken {
+				t.Errorf("%s %s was sent with %q, want the shared token", r.Method, r.URL.Path, auth)
+			}
+		case "/apis/hello.krm-foyer.example/v1/namespaces/elsewhere/notes", "/apis/hello.krm-foyer.example/v1/notes":
+			if auth != "Bearer "+userToken {
+				t.Errorf("%s %s was sent with %q, want the user's token: the identity may not watch there", r.Method, r.URL.Path, auth)
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}
+	for _, spec := range api.subjectReviews() {
+		if attrs := spec.ResourceAttributes; attrs == nil || attrs.Namespace != "hello" {
+			t.Errorf("a review about %+v; want reviews of the shared namespace alone", attrs)
+		}
+	}
+	for series, want := range map[string]string{
+		`krm_foyer_upstream_watches_open{identity="shared"}`: "1",
+		"krm_foyer_shared_subscriptions_open":                "2",
+		userWatches:                                          "2",
+	} {
+		if got := gauge(t, m, series); got != want {
+			t.Errorf("%s %s, want %s", series, got, want)
+		}
+	}
+}
+
 // A decision is reused for the very question it answered, for its lifetime, and
 // one asked twice at once is asked once. An error is not kept.
 func TestDecisionsAreReusedForTheSameQuestionOnly(t *testing.T) {

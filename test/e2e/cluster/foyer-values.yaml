@@ -21,8 +21,12 @@ login:
 sessionKeys:
   secretName: krm-foyer-session-keys
 # Notes share one watch per scope: the hello example's, and the rehearsal's.
+# RoleBindings are shared in foyer-shared alone (deploy-foyer.sh creates it): the
+# identity is granted them there with a Role, and nowhere else.
 sharedWatches:
   resources: [notes.hello.krm-foyer.example]
+  namespacedResources:
+    foyer-shared: [rolebindings.rbac.authorization.k8s.io]
 # The bait (foyer-bait.yaml): the pod's account is cluster-admin, and its token is
 # mounted, so a fallback to it would turn a 401 or a 403 into a 200: loud, where a
 # fallback to a weak account would be silent. The suite checks the bait is in place

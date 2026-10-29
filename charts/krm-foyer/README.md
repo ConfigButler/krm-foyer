@@ -2,8 +2,9 @@
 
 Installs [krm-foyer](../../README.md): one Deployment with one replica, a Service for the origin, a Service for metrics, the pod's service account, and
 a NetworkPolicy that admits traffic to krm-foyer's ports alone.
-With `sharedWatches.resources` set, it also creates the
-[shared-watch identity](../../docs/watches.md) and its grants.
+With `sharedWatches.resources` or `sharedWatches.namespacedResources` set, it also
+creates the [shared-watch identity](../../docs/watches.md) and its grants: a ClusterRole
+for the first, a Role in each named namespace for the second.
 
 ```bash
 kubectl create namespace krm-foyer

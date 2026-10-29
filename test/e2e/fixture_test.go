@@ -56,6 +56,9 @@ type fixture struct {
 	// sharedAccount is the identity shared watches are opened with: narrow, and not
 	// the bait.
 	sharedAccount string
+	// sharedNamespace is the one namespace RoleBindings are shared in, and the only
+	// one the shared identity may read them in.
+	sharedNamespace string
 	// briefTransport reaches the brief krm-foyer, whose sessions end within a minute,
 	// instead of the main one.
 	briefTransport http.RoundTripper
@@ -177,6 +180,7 @@ func loadFixture() *fixture {
 		foyerNamespace:  env["FOYER_NAMESPACE"],
 		foyerAccount:    env["FOYER_SERVICE_ACCOUNT"],
 		sharedAccount:   env["FOYER_SHARED_ACCOUNT"],
+		sharedNamespace: env["FOYER_SHARED_NAMESPACE"],
 		briefTransport:  transportTo(env["FOYER_BRIEF_ADDR"]),
 		// The front door: Traefik, through the port-forward on this container's
 		// loopback (port-forward.sh), under the same name as krm-foyer, as a browser

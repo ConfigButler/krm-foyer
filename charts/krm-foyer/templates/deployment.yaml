@@ -1,6 +1,6 @@
 {{- $tls := ne .Values.tls.secretName "" }}
 {{- $scheme := ternary "https" "http" $tls }}
-{{- $shared := gt (len .Values.sharedWatches.resources) 0 }}
+{{- $shared := or .Values.sharedWatches.resources .Values.sharedWatches.namespacedResources }}
 {{- $login := include "krm-foyer.login" . }}
 apiVersion: apps/v1
 kind: Deployment
@@ -88,7 +88,18 @@ spec:
             {{- . | trim | nindent 12 }}
             {{- end }}
             {{- if $shared }}
-            - {{ printf "-shared-watch-resources=%s" (join "," .Values.sharedWatches.resources) | quote }}
+            {{- with .Values.sharedWatches.resources }}
+            - {{ printf "-shared-watch-resources=%s" (join "," .) | quote }}
+            {{- end }}
+            {{- with .Values.sharedWatches.namespacedResources }}
+            {{- $pairs := list }}
+            {{- range $namespace, $resources := . }}
+            {{- range $resources }}
+            {{- $pairs = append $pairs (printf "%s/%s" $namespace .) }}
+            {{- end }}
+            {{- end }}
+            - {{ printf "-shared-watch-namespaced-resources=%s" (join "," $pairs) | quote }}
+            {{- end }}
             - -shared-watch-token-file=/etc/krm-foyer/shared-watch/token
             {{- with include "krm-foyer.flags" (list .Values.sharedWatches.tuning (list
                 (list "recheckInterval" "shared-watch-recheck-interval")

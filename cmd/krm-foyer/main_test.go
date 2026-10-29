@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,6 +104,21 @@ func TestParseConfigSharedWatches(t *testing.T) {
 		sh.RecheckInterval != 30*time.Second || sh.DecisionTTL != 10*time.Second || sh.QPS != 100 {
 		t.Fatalf("%+v", sh)
 	}
+
+	// Namespaced alone is enough, and gathers a resource's namespaces.
+	cfg, err = parseConfig(append(loginArgs, "-shared-watch-namespaced-resources",
+		"voter/rolebindings.rbac.authorization.k8s.io,team/rolebindings.rbac.authorization.k8s.io",
+		"-shared-watch-token-file", "/token"), secret, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sh = cfg.login.shared
+	if sh == nil || len(sh.Resources) != 0 || len(sh.NamespacedResources) != 1 ||
+		sh.NamespacedResources[0].Group != "rbac.authorization.k8s.io" || sh.NamespacedResources[0].Resource != "rolebindings" ||
+		sh.NamespacedResources[0].AllowAllNamespaces ||
+		!slices.Equal(sh.NamespacedResources[0].Namespaces, []string{"voter", "team"}) {
+		t.Fatalf("%+v", sh)
+	}
 }
 
 // Sign-in and the proxy come together or not at all, and nothing half-configured
@@ -160,7 +176,12 @@ func TestParseConfigRefuses(t *testing.T) {
 		"shared without token":       {append(loginArgs, "-shared-watch-resources", "configmaps"), secret, "go together"},
 		"shared token alone":         {append(loginArgs, "-shared-watch-token-file", "/token"), secret, "go together"},
 		"shared resource bad":        {append(loginArgs, "-shared-watch-resources", "apps/deployments", "-shared-watch-token-file", "/token"), secret, "-shared-watch-resources"},
-		"shared names none":          {append(loginArgs, "-shared-watch-resources", ",", "-shared-watch-token-file", "/token"), secret, "names no resource"},
+		"shared names none":          {append(loginArgs, "-shared-watch-resources", ",", "-shared-watch-token-file", "/token"), secret, "name no resource"},
+		"namespaced without token":   {append(loginArgs, "-shared-watch-namespaced-resources", "voter/configmaps"), secret, "go together"},
+		"namespaced bad":             {append(loginArgs, "-shared-watch-namespaced-resources", "configmaps", "-shared-watch-token-file", "/token"), secret, "-shared-watch-namespaced-resources"},
+		"shared both ways": {append(loginArgs, "-shared-watch-resources", "configmaps", "-shared-watch-namespaced-resources", "voter/configmaps",
+			"-shared-watch-token-file", "/token"), secret, "name it once"},
+		"namespaced without login": {[]string{"-shared-watch-namespaced-resources", "voter/configmaps"}, nil, "need the sign-in flags"},
 		"decisions outlive check": {append(loginArgs, "-shared-watch-resources", "configmaps", "-shared-watch-token-file", "/token",
 			"-shared-watch-decision-ttl", "1m"), secret, "-shared-watch-decision-ttl"},
 		"no stream write timeout": {append(loginArgs, "-stream-write-timeout", "0s"), secret, "-stream-write-timeout"},

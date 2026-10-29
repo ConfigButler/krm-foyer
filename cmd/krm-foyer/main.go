@@ -92,6 +92,7 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 		perSecond                      float64
 		maxBytes                       int64
 		sharedResources, sharedToken   string
+		sharedNamespaced               string
 		recheck, decisionTTL           time.Duration
 		streamWrites                   time.Duration
 		sharedQPS                      float64
@@ -137,6 +138,10 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	fs.StringVar(&sharedResources, "shared-watch-resources", "",
 		"resources whose streams share one watch per scope, as kubectl names them, comma-separated "+
 			"(notes.hello.krm-foyer.example,configmaps); needs -shared-watch-token-file. See docs/watches.md")
+	fs.StringVar(&sharedNamespaced, "shared-watch-namespaced-resources", "",
+		"resources shared in some namespaces only, as namespace/resource, comma-separated "+
+			"(voter/rolebindings.rbac.authorization.k8s.io); in any other namespace a stream is the user's own. "+
+			"Needs -shared-watch-token-file. See docs/watches.md")
 	fs.StringVar(&sharedToken, "shared-watch-token-file", "",
 		"the token of the identity shared watches are opened with: a service account that may list and watch "+
 			"the shared resources and create subjectaccessreviews, and nothing else")
@@ -171,7 +176,7 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	}
 	switch {
 	case len(missing) == len(required):
-		if issuerCAFile != "" || apiServerCA != "" || loginFile != "" || sharedResources != "" || sharedToken != "" {
+		if issuerCAFile != "" || apiServerCA != "" || loginFile != "" || sharedResources != "" || sharedNamespaced != "" || sharedToken != "" {
 			return config{}, errors.New("-oidc-ca-file, -kubernetes-ca-file, -login-config-file and the -shared-watch flags need the sign-in flags too")
 		}
 		return cfg, nil // no sign-in and no API proxy: the start page and probes only
@@ -279,16 +284,27 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 	}
 
 	// Shared watches, for the resources named: off unless both flags are given.
-	if (sharedResources == "") != (sharedToken == "") {
-		return config{}, errors.New("-shared-watch-resources and -shared-watch-token-file go together")
+	if (sharedResources == "" && sharedNamespaced == "") != (sharedToken == "") {
+		return config{}, errors.New("-shared-watch-resources or -shared-watch-namespaced-resources, and -shared-watch-token-file, go together")
 	}
-	if sharedResources != "" {
+	if sharedToken != "" {
 		resources, err := stream.ParseResources(sharedResources)
 		if err != nil {
 			return config{}, fmt.Errorf("-shared-watch-resources: %w", err)
 		}
-		if len(resources) == 0 {
-			return config{}, errors.New("-shared-watch-resources names no resource")
+		namespaced, err := stream.ParseNamespacedResources(sharedNamespaced)
+		if err != nil {
+			return config{}, fmt.Errorf("-shared-watch-namespaced-resources: %w", err)
+		}
+		if len(resources)+len(namespaced) == 0 {
+			return config{}, errors.New("the -shared-watch flags name no resource")
+		}
+		for _, nr := range namespaced {
+			for _, gr := range resources {
+				if gr.Group == nr.Group && gr.Resource == nr.Resource {
+					return config{}, fmt.Errorf("%s is in -shared-watch-resources and -shared-watch-namespaced-resources: name it once", nr.Resource)
+				}
+			}
 		}
 		if sharedQPS <= 0 {
 			return config{}, fmt.Errorf("-shared-watch-qps must be positive, got %v", sharedQPS)
@@ -297,7 +313,7 @@ func parseConfig(args []string, readFile func(string) ([]byte, error), output io
 			return config{}, fmt.Errorf("-shared-watch-recheck-interval and -shared-watch-decision-ttl must be positive, "+
 				"the lifetime no longer than the interval; got %v and %v", recheck, decisionTTL)
 		}
-		login.shared = &stream.SharedConfig{TokenFile: sharedToken, Resources: resources,
+		login.shared = &stream.SharedConfig{TokenFile: sharedToken, Resources: resources, NamespacedResources: namespaced,
 			RecheckInterval: recheck, DecisionTTL: decisionTTL, QPS: float32(sharedQPS)}
 	}
 	cfg.login = login

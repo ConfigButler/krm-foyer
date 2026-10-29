@@ -177,6 +177,21 @@
             "description": "A resource as kubectl names it: plural, then the group if it has one."
           }
         },
+        "namespacedResources": {
+          "type": "object",
+          "description": "Resources shared in the namespace each key names, and nowhere else.",
+          "propertyNames": { "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63 },
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]+(\\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$",
+              "description": "A resource as kubectl names it: plural, then the group if it has one."
+            }
+          }
+        },
         "serviceAccount": {
           "type": "object",
           "additionalProperties": false,

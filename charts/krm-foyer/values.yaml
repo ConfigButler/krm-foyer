@@ -92,10 +92,16 @@ bounds: {}
 # them: notes.hello.krm-foyer.example, configmaps. Empty opens every watch as its user.
 sharedWatches:
   resources: []
+  # Resources shared in some namespaces only, by namespace: {voter:
+  # [rolebindings.rbac.authorization.k8s.io]}. The identity may list and watch them in
+  # those namespaces alone (a Role in each, not a ClusterRole), and a stream of one
+  # anywhere else is opened as its user. For what the identity must not read
+  # cluster-wide, such as RBAC.
+  namespacedResources: {}
   # The identity shared watches are opened with. Created, it may list and watch the
-  # resources above and create subjectaccessreviews, and nothing else; its token is a
-  # Secret named <name>-token. Not created, the account named, and a token Secret named
-  # <name>-token, must already exist.
+  # resources above, each where it is shared, and create subjectaccessreviews, and
+  # nothing else; its token is a Secret named <name>-token. Not created, the account
+  # named, and a token Secret named <name>-token, must already exist.
   serviceAccount:
     create: true
     # Empty is <fullname>-shared.

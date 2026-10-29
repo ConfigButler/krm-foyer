@@ -132,12 +132,39 @@ Shared watches are off until two flags are given:
 Resources are named as kubectl names them: `resource.group`, or `resource` for the core
 group. Every other resource is streamed per-user, as before.
 
+### Shared in some namespaces only
+
+Some resources the identity must not read cluster-wide. RoleBindings are the example:
+an application can watch the grants in its own namespace to learn when to ask "what may
+I do?" again, but a ClusterRole for them would let the shared identity read every grant
+in the cluster. Name those with the namespaces they are shared in:
+
+```text
+-shared-watch-namespaced-resources=voter/rolebindings.rbac.authorization.k8s.io
+```
+
+A stream of such a resource in a named namespace reads the shared watch, checked per
+user exactly as below. In any other namespace, and across every namespace at once, it
+is the user's own stream, opened with their token: krm-foyer never sends it to the
+shared identity, which has no grant there. A resource is named in one flag or the
+other, not both. With the chart:
+
+```yaml
+sharedWatches:
+  namespacedResources:
+    voter: [rolebindings.rbac.authorization.k8s.io]
+```
+
+The chart grants these with a Role and RoleBinding in each namespace, never a
+ClusterRole.
+
 ### The identity
 
 The token file holds a service account's token. That account needs:
 
-- `list` and `watch` on each shared resource, wherever users will watch it: usually a
-  ClusterRole bound with a ClusterRoleBinding;
+- `list` and `watch` on each shared resource, wherever users will watch it: a
+  ClusterRole bound with a ClusterRoleBinding, or for a namespaced resource a Role and
+  RoleBinding in each of its namespaces;
 - `create` on `subjectaccessreviews` in `authorization.k8s.io`;
 - nothing else.
 
@@ -271,7 +298,10 @@ wait for. One could watch RBAC's Roles and Bindings and recheck when they change
   also have no RBAC event, but require fresh identity resolution and a new token;
   repeating a SubjectAccessReview alone does not pick them up.
 - **The shared-watch identity would read every Role and Binding** in the cluster: the
-  whole access policy, a broader grant than it has now.
+  whole access policy, a broader grant than it has now. A host that needs RBAC events
+  for one namespace can share RoleBindings there alone (see
+  [Shared in some namespaces only](#shared-in-some-namespaces-only)); krm-foyer itself
+  does not watch them.
 - **krm-stream rechecks on its own timer,** per stream; a host cannot ask it to
   recheck now.
 
