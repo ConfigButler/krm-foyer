@@ -62,6 +62,13 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: krm-foyer
+---
+# Where RoleBindings are shared (foyer-values.yaml): the chart puts the shared
+# identity's Role here, so it must exist first.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: foyer-shared
 EOF
 # A fixture from before the chart has the same objects, applied with kubectl, which Helm
 # refuses to take over. Remove them once.
@@ -120,5 +127,6 @@ FOYER_NAMESPACE=krm-foyer
 FOYER_IMAGE=$tag
 FOYER_SERVICE_ACCOUNT=system:serviceaccount:krm-foyer:krm-foyer
 FOYER_SHARED_ACCOUNT=system:serviceaccount:krm-foyer:krm-foyer-shared
+FOYER_SHARED_NAMESPACE=foyer-shared
 EOF
 echo "krm-foyer ready at $FOYER_URL ($server_ip:$NODE_PORT)"

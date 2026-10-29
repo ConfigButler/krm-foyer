@@ -4,7 +4,11 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -145,6 +149,103 @@ var _ = Describe("krm-foyer's shared watches", Label("foyer"), func() {
 		Expect(fx.metric(sharedWatches)).To(Equal(before + 1))
 	})
 
+	// RoleBindings are shared in one namespace alone (foyer-values.yaml), with a Role
+	// there: a ClusterRole for them would let the identity read every grant in the
+	// cluster. What must hold is that nothing of another namespace comes out: not
+	// through the shared watch, which may not read it, and not by the shared identity
+	// asking on anyone's behalf. Elsewhere a stream is the user's own, and the API
+	// server answers it as the user.
+	It("shares a namespaced resource in its namespace alone, and shows nothing of any other", func(ctx SpecContext) {
+		shared, other := fx.sharedNamespace, fx.namespace()
+		id := randomID()
+		visible, secret := "e2e-visible-"+id, "e2e-secret-"+id
+		fx.kubectl("-n", shared, "create", "rolebinding", visible, "--clusterrole=view", "--user=nobody-"+id)
+		DeferCleanup(func() { fx.kubectl("-n", shared, "delete", "rolebinding", visible, "--ignore-not-found") })
+		fx.kubectl("-n", other, "create", "rolebinding", secret, "--clusterrole=view", "--user=nobody-"+id)
+		DeferCleanup(fx.grant(shared, aliceK8sName, "rolebindings.rbac.authorization.k8s.io", "get", "list", "watch"))
+		fx.grant(other, bobK8sName, "rolebindings.rbac.authorization.k8s.io", "get", "list", "watch") // not alice
+		alice, bob := signIn(ctx, alice), signIn(ctx, bob)
+		beforeShared, beforeUser := fx.metric(sharedWatches), fx.metric(userWatches)
+
+		By("the shared namespace: served from the shared watch, with that namespace's grants alone")
+		inShared := alice.open(ctx, roleBindingStream(shared))
+		Expect(inShared.resp.StatusCode).To(Equal(http.StatusOK))
+		names := map[string]bool{}
+		for _, e := range inShared.until("synced") {
+			names[e.Object.Metadata.Name] = true
+		}
+		Expect(names).To(HaveKey(visible))
+		Expect(names).NotTo(HaveKey(secret))
+		Expect(fx.metric(sharedWatches)).To(Equal(beforeShared + 1))
+		Expect(fx.metric(userWatches)).To(Equal(beforeUser))
+
+		By("another namespace, which alice may not read: refused as alice, with nothing of it")
+		elsewhere := alice.open(ctx, roleBindingStream(other))
+		e := elsewhere.krmEvent()
+		Expect(e.Type).To(Equal("error"))
+		Expect(e.Code).To(Equal("FORBIDDEN"))
+		Expect(e.Terminal).To(BeTrue())
+		_, err := elsewhere.end(10 * time.Second)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(elsewhere.read.String()).NotTo(ContainSubstring(secret))
+		Expect(elsewhere.read.String()).NotTo(ContainSubstring(fx.sharedAccount))
+		expectAskedOnlyAs(ctx, elsewhere, aliceK8sName, "/apis/rbac.authorization.k8s.io/v1/namespaces/"+other+"/rolebindings")
+
+		By("every namespace at once: refused as alice, with nothing of any namespace")
+		everywhere := alice.open(ctx, roleBindingStream(""))
+		e = everywhere.krmEvent()
+		Expect(e.Type).To(Equal("error"))
+		Expect(e.Code).To(Equal("FORBIDDEN"))
+		Expect(e.Terminal).To(BeTrue())
+		_, err = everywhere.end(10 * time.Second)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(everywhere.read.String()).NotTo(ContainSubstring(secret))
+		Expect(everywhere.read.String()).NotTo(ContainSubstring(visible))
+		expectAskedOnlyAs(ctx, everywhere, aliceK8sName, "/apis/rbac.authorization.k8s.io/v1/rolebindings")
+
+		By("another namespace, which bob may read: his own watch, with that namespace's grants alone")
+		bobs := bob.open(ctx, roleBindingStream(other))
+		names = map[string]bool{}
+		for _, e := range bobs.until("synced") {
+			names[e.Object.Metadata.Name] = true
+		}
+		Expect(names).To(HaveKey(secret))
+		Expect(names).NotTo(HaveKey(visible))
+		Expect(fx.metric(sharedWatches)).To(Equal(beforeShared+1), "bob's stream must not open a shared watch")
+		Expect(fx.metric(userWatches)).To(Equal(beforeUser + 1))
+		_ = bobs.resp.Body.Close()
+		_, _ = bobs.end(10 * time.Second)
+		expectAskedOnlyAs(ctx, bobs, bobK8sName, "/apis/rbac.authorization.k8s.io/v1/namespaces/"+other+"/rolebindings")
+
+		By("the API server: the shared identity may not read RoleBindings outside its namespace")
+		for _, ns := range []string{other, ""} {
+			for _, verb := range []string{"list", "watch"} {
+				Expect(fx.accessReview(fx.sharedAccount, verb, "rbac.authorization.k8s.io", "rolebindings", ns)).
+					To(BeFalse(), "%s may %s rolebindings in %q", fx.sharedAccount, verb, ns)
+			}
+		}
+		Expect(fx.accessReview(fx.sharedAccount, "watch", "rbac.authorization.k8s.io", "rolebindings", shared)).To(BeTrue())
+
+		By("the audit log: the shared identity read RoleBindings in the shared namespace, and nowhere else")
+		_ = inShared.resp.Body.Close()
+		_, _ = inShared.end(10 * time.Second)
+		eventually(ctx, func() float64 { return fx.metric(sharedWatches) }).Should(Equal(beforeShared))
+		var reads []auditEvent
+		eventually(ctx, func() []auditEvent {
+			reads = nil
+			for _, ev := range fx.audited(fx.sharedAccount) {
+				if ev.User.Username == fx.sharedAccount && strings.Contains(ev.RequestURI, "/rolebindings") {
+					reads = append(reads, ev)
+				}
+			}
+			return reads
+		}).ShouldNot(BeEmpty())
+		for _, ev := range reads {
+			Expect(ev.RequestURI).To(HavePrefix("/apis/rbac.authorization.k8s.io/v1/namespaces/"+shared+"/rolebindings"),
+				"the shared identity sent %s %s", ev.Verb, ev.RequestURI)
+		}
+	})
+
 	It("ends a user's shared stream at the next recheck once RBAC no longer allows it, and only theirs", func(ctx SpecContext) {
 		ns := fx.namespace()
 		fx.grant(ns, aliceK8sName, "notes.hello.krm-foyer.example", "get", "list", "watch")
@@ -182,3 +283,45 @@ var _ = Describe("krm-foyer's shared watches", Label("foyer"), func() {
 		Expect(changed[len(changed)-1].Object.Spec).To(HaveKeyWithValue("text", "after bob's grant"))
 	})
 })
+
+// roleBindingStream is the /stream/v1 target for the RoleBindings of namespace ns, or
+// of every namespace when ns is empty. They are shared in fx.sharedNamespace alone.
+func roleBindingStream(ns string) string {
+	q := url.Values{"group": {"rbac.authorization.k8s.io"}, "version": {"v1"}, "resource": {"rolebindings"}}
+	if ns != "" {
+		q.Set("namespace", ns)
+	}
+	return fx.foyerURL + "/stream/v1?" + q.Encode()
+}
+
+// expectAskedOnlyAs checks, in the audit log, that every request s led to was sent as
+// username, impersonating nobody, and that one of them was for a path under prefix:
+// the stream was the user's own, and the shared identity was never asked.
+func expectAskedOnlyAs(ctx SpecContext, s *stream, username, prefix string) {
+	GinkgoHelper()
+	var events []auditEvent
+	eventually(ctx, func() []auditEvent { events = fx.audited(s.Marker); return events }).ShouldNot(BeEmpty())
+	asked := false
+	for _, ev := range events {
+		Expect(ev.User.Username).To(Equal(username), "%s %s", ev.Verb, ev.RequestURI)
+		Expect(ev.ImpersonatedUser).To(BeNil())
+		asked = asked || strings.HasPrefix(ev.RequestURI, prefix)
+	}
+	Expect(asked).To(BeTrue(), "no request under %s in %+v", prefix, events)
+}
+
+// accessReview asks the API server, as the fixture's admin, whether a service account
+// may verb resource in ns, or in every namespace when ns is empty. A review names its
+// groups itself, so the account's are given as the API server would resolve them.
+func (f *fixture) accessReview(account, verb, group, resource, ns string) bool {
+	GinkgoHelper()
+	parts := strings.Split(account, ":") // system:serviceaccount:<namespace>:<name>
+	Expect(parts).To(HaveLen(4))
+	review := fmt.Sprintf(`{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","spec":{`+
+		`"user":%q,"groups":["system:serviceaccounts","system:serviceaccounts:%s","system:authenticated"],`+
+		`"resourceAttributes":{"verb":%q,"group":%q,"resource":%q,"namespace":%q}}}`,
+		account, parts[2], verb, group, resource, ns)
+	file := filepath.Join(GinkgoT().TempDir(), "review.json")
+	Expect(os.WriteFile(file, []byte(review), 0o600)).To(Succeed())
+	return f.kubectl("create", "-f", file, "-o", "jsonpath={.status.allowed}") == "true"
+}
