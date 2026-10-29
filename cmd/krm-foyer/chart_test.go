@@ -70,6 +70,7 @@ type rendered struct {
 	secrets         []corev1.Secret
 	services        []corev1.Service
 	clusterRoles    []rbacv1.ClusterRole
+	roles           []rbacv1.Role
 	bindings        []rbacv1.ClusterRoleBinding
 	roleBindings    []rbacv1.RoleBinding
 	networkPolicies []networkingv1.NetworkPolicy
@@ -104,6 +105,8 @@ func render(t *testing.T, valueFiles []string, set ...string) rendered {
 			target = appendNew(&r.services)
 		case "ClusterRole":
 			target = appendNew(&r.clusterRoles)
+		case "Role":
+			target = appendNew(&r.roles)
 		case "ClusterRoleBinding":
 			target = appendNew(&r.bindings)
 		case "RoleBinding":
@@ -314,6 +317,9 @@ func TestChartRefusesValues(t *testing.T) {
 		"a bound of zero":                 {[]string{"bounds.maxStreams=0"}, "/bounds/maxStreams"},
 		"a resource with a wildcard":      {[]string{"sharedWatches.resources={*}"}, "/sharedWatches/resources/0"},
 		"a resource with a subresource":   {[]string{"sharedWatches.resources={pods/log}"}, "/sharedWatches/resources/0"},
+		"a namespace that is no label":    {[]string{"sharedWatches.namespacedResources.Voter={configmaps}"}, "invalid propertyName 'Voter'"},
+		"a namespace with no resource":    {[]string{"sharedWatches.namespacedResources.voter=null"}, "/sharedWatches/namespacedResources/voter"},
+		"a namespaced subresource":        {[]string{"sharedWatches.namespacedResources.voter={pods/log}"}, "/sharedWatches/namespacedResources/voter/0"},
 		"two replicas":                    {[]string{"replicaCount=2"}, "replicaCount"},
 		"plain HTTP open to anyone":       {[]string{"networkPolicy.from=null"}, "networkPolicy.from must name the ingress"},
 		"an account named by no one":      {[]string{"serviceAccount.create=false"}, "/serviceAccount"},
@@ -354,6 +360,8 @@ func TestChartGivesThePodsAccountNothing(t *testing.T) {
 	}{
 		"defaults":       {nil, ""},
 		"shared watches": {[]string{"sharedWatches.resources={notes.hello.krm-foyer.example,configmaps}"}, "krm-foyer-shared-token"},
+		"namespaced shared watches": {[]string{"sharedWatches.resources=null",
+			"sharedWatches.namespacedResources.voter={rolebindings.rbac.authorization.k8s.io}"}, "krm-foyer-shared-token"},
 		"an account it brings": {[]string{"serviceAccount.create=false", "serviceAccount.name=app",
 			"sharedWatches.resources={configmaps}"}, "krm-foyer-shared-token"},
 		"a shared account it brings": {[]string{"sharedWatches.resources={configmaps}",
@@ -393,13 +401,17 @@ func TestChartGivesThePodsAccountNothing(t *testing.T) {
 					t.Fatalf("Secret %s holds the pod's own token", s.Name)
 				}
 			}
-			if len(r.roleBindings) > 0 {
-				t.Fatal("the chart binds a Role; check it does not grant the pod's account anything, then allow it here")
-			}
 			for _, b := range r.bindings {
 				for _, s := range b.Subjects {
 					if s.Name == account {
 						t.Fatalf("%s binds the pod's account to %s", b.Name, b.RoleRef.Name)
+					}
+				}
+			}
+			for _, b := range r.roleBindings {
+				for _, s := range b.Subjects {
+					if s.Name == account {
+						t.Fatalf("%s in %s binds the pod's account to %s", b.Name, b.Namespace, b.RoleRef.Name)
 					}
 				}
 			}
@@ -445,6 +457,79 @@ func TestChartGrantsTheSharedIdentityOnlyWhatItNeeds(t *testing.T) {
 	}
 	if len(roles) != 2 || !roles[r.clusterRoles[0].Name] || !roles[r.clusterRoles[1].Name] {
 		t.Fatalf("the shared identity is bound to %v", roles)
+	}
+}
+
+// A resource shared in some namespaces is granted there alone: a Role and a
+// RoleBinding in each, and no ClusterRole that lets the identity list or watch it
+// anywhere else. RoleBindings are why this exists: a ClusterRole for them would let
+// the identity read every grant in the cluster. krm-foyer is told the same
+// namespaces, so it sends no stream elsewhere to the identity.
+func TestChartGrantsANamespacedResourceInItsNamespacesAlone(t *testing.T) {
+	r := render(t, nil, "sharedWatches.resources={configmaps}",
+		"sharedWatches.namespacedResources.voter={rolebindings.rbac.authorization.k8s.io}",
+		"sharedWatches.namespacedResources.team={rolebindings.rbac.authorization.k8s.io,notes.hello.krm-foyer.example}")
+	for _, cr := range r.clusterRoles {
+		for _, rule := range cr.Rules {
+			if slices.Contains(rule.Resources, "rolebindings") || slices.Contains(rule.Resources, "notes") {
+				t.Fatalf("ClusterRole %s grants %+v cluster-wide", cr.Name, rule)
+			}
+		}
+	}
+	want := map[string][]rbacv1.PolicyRule{
+		"team": {
+			{APIGroups: []string{"rbac.authorization.k8s.io"}, Resources: []string{"rolebindings"}, Verbs: []string{"list", "watch"}},
+			{APIGroups: []string{"hello.krm-foyer.example"}, Resources: []string{"notes"}, Verbs: []string{"list", "watch"}},
+		},
+		"voter": {
+			{APIGroups: []string{"rbac.authorization.k8s.io"}, Resources: []string{"rolebindings"}, Verbs: []string{"list", "watch"}},
+		},
+	}
+	if len(r.roles) != len(want) {
+		t.Fatalf("%d Roles, want %d", len(r.roles), len(want))
+	}
+	for _, role := range r.roles {
+		rules, ok := want[role.Namespace]
+		if !ok || len(role.Rules) != len(rules) {
+			t.Fatalf("Role %s in %q has %+v", role.Name, role.Namespace, role.Rules)
+		}
+		for i := range rules {
+			got := role.Rules[i]
+			if !slices.Equal(got.APIGroups, rules[i].APIGroups) || !slices.Equal(got.Resources, rules[i].Resources) ||
+				!slices.Equal(got.Verbs, rules[i].Verbs) || len(got.ResourceNames) > 0 || len(got.NonResourceURLs) > 0 {
+				t.Fatalf("Role in %s, rule %d is %+v, want %+v", role.Namespace, i, got, rules[i])
+			}
+		}
+	}
+	bound := map[string]bool{}
+	for _, b := range r.roleBindings {
+		if len(b.Subjects) != 1 || b.Subjects[0].Name != "krm-foyer-shared" || b.Subjects[0].Namespace != "krm-foyer" ||
+			b.RoleRef.Kind != "Role" || b.RoleRef.Name != "krm-foyer-shared-watches" {
+			t.Fatalf("RoleBinding %s in %s binds %+v to %+v", b.Name, b.Namespace, b.Subjects, b.RoleRef)
+		}
+		bound[b.Namespace] = true
+	}
+	if !bound["voter"] || !bound["team"] || len(bound) != 2 {
+		t.Fatalf("RoleBindings in %v", bound)
+	}
+
+	sh := parseRendered(t, r).login.shared
+	if len(sh.Resources) != 1 || len(sh.NamespacedResources) != 2 {
+		t.Fatalf("shared %+v", sh)
+	}
+	namespaces := map[string][]string{}
+	for _, nr := range sh.NamespacedResources {
+		namespaces[nr.Resource] = nr.Namespaces
+	}
+	if !slices.Equal(namespaces["rolebindings"], []string{"team", "voter"}) || !slices.Equal(namespaces["notes"], []string{"team"}) {
+		t.Fatalf("krm-foyer is told %v", namespaces)
+	}
+
+	// Without a cluster-wide resource there is no cluster-wide watch grant at all.
+	only := render(t, nil, "sharedWatches.resources=null",
+		"sharedWatches.namespacedResources.voter={rolebindings.rbac.authorization.k8s.io}")
+	if len(only.clusterRoles) != 1 || only.clusterRoles[0].Name != "krm-foyer-shared-subject-access-reviews" {
+		t.Fatalf("ClusterRoles %+v, want the reviews one alone", only.clusterRoles)
 	}
 }
 

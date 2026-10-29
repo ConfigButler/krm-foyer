@@ -18,6 +18,7 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -43,6 +44,10 @@ type SharedConfig struct {
 	// Resources are the resources whose streams share watches. Any other resource
 	// is streamed with the user's own token, as without sharing.
 	Resources []gateway.GroupResource
+	// NamespacedResources are shared in the namespaces named for them alone, for an
+	// identity granted them there and nowhere else. A stream of one in any other
+	// namespace, or in every namespace, is the user's own, as without sharing.
+	NamespacedResources []NamespacedResource
 	// RecheckInterval is how often an open shared stream is authorized again. Zero
 	// means DefaultRecheckInterval.
 	RecheckInterval time.Duration
@@ -102,17 +107,86 @@ func sharedResource(group, resource string) gateway.GroupResource {
 	return gateway.GroupResource{Group: group, Resource: resource, Scope: gateway.ResourceScopeNamespaced, AllowAllNamespaces: true}
 }
 
+// NamespacedResource is a resource shared in some namespaces only: RoleBindings in
+// the one namespace an application's grants live in, say, where a ClusterRole
+// would let the shared identity read every RoleBinding in the cluster.
+type NamespacedResource struct {
+	gateway.GroupResource
+	Namespaces []string
+}
+
+// ParseNamespacedResources reads namespace/resource pairs, comma-separated, the
+// resource as kubectl writes it: voter/rolebindings.rbac.authorization.k8s.io. The
+// namespaces of one resource are gathered, so it is listed once.
+func ParseNamespacedResources(list string) ([]NamespacedResource, error) {
+	var out []NamespacedResource
+	at := map[gateway.GroupResource]int{}
+	for _, item := range strings.Split(list, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		namespace, name, ok := strings.Cut(item, "/")
+		if !ok || len(validation.IsDNS1123Label(namespace)) > 0 {
+			return nil, fmt.Errorf("%q is not a namespace and a resource, such as voter/rolebindings.rbac.authorization.k8s.io", item)
+		}
+		parsed, err := ParseResources(name)
+		if err != nil {
+			return nil, err
+		}
+		if len(parsed) != 1 {
+			return nil, fmt.Errorf("%q names no resource", item)
+		}
+		// Never in every namespace: the identity is granted these namespaces alone.
+		gr := parsed[0]
+		gr.AllowAllNamespaces = false
+		i, seen := at[gr]
+		if !seen {
+			i = len(out)
+			at[gr] = i
+			out = append(out, NamespacedResource{GroupResource: gr})
+		}
+		if !slices.Contains(out[i].Namespaces, namespace) {
+			out[i].Namespaces = append(out[i].Namespaces, namespace)
+		}
+	}
+	return out, nil
+}
+
 // shared is what shared streams need, made once for the life of the process.
 type shared struct {
 	backend   *gateway.SharedBackend
 	resources []gateway.GroupResource
+	// confined holds the namespaces a namespaced resource is shared in; a resource
+	// without an entry is shared in every namespace.
+	confined  map[gateway.GroupResource][]string
 	authorize gateway.Authorizer
 	interval  time.Duration
 }
 
 func newShared(cfg SharedConfig, s *Streams) (*shared, error) {
-	if cfg.TokenFile == "" || len(cfg.Resources) == 0 {
+	if cfg.TokenFile == "" || len(cfg.Resources)+len(cfg.NamespacedResources) == 0 {
 		return nil, errors.New("shared watches need a token file and at least one resource")
+	}
+	resources := slices.Clone(cfg.Resources)
+	confined := map[gateway.GroupResource][]string{}
+	for _, nr := range cfg.NamespacedResources {
+		// Shared everywhere and in some namespaces is a contradiction, and the wider
+		// reading would serve namespaces the identity was never meant to cover.
+		if slices.ContainsFunc(cfg.Resources, func(gr gateway.GroupResource) bool {
+			return gr.Group == nr.Group && gr.Resource == nr.Resource
+		}) {
+			return nil, fmt.Errorf("%s is shared in every namespace and in some: name it once", nr.Resource)
+		}
+		if len(nr.Namespaces) == 0 {
+			return nil, fmt.Errorf("%s is shared in no namespace", nr.Resource)
+		}
+		// Never in every namespace, whatever the caller built: the identity is granted
+		// these namespaces alone.
+		gr := nr.GroupResource
+		gr.AllowAllNamespaces = false
+		resources = append(resources, gr)
+		confined[gr] = slices.Clone(nr.Namespaces)
 	}
 	interval, ttl := cfg.RecheckInterval, cfg.DecisionTTL
 	if interval == 0 {
@@ -170,7 +244,8 @@ func newShared(cfg SharedConfig, s *Streams) (*shared, error) {
 		backend: gateway.NewSharedBackend(upstream, gateway.SharedOptions{
 			Observer: observer{metrics: m},
 		}),
-		resources: slices.Clone(cfg.Resources),
+		resources: resources,
+		confined:  confined,
 		authorize: &decisions{
 			check: kube.SubjectAccessReviewAuthorizer(clientset, subjectOf),
 			ttl:   ttl, now: time.Now, metrics: m, entries: map[string]*decision{},
@@ -197,13 +272,19 @@ func (t sharedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return t.next.RoundTrip(r)
 }
 
-// serves reports whether streams of scope share a watch.
+// serves reports whether streams of scope share a watch. A namespaced resource's do
+// in its namespaces alone; elsewhere, and in every namespace at once, the stream is
+// the user's own, since the shared identity may not watch it there.
 func (sh *shared) serves(scope gateway.Scope) bool {
 	if sh == nil {
 		return false
 	}
 	return slices.ContainsFunc(sh.resources, func(gr gateway.GroupResource) bool {
-		return gr.Group == scope.Group && gr.Resource == scope.Resource
+		if gr.Group != scope.Group || gr.Resource != scope.Resource {
+			return false
+		}
+		namespaces, isConfined := sh.confined[gr]
+		return !isConfined || slices.Contains(namespaces, scope.Namespace)
 	})
 }
 

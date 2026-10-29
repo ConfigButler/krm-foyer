@@ -698,7 +698,11 @@ additional confidentiality boundary in krm-foyer.
 ### Shared watches
 
 Which resources use a shared watch is configuration for efficiency, not for access
-(`-shared-watch-resources`; [how to choose and set up](watches.md)). Every stream of one
+(`-shared-watch-resources`; [how to choose and set up](watches.md)). A resource may
+instead be shared in named namespaces alone (`-shared-watch-namespaced-resources`), for
+an identity granted it there and nowhere else: a stream of it in any other namespace,
+or in every namespace at once, is opened as its user, as for a resource not shared, and
+never reaches the shared identity. Every stream of one
 scope of such a resource reads from one watch at the API server, opened with a narrowly
 scoped identity given by token file, never implicitly the pod's service account. That
 identity reads more than any one user, so the API server is asked about each user:
