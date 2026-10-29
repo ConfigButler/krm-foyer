@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/ConfigButler/krm-foyer/compare/v0.3.0...v0.4.0) (2026-10-29)
+
+
+### Features
+
+* share a resource in named namespaces alone ([#47](https://github.com/ConfigButler/krm-foyer/issues/47)) ([79f188e](https://github.com/ConfigButler/krm-foyer/commit/79f188ebf47388079971487c21bb1fa37e8ec147))
+
 ## [0.3.0](https://github.com/ConfigButler/krm-foyer/compare/v0.2.0...v0.3.0) (2026-10-06)
 
 
